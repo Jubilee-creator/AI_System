@@ -162,10 +162,6 @@ def background_scan():
         try:
             if BRAIN_OK:
                 opportunities = scan_crypto_markets(bankroll=BANKROLL)
-                
-            elif LEGACY_OK:
-                # Fallback to legacy scanner
-            if BRAIN_OK:            
 
                 state["opportunities"] = opportunities
                 state["last_scan"] = now
