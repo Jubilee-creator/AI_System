@@ -218,6 +218,11 @@ def background_scan():
                     # Update paper stats
                     state["paper_stats"] = paper_trader.get_stats()
 
+                    # Reset per-scan position count — paper trades have no
+                    # settlement trigger so counts must not accumulate across scans
+                    paper_trader.risk_manager.open_positions = 0
+                    paper_trader.risk_manager.total_exposure = 0.0
+
                 # Fire alerts for high-confidence signals
                 for o in opportunities:
                     if o["confidence"] >= AUTO_BET_THRESHOLD and o["action"] != "PASS":

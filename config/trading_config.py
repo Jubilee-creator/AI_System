@@ -199,7 +199,7 @@ STRATEGY_LIMITS = {
         "enabled": True
     },
     "TREND": {
-        "max_position_size": 30.0,
+        "max_position_size": 50.0,  # raised from 30; Kelly on $500 bankroll sizes to ~$32-46
         "max_positions": 3,
         "min_edge": 0.05,  # Higher edge required
         "min_confidence": 0.70,  # Higher confidence required

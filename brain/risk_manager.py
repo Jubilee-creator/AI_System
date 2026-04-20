@@ -167,8 +167,8 @@ class RiskManager:
             self.daily_pnl = state.get("daily_pnl", 0.0)
             self.weekly_pnl = state.get("weekly_pnl", 0.0)
             self.trades_today = state.get("trades_today", 0)
-            self.open_positions = state.get("open_positions", 0)
-            self.total_exposure = state.get("total_exposure", 0.0)
+            # open_positions and total_exposure are session-transient;
+            # paper trades are never settled between restarts so these must start at 0
             self.loss_streak = state.get("loss_streak", 0)
             self.last_trade_result = state.get("last_trade_result")
             
@@ -205,8 +205,7 @@ class RiskManager:
             "daily_pnl": self.daily_pnl,
             "weekly_pnl": self.weekly_pnl,
             "trades_today": self.trades_today,
-            "open_positions": self.open_positions,
-            "total_exposure": self.total_exposure,
+            # open_positions and total_exposure intentionally excluded (session-transient)
             "loss_streak": self.loss_streak,
             "last_trade_result": self.last_trade_result,
             "last_reset_date": self.last_reset_date.isoformat(),
@@ -573,8 +572,8 @@ class RiskManager:
         
         # Save state
         self._save_state()
-        
-# Log if approaching loss limit (but haven't hit it yet)
+
+        # Log if approaching loss limit (but haven't hit it yet)
         # Warning threshold: 60% of absolute limit
         # Example: if limit is -50, warn at -30
         warning_threshold = DAILY_LOSS_LIMIT * 0.6
