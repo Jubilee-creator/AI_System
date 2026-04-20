@@ -32,8 +32,7 @@ except ImportError:
 # ─────────────────────────────────────────
 
 try:
-    from brain.market_scanner import scan_crypto_markets, fetch_crypto_markets, build_signal
-    from engine.decision_engine import analyze_market, compute_arb_edge
+    from brain.market_scanner import scan_crypto_markets
     BRAIN_OK = True
 except ImportError as e:
     print(f"[WARN] Brain modules not found: {e}")
