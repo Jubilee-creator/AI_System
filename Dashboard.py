@@ -209,7 +209,7 @@ def background_scan():
                         # Process signal through paper trader
                         estimated_prob = opp.get("confidence", 0.5)
                         if estimated_prob > 0:
-                            strategy_label = f"{reason_tag}_{event_type}"
+                            strategy_label = reason_tag  # ARB | SIGNAL | TREND
                             paper_trader.process_signal(
                                 market_data=market_data,
                                 estimated_prob=estimated_prob,
