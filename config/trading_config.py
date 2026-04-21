@@ -92,6 +92,17 @@ MIN_ARB_EDGE = 0.005  # 0.5¢ minimum for arb
 
 
 # ═══════════════════════════════════════════════════════════════
+# TEST MODE (Phase 4 validation — toggle back to False for production)
+# ═══════════════════════════════════════════════════════════════
+
+TEST_MODE = True  # Set False to restore production thresholds
+
+if TEST_MODE:
+    MIN_EDGE = 0.01        # relaxed from 0.03 — lets more signals through
+    MIN_CONFIDENCE = 0.60  # relaxed from 0.65
+
+
+# ═══════════════════════════════════════════════════════════════
 # TRADING HOURS (US Eastern Time)
 # ═══════════════════════════════════════════════════════════════
 
