@@ -385,11 +385,6 @@ class RiskManager:
                 loss_limit=DAILY_LOSS_LIMIT,
                 trades_today=self.trades_today
             )
-            
-            # Auto-activate kill switch on loss limit hit
-            if not self.kill_switch_active:
-                self.activate_kill_switch(reason="Daily loss limit reached")
-            
             return False, reason
         
         # ── CHECK 4: Weekly loss limit ──
