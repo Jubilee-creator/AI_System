@@ -489,9 +489,11 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("PAPER TRADER TEST (with Risk Manager)")
     print("="*60)
-    
+
     # Initialize
     trader = PaperTrader(bankroll=500.0)
+    # Redirect logger so self-test records don't pollute logs/paper_trades.jsonl
+    trader.logger = TradeLogger(log_file="/tmp/paper_trader_selftest.jsonl")
     trader.enable()
     
     # Create test market
