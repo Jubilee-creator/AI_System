@@ -218,6 +218,15 @@ STRATEGY_LIMITS = {
     }
 }
 
+if TEST_MODE:
+    # TREND used hardcoded literals so it didn't inherit the global TEST_MODE overrides above.
+    # Patch them here so all strategies are consistent during Phase 4 validation.
+    STRATEGY_LIMITS["TREND"]["min_confidence"] = MIN_CONFIDENCE  # 0.60
+    STRATEGY_LIMITS["TREND"]["min_edge"] = MIN_EDGE              # 0.01
+    STRATEGY_LIMITS["TREND"]["max_positions"] = 10
+    STRATEGY_LIMITS["SIGNAL"]["max_positions"] = 10
+    MAX_OPEN_POSITIONS = 10
+
 
 # ═══════════════════════════════════════════════════════════════
 # PAPER TRADING SPECIFIC
