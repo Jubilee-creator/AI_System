@@ -543,7 +543,7 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
     for ex in skip_examples["no_signal"]:
         print(f"[SCAN]     • {ex}")
     print(f"[SCAN]   Low volume (no ARB): {skip_reasons['low_volume']}")
-    print(f"[SCAN]   PASS (edge < {MIN_EDGE:.3f}): {skip_reasons['pass']}")
+    print(f"[SCAN]   PASS (engine rejected — low edge or low confidence): {skip_reasons['pass']}")
     for ex in skip_examples["pass"]:
         print(f"[SCAN]     • {ex}")
     print(f"[SCAN] ──────────────────────────────────────────────────────────────────")
@@ -556,7 +556,7 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
     else:
         print(f"\n[SCAN] ⚠️  NO ACTIONABLE OPPORTUNITIES")
         if skip_reasons["pass"] > 0:
-            print(f"[SCAN]   ({skip_reasons['pass']} had edge < {MIN_EDGE:.3f})")
+            print(f"[SCAN]   ({skip_reasons['pass']} rejected by engine — low edge or low confidence)")
     
     print(f"{'='*70}\n")
     return opportunities
