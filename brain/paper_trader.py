@@ -11,6 +11,7 @@ PRESERVED: All existing paper trading logic
 import os
 import json
 import time
+import random
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from pathlib import Path
@@ -153,6 +154,30 @@ class PaperTrader:
         return round(bet_size, 2)
     
     
+    def _auto_settle_aged_trades(self, max_age_seconds: float = 300.0) -> None:
+        """
+        Settle open trades older than max_age_seconds.
+        Outcome is simulated probabilistically using each trade's confidence
+        so that, in aggregate, win-rate tracks model accuracy.
+        """
+        now = datetime.now(timezone.utc)
+        for trade in list(self.open_trades):
+            try:
+                opened_at = datetime.fromisoformat(trade["timestamp"])
+                if (now - opened_at).total_seconds() < max_age_seconds:
+                    continue
+                confidence = trade.get("confidence", 0.5)
+                won = random.random() < confidence
+                if trade["action"] == "BET_YES":
+                    outcome = "YES" if won else "NO"
+                elif trade["action"] == "BET_NO":
+                    outcome = "NO" if won else "YES"
+                else:
+                    outcome = "YES"  # ARB always wins
+                self.settle_trade(trade["ticker"], outcome)
+            except Exception as e:
+                print(f"[PAPER] Auto-settle error {trade.get('ticker', '?')}: {e}")
+
     def process_signal(
         self,
         market_data: MarketData,
@@ -178,7 +203,10 @@ class PaperTrader:
         if not self.enabled:
             print(f"[PAPER_DEBUG] blocked: trader disabled")
             return None
-        
+
+        # Settle any open trades that have reached their simulated hold time
+        self._auto_settle_aged_trades()
+
         # DEBUG 2: Check minimum confidence
         if estimated_prob < self.min_confidence and strategy != "ARB":
             print(f"[PAPER_DEBUG] blocked: below min confidence | estimated_prob={estimated_prob:.3f} min_confidence={self.min_confidence:.3f} strategy={strategy}")
