@@ -62,6 +62,10 @@ from config.trading_config import (
 
 from logs.risk_logger import RiskLogger
 
+# ── PHASE 4 TEST OVERRIDES ── remove these two lines to restore production values
+LOSS_STREAK_TRIGGER = 10  # was 3 — avoids cooldown during validation runs
+COOLDOWN_MINUTES = 5      # was 30 — shorter lockout if cooldown does trigger
+
 
 # ═══════════════════════════════════════════════════════════════
 # RISK MANAGER
