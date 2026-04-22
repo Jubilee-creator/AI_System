@@ -60,7 +60,7 @@ WEEKLY_LOSS_LIMIT = -150.0
 # Maximum number of trades per day
 PROD_MAX_TRADES_PER_DAY = 20
 TEST_MAX_TRADES_PER_DAY = 100
-MAX_TRADES_PER_DAY = TEST_MAX_TRADES_PER_DAY if TEST_MODE else PROD_MAX_TRADES_PER_DAY
+MAX_TRADES_PER_DAY = PROD_MAX_TRADES_PER_DAY  # overridden below when TEST_MODE is True
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -102,6 +102,7 @@ TEST_MODE = True  # Set False to restore production thresholds
 if TEST_MODE:
     MIN_EDGE = 0.01        # relaxed from 0.03 — lets more signals through
     MIN_CONFIDENCE = 0.60  # relaxed from 0.65
+    MAX_TRADES_PER_DAY = TEST_MAX_TRADES_PER_DAY  # raised from 20 to 100
 
 
 # ═══════════════════════════════════════════════════════════════
