@@ -2,3 +2,4 @@
 *.pem
 .DS_Store
 __pycache__/
+data/risk_state.json
