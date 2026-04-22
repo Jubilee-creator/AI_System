@@ -58,7 +58,9 @@ DAILY_LOSS_LIMIT = -50.0
 WEEKLY_LOSS_LIMIT = -150.0
 
 # Maximum number of trades per day
-MAX_TRADES_PER_DAY = 20
+PROD_MAX_TRADES_PER_DAY = 20
+TEST_MAX_TRADES_PER_DAY = 100
+MAX_TRADES_PER_DAY = TEST_MAX_TRADES_PER_DAY if TEST_MODE else PROD_MAX_TRADES_PER_DAY
 
 
 # ═══════════════════════════════════════════════════════════════
