@@ -245,9 +245,10 @@ class RiskManager:
             # Reset daily counters
             previous_pnl = self.daily_pnl
             previous_trades = self.trades_today
-            
+
             self.daily_pnl = 0.0
             self.trades_today = 0
+            self.loss_streak = 0
             self.last_reset_date = today
             
             # Check weekly reset
