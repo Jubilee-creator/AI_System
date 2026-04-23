@@ -111,7 +111,7 @@ class RiskManager:
         # Daily state (resets at midnight)
         self.daily_pnl = 0.0
         self.trades_today = 0
-        self.last_reset_date = datetime.now(timezone.utc).date()
+        self.last_reset_date = datetime.now().date()  # local date for trading-day boundary
         
         # Position tracking
         self.open_positions = 0
@@ -155,7 +155,7 @@ class RiskManager:
     
     def _get_week_start(self) -> datetime.date:
         """Get start of current week (Monday)."""
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now().date()  # local date
         return today - timedelta(days=today.weekday())
     
     
@@ -233,7 +233,7 @@ class RiskManager:
     
     def _check_daily_reset(self) -> None:
         """Check if daily counters need reset (new day)."""
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now().date()  # local date for trading-day boundary
         
         if today > self.last_reset_date:
             # Log previous day stats
