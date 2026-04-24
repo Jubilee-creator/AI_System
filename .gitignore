@@ -1,3 +1,9 @@
 .env
 *.pem
 .DS_Store
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
