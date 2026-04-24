@@ -183,7 +183,13 @@ class PaperTrader:
         if estimated_prob < self.min_confidence and strategy != "ARB":
             print(f"[PAPER_DEBUG] blocked: below min confidence | estimated_prob={estimated_prob:.3f} min_confidence={self.min_confidence:.3f} strategy={strategy}")
             return None
-        
+
+        # HIGH CONFIDENCE FILTER (≥ 0.90)
+        HIGH_CONFIDENCE_THRESHOLD = 0.90
+        if estimated_prob < HIGH_CONFIDENCE_THRESHOLD and strategy != "ARB":
+            print(f"[PAPER_DEBUG] blocked: HIGH CONFIDENCE FILTER (≥ 0.90) | estimated_prob={estimated_prob:.3f} threshold={HIGH_CONFIDENCE_THRESHOLD:.2f}")
+            return None
+
         # Determine action and price
         if estimated_prob >= 0.5:
             action = "BET_YES"
