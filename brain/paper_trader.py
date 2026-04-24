@@ -54,7 +54,7 @@ class PaperTrader:
         self,
         bankroll: float = 500.0,
         min_edge: float = 0.03,
-        min_confidence: float = 0.65,
+        min_confidence: float = 0.90,
         max_bet_size: float = 50.0,
         kelly_fraction: float = 0.25
     ):
@@ -245,9 +245,18 @@ class PaperTrader:
             return None
         
         # ═══════════════════════════════════════════════════════
+        # HIGH CONFIDENCE FILTER — final hard gate before execution
+        # Blocks all non-ARB trades with confidence < 0.90
+        # ═══════════════════════════════════════════════════════
+        HIGH_CONFIDENCE_THRESHOLD = 0.90
+        if strategy != "ARB" and estimated_prob < HIGH_CONFIDENCE_THRESHOLD:
+            print(f"[PAPER_DEBUG] BLOCKED by HIGH CONFIDENCE FILTER | conf={estimated_prob:.3f} required={HIGH_CONFIDENCE_THRESHOLD}")
+            return None
+
+        # ═══════════════════════════════════════════════════════
         # TRADE APPROVED - EXECUTE
         # ═══════════════════════════════════════════════════════
-        
+
         # Create trade record
         trade = {
             "timestamp": datetime.now(timezone.utc).isoformat(),

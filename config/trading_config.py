@@ -84,8 +84,8 @@ LOSS_LIMIT_COOLDOWN_HOURS = 24
 MIN_EDGE = 0.03
 
 # Minimum model confidence to take a trade
-# 0.65 = 65% probability minimum
-MIN_CONFIDENCE = 0.65
+# 0.90 = 90% probability minimum (HIGH CONFIDENCE FILTER)
+MIN_CONFIDENCE = 0.90
 
 # Minimum edge for ARB trades (can be lower since guaranteed)
 MIN_ARB_EDGE = 0.005  # 0.5¢ minimum for arb
@@ -202,7 +202,7 @@ STRATEGY_LIMITS = {
         "max_position_size": 30.0,
         "max_positions": 3,
         "min_edge": 0.05,  # Higher edge required
-        "min_confidence": 0.70,  # Higher confidence required
+        "min_confidence": 0.90,  # HIGH CONFIDENCE FILTER
         "enabled": True
     }
 }
