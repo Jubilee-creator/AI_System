@@ -1,0 +1,67 @@
+{
+  "generated_at": "2026-04-24T15:27:19.452710Z",
+  "source_trades": 6,
+  "core": {
+    "settled_trades": 6,
+    "wins": 4,
+    "losses": 2,
+    "win_rate": 0.6667,
+    "total_pnl": 7.5,
+    "avg_win": 11.88,
+    "avg_loss": 20.0,
+    "expectancy": 1.25,
+    "profit_factor": 1.188
+  },
+  "by_edge": {
+    "0.00\u20130.01": {
+      "count": 1,
+      "win_rate": 1.0,
+      "total_pnl": 6.0,
+      "avg_pnl": 6.0
+    },
+    "0.01\u20130.03": {
+      "count": 2,
+      "win_rate": 0.5,
+      "total_pnl": -4.25,
+      "avg_pnl": -2.125
+    },
+    "0.03\u20130.05": {
+      "count": 1,
+      "win_rate": 0.0,
+      "total_pnl": -22.0,
+      "avg_pnl": -22.0
+    },
+    "0.05+": {
+      "count": 2,
+      "win_rate": 1.0,
+      "total_pnl": 27.75,
+      "avg_pnl": 13.875
+    }
+  },
+  "by_confidence": {
+    "0.60\u20130.70": {
+      "count": 1,
+      "win_rate": 0.0,
+      "total_pnl": -18.0,
+      "avg_pnl": -18.0
+    },
+    "0.70\u20130.80": {
+      "count": 2,
+      "win_rate": 0.5,
+      "total_pnl": -8.25,
+      "avg_pnl": -4.125
+    },
+    "0.80\u20130.90": {
+      "count": 2,
+      "win_rate": 1.0,
+      "total_pnl": 27.75,
+      "avg_pnl": 13.875
+    },
+    "0.90+": {
+      "count": 1,
+      "win_rate": 1.0,
+      "total_pnl": 6.0,
+      "avg_pnl": 6.0
+    }
+  }
+}
