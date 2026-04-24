@@ -994,34 +994,52 @@ function renderLiveActions(trades) {
   }).join('');
 }
 
-function renderRiskFeed(decisions) {
+function renderRiskLog(events) {
   const el = document.getElementById('risk-feed');
-  document.getElementById('risk-count').textContent = decisions.length + ' decisions';
-  if (!decisions.length) {
-    el.innerHTML = '<div class="empty">Monitoring signals...</div>';
+  document.getElementById('risk-count').textContent = events.length + ' events';
+  if (!events.length) {
+    el.innerHTML = '<div class="empty">No risk events yet...</div>';
     return;
   }
-  el.innerHTML = decisions.map(d => {
-    const isPlaced = d.outcome === 'PLACED';
-    const rowCls = isPlaced ? 'placed' : 'blocked';
-    const dotCls = isPlaced ? 'placed' : 'blocked';
-    const outcomeLabel = isPlaced ? 'PLACED' : 'BLOCKED';
-    const sizeStr = isPlaced ? ` $${(d.size||0).toFixed(0)} @ ${((d.price||0)*100).toFixed(0)}¢` : '';
-    const reasonHtml = !isPlaced
-      ? `<div class="risk-reason">${d.reason||''}</div>` : '';
+  el.innerHTML = events.map(ev => {
+    const ts = (ev.timestamp || '').slice(11, 19);
+    const et = ev.event_type || '';
+    const details = ev.details || {};
+    const ticker = details.ticker || details.market || '';
+    const reason = details.reason || details.message || et;
+    const isBlock = et.includes('BLOCKED') || et.includes('LIMIT') || et.includes('KILL') || et.includes('COOLDOWN');
+    const isOk = et === 'TRADE_APPROVED' || et === 'POSITION_OPENED';
+    const rowCls = isBlock ? 'blocked' : (isOk ? 'placed' : 'blocked');
+    const dotCls = rowCls;
+    const label = isOk ? 'OK' : et.replace(/_/g, ' ');
+    const reasonHtml = reason ? `<div class="risk-reason">${reason.slice(0, 80)}</div>` : '';
     return `<div class="risk-row ${rowCls}">
       <div class="risk-dot ${dotCls}"></div>
       <div class="risk-body">
         <div class="risk-top">
-          <span class="risk-ticker">${d.ticker||'?'}</span>
-          <span class="risk-action">${d.action||''}</span>
-          <span class="risk-outcome ${dotCls}">${outcomeLabel}${sizeStr}</span>
+          <span class="risk-ticker">${ticker}</span>
+          <span class="risk-outcome ${dotCls}">${label}</span>
         </div>
         ${reasonHtml}
       </div>
-      <span class="risk-time">${d.time||''}</span>
+      <span class="risk-time">${ts}</span>
     </div>`;
   }).join('');
+}
+
+async function fetchLiveData() {
+  try {
+    const [tradesRes, riskRes] = await Promise.all([
+      fetch('/api/live_trades'),
+      fetch('/api/live_risk')
+    ]);
+    const trades = await tradesRes.json();
+    const events = await riskRes.json();
+    renderLiveActions(Array.isArray(trades) ? trades : []);
+    renderRiskLog(Array.isArray(events) ? events : []);
+  } catch(e) {
+    console.error('live data fetch error:', e);
+  }
 }
 
 function renderStatusSummary(d) {
@@ -1100,8 +1118,6 @@ async function fetchState() {
     document.getElementById('h-last').textContent = 'Last: ' + (d.last_scan||'--');
 
     renderOpportunities(d.opportunities || []);
-    renderLiveActions(d.recent_trades || []);
-    renderRiskFeed(d.risk_decisions || []);
     renderStatusSummary(d);
     renderPaperStats(d.paper_stats || {});
 
@@ -1117,10 +1133,14 @@ setInterval(() => {
   document.getElementById('h-clock').textContent = t;
 }, 1000);
 
-// Fetch loop
+// Main state loop (opportunities, stats, status)
 setInterval(fetchState, 5000);
 fetchState();
 startProgressBar();
+
+// Live data loop (trades + risk events from log files)
+setInterval(fetchLiveData, 4000);
+fetchLiveData();
 </script>
 </body>
 </html>"""
@@ -1156,6 +1176,49 @@ def api_paper_stats():
     if paper_trader:
         return jsonify(paper_trader.get_stats())
     return jsonify({"error": "Paper trader not initialized"})
+
+
+def _read_jsonl_tail(path: str, n: int) -> list:
+    """Return the last n parsed JSON lines from a JSONL file."""
+    try:
+        with open(path, "r") as f:
+            lines = f.readlines()
+    except (FileNotFoundError, IOError):
+        return []
+    result = []
+    for line in lines[-n:]:
+        line = line.strip()
+        if line:
+            try:
+                result.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return result
+
+
+@app.route("/api/live_trades")
+def api_live_trades():
+    """Read paper trades from log file, deduplicated to latest status per trade."""
+    log_path = Path(__file__).parent / "logs" / "paper_trades.jsonl"
+    raw = _read_jsonl_tail(str(log_path), 200)
+    # Deduplicate by (ticker, open-timestamp): SETTLED takes priority over OPEN
+    seen: dict = {}
+    for record in raw:
+        key = (record.get("ticker", ""), record.get("timestamp", ""))
+        existing = seen.get(key)
+        if existing is None or record.get("status") == "SETTLED":
+            seen[key] = record
+    trades = sorted(seen.values(), key=lambda t: t.get("timestamp", ""), reverse=True)
+    return jsonify(trades[:20])
+
+
+@app.route("/api/live_risk")
+def api_live_risk():
+    """Read risk events from log file, newest first."""
+    log_path = Path(__file__).parent / "logs" / "risk_events.jsonl"
+    events = _read_jsonl_tail(str(log_path), 60)
+    events.reverse()
+    return jsonify(events[:30])
 
 
 # ─────────────────────────────────────────
