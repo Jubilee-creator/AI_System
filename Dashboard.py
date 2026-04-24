@@ -32,8 +32,7 @@ except ImportError:
 # ─────────────────────────────────────────
 
 try:
-    from brain.market_scanner import scan_crypto_markets, fetch_crypto_markets, build_signal
-    from engine.decision_engine import analyze_market, compute_arb_edge
+    from brain.market_scanner import scan_crypto_markets
     BRAIN_OK = True
 except ImportError as e:
     print(f"[WARN] Brain modules not found: {e}")
@@ -65,6 +64,13 @@ PORT = 5001
 BANKROLL = float(os.getenv("BANKROLL", "500"))
 AUTO_BET_THRESHOLD = 0.70  # confidence needed for auto-bet (not enabled yet)
 
+# Pull active thresholds from config (respects TEST_MODE overrides)
+try:
+    from config.trading_config import MIN_EDGE, MIN_CONFIDENCE
+except ImportError:
+    MIN_EDGE = 0.03
+    MIN_CONFIDENCE = 0.65
+
 app = Flask(__name__)
 CORS(app)
 
@@ -73,8 +79,8 @@ paper_trader = None
 if PAPER_TRADER_OK:
     paper_trader = PaperTrader(
         bankroll=BANKROLL,
-        min_edge=0.03,
-        min_confidence=0.65,
+        min_edge=MIN_EDGE,
+        min_confidence=MIN_CONFIDENCE,
         max_bet_size=50.0,
         kelly_fraction=0.25
     )
@@ -97,6 +103,9 @@ state = {
     "brain_ok": BRAIN_OK,
     "paper_trader_ok": PAPER_TRADER_OK,
     "paper_stats": {},      # Paper trading stats
+    "risk_decisions": [],   # Recent signal decisions (PLACED / BLOCKED)
+    "recent_trades": [],    # Latest trade records (open + settled)
+    "risk_status": {},      # Live risk manager state
 }
 
 
@@ -162,10 +171,6 @@ def background_scan():
         try:
             if BRAIN_OK:
                 opportunities = scan_crypto_markets(bankroll=BANKROLL)
-                
-            elif LEGACY_OK:
-                # Fallback to legacy scanner
-            if BRAIN_OK:            
 
                 state["opportunities"] = opportunities
                 state["last_scan"] = now
@@ -213,15 +218,45 @@ def background_scan():
                         # Process signal through paper trader
                         estimated_prob = opp.get("confidence", 0.5)
                         if estimated_prob > 0:
-                            strategy_label = f"{reason_tag}_{event_type}"
-                            paper_trader.process_signal(
+                            strategy_label = reason_tag  # ARB | SIGNAL | TREND
+                            result = paper_trader.process_signal(
                                 market_data=market_data,
                                 estimated_prob=estimated_prob,
                                 strategy=strategy_label
                             )
-                    
-                    # Update paper stats
+                            # Capture decision for risk feed
+                            if result:
+                                if result.get("status") == "BLOCKED":
+                                    decision = {
+                                        "time": now,
+                                        "ticker": opp.get("ticker", "?"),
+                                        "action": opp.get("action", "?"),
+                                        "outcome": "BLOCKED",
+                                        "reason": result.get("reason", "unknown"),
+                                    }
+                                else:
+                                    decision = {
+                                        "time": now,
+                                        "ticker": result.get("ticker", "?"),
+                                        "action": result.get("action", "?"),
+                                        "outcome": "PLACED",
+                                        "size": result.get("size", 0),
+                                        "price": result.get("entry_price", 0),
+                                    }
+                                state["risk_decisions"].insert(0, decision)
+                    state["risk_decisions"] = state["risk_decisions"][:40]
+
+                    # Update paper stats and expose recent trades
                     state["paper_stats"] = paper_trader.get_stats()
+                    state["risk_status"] = paper_trader.get_risk_status()
+                    recent = list(paper_trader.open_trades) + list(paper_trader.trade_history[-20:])
+                    recent.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
+                    state["recent_trades"] = recent[:20]
+
+                    # Reset per-scan position count — paper trades have no
+                    # settlement trigger so counts must not accumulate across scans
+                    paper_trader.risk_manager.open_positions = 0
+                    paper_trader.risk_manager.total_exposure = 0.0
 
                 # Fire alerts for high-confidence signals
                 for o in opportunities:
@@ -577,6 +612,69 @@ body::after {
 .verdict-icon.fail { color: var(--red); }
 
 .empty { padding: 20px 10px; color: var(--muted); font-size: 10px; text-align: center; }
+
+/* ── LIVE ACTIONS ── */
+.action-row {
+  padding: 5px 10px;
+  border-bottom: 1px solid rgba(13,40,13,0.5);
+  display: grid;
+  grid-template-columns: 52px 80px 64px 1fr 48px;
+  align-items: center;
+  gap: 0;
+}
+.action-row.placed { border-left: 2px solid var(--green2); background: rgba(0,255,65,0.02); }
+.action-row.settled-win { border-left: 2px solid var(--cyan); background: rgba(0,229,255,0.02); }
+.action-row.settled-loss { border-left: 2px solid var(--red); background: rgba(255,23,68,0.02); }
+.action-time { font-size: 9px; color: var(--green-dim); }
+.action-ticker { font-size: 10px; color: var(--cyan); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.action-badge2 { font-size: 9px; font-weight: 700; font-family: 'Orbitron', monospace; }
+.action-meta { font-size: 9px; color: var(--muted); padding: 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.action-pnl { font-size: 10px; text-align: right; font-weight: 700; }
+.pnl-win { color: var(--cyan); }
+.pnl-loss { color: var(--red); }
+.pnl-open { color: var(--muted); }
+
+/* ── RISK FEED ── */
+.risk-row {
+  padding: 4px 10px;
+  border-bottom: 1px solid rgba(13,40,13,0.4);
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+.risk-row.placed { border-left: 2px solid var(--green2); }
+.risk-row.blocked { border-left: 2px solid var(--red); opacity: 0.75; }
+.risk-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; margin-top: 3px; }
+.risk-dot.placed { background: var(--green2); box-shadow: 0 0 4px var(--green2); }
+.risk-dot.blocked { background: var(--red); }
+.risk-body { flex: 1; min-width: 0; }
+.risk-top { display: flex; gap: 6px; align-items: center; }
+.risk-ticker { font-size: 10px; color: var(--cyan); font-weight: 500; }
+.risk-action { font-size: 9px; color: var(--text); }
+.risk-outcome { font-size: 9px; font-weight: 700; font-family: 'Orbitron', monospace; }
+.risk-outcome.placed { color: var(--green2); }
+.risk-outcome.blocked { color: var(--red); }
+.risk-reason { font-size: 9px; color: var(--muted); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.risk-time { font-size: 8px; color: var(--green-dim); flex-shrink: 0; }
+
+/* ── STATUS GRID ── */
+.status-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+}
+.status-cell {
+  background: var(--panel);
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+}
+.status-val { font-family: 'Orbitron', monospace; font-size: 12px; font-weight: 700; color: var(--green2); text-shadow: 0 0 8px var(--green2); line-height: 1.2; }
+.status-val.warn { color: var(--yellow); text-shadow: 0 0 8px var(--yellow); }
+.status-val.danger { color: var(--red); text-shadow: 0 0 8px var(--red); }
+.status-val.ok { color: var(--green2); }
+.status-key { font-size: 7px; color: var(--muted); letter-spacing: 1.5px; text-transform: uppercase; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -638,32 +736,43 @@ body::after {
     </div>
   </div>
 
-  <!-- COL 2: ALERTS + LOG -->
+  <!-- COL 2: LIVE ACTIONS + RISK FEED -->
   <div class="col" style="display:grid;grid-template-rows:auto 1fr auto 1fr">
 
-    <!-- ARB OPPORTUNITIES -->
+    <!-- RECENT LIVE ACTIONS -->
     <div class="ph">
-      <span class="ph-title">🔥 ARB Opportunities</span>
-      <span class="ph-sub" id="arb-label">YES+NO &lt; $1</span>
+      <span class="ph-title">🎯 Recent Live Actions</span>
+      <span class="ph-sub" id="actions-count">0 trades</span>
     </div>
-    <div class="pb" id="arb-feed">
-      <div class="empty">No arb found yet. Scanning...</div>
+    <div class="pb" id="live-actions-feed">
+      <div class="empty">No trades placed yet. Scanning...</div>
     </div>
 
-    <!-- SCAN LOG -->
+    <!-- RISK DECISION FEED -->
     <div class="ph" style="margin-top:1px">
-      <span class="ph-title">📡 Scan Log</span>
-      <span class="ph-sub" id="log-count">--</span>
+      <span class="ph-title">🛡 Risk Decision Feed</span>
+      <span class="ph-sub" id="risk-count">0 decisions</span>
     </div>
-    <div class="pb" id="scan-log">
-      <div class="log-row">Initializing scanner...</div>
+    <div class="pb" id="risk-feed">
+      <div class="empty">Monitoring signals...</div>
     </div>
   </div>
 
-  <!-- COL 3: PAPER TRADE STATS -->
+  <!-- COL 3: STATUS + PAPER STATS -->
   <div class="col">
+
+    <!-- LIVE STATUS SUMMARY -->
     <div class="ph">
-      <span class="ph-title">📊 Paper Trade Performance</span>
+      <span class="ph-title">📡 Live Status</span>
+      <span class="ph-sub" id="status-time">--</span>
+    </div>
+    <div style="flex-shrink:0;border-bottom:1px solid var(--border)">
+      <div class="status-grid" id="status-grid"></div>
+    </div>
+
+    <!-- PAPER TRADE PERFORMANCE -->
+    <div class="ph" style="flex-shrink:0">
+      <span class="ph-title">📊 Performance</span>
       <span class="ph-sub" id="paper-progress">0 / 100 trades</span>
     </div>
     <div class="pb" style="padding:0">
@@ -790,36 +899,6 @@ function renderOpportunities(opps) {
   }).join('');
 }
 
-function renderArbs(opps) {
-  const arbs = opps.filter(o => o.action === 'ARB' || (o.yes_plus_no && o.yes_plus_no < 0.98));
-  const el = document.getElementById('arb-feed');
-  document.getElementById('arb-label').textContent = arbs.length + ' found';
-
-  if (!arbs.length) {
-    el.innerHTML = '<div class="empty">No arb windows open.<br>Watching for YES+NO &lt; $1...</div>';
-    return;
-  }
-
-  el.innerHTML = arbs.map(o => `
-    <div class="arb-list-item" style="padding:6px 10px;border-bottom:1px solid rgba(13,40,13,0.5);border-left:2px solid var(--yellow);background:rgba(255,214,0,0.03);margin:2px 0">
-      <div style="display:flex;justify-content:space-between">
-        <span style="color:var(--yellow);font-size:10px;font-weight:700">${o.ticker}</span>
-        <span style="color:var(--green2);font-size:10px">+${o.arb_edge ? (o.arb_edge*100).toFixed(1) : ((1-o.yes_plus_no)*100).toFixed(1)}¢ edge</span>
-      </div>
-      <div style="color:var(--text);font-size:9px;margin-top:2px">YES ${(o.price_yes*100).toFixed(0)}¢ + NO ${(o.price_no*100).toFixed(0)}¢ = ${(o.yes_plus_no*100).toFixed(0)}¢ total</div>
-      <div style="color:var(--muted);font-size:9px;margin-top:2px">${(o.reasoning||'').slice(0,80)}</div>
-    </div>`).join('');
-}
-
-function renderLog(logs) {
-  const el = document.getElementById('scan-log');
-  document.getElementById('log-count').textContent = logs.length + ' events';
-  if (!logs.length) return;
-  el.innerHTML = logs.map(l =>
-    `<div class="log-row"><span class="log-time">${l.time}</span>${l.msg}</div>`
-  ).join('');
-}
-
 function renderPaperStats(stats) {
   if (!stats || Object.keys(stats).length === 0) {
     document.getElementById('p-trades').textContent = '0';
@@ -888,6 +967,139 @@ function renderPaperStats(stats) {
   document.getElementById('verdict-msg').innerHTML = msg;
 }
 
+function renderLiveActions(trades) {
+  const el = document.getElementById('live-actions-feed');
+  document.getElementById('actions-count').textContent = trades.length + ' trades';
+  if (!trades.length) {
+    el.innerHTML = '<div class="empty">No trades placed yet. Scanning...</div>';
+    return;
+  }
+  el.innerHTML = trades.map(t => {
+    const ts = (t.timestamp||'').slice(11,19) || '--:--:--';
+    const isOpen = t.status === 'OPEN';
+    const isWin = t.result === 'WIN';
+    const rowCls = isOpen ? 'placed' : (isWin ? 'settled-win' : 'settled-loss');
+    const pnlHtml = isOpen
+      ? `<span class="action-pnl pnl-open">open</span>`
+      : `<span class="action-pnl ${isWin ? 'pnl-win' : 'pnl-loss'}">${t.pnl >= 0 ? '+' : ''}$${(t.pnl||0).toFixed(2)}</span>`;
+    const actionColor = t.action === 'BET_YES' ? 'ab-yes' : t.action === 'ARB' ? 'ab-arb' : 'ab-no';
+    const meta = `$${(t.size||0).toFixed(0)} @ ${((t.entry_price||0)*100).toFixed(0)}¢`;
+    return `<div class="action-row ${rowCls}">
+      <span class="action-time">${ts}</span>
+      <span class="action-ticker">${t.ticker||'?'}</span>
+      <span class="action-badge2 ${actionColor}">${t.action||'?'}</span>
+      <span class="action-meta">${meta}</span>
+      ${pnlHtml}
+    </div>`;
+  }).join('');
+}
+
+function renderRiskLog(events) {
+  const el = document.getElementById('risk-feed');
+  document.getElementById('risk-count').textContent = events.length + ' events';
+  if (!events.length) {
+    el.innerHTML = '<div class="empty">No risk events yet...</div>';
+    return;
+  }
+  el.innerHTML = events.map(ev => {
+    const ts = (ev.timestamp || '').slice(11, 19);
+    const et = ev.event_type || '';
+    const details = ev.details || {};
+    const ticker = details.ticker || details.market || '';
+    const reason = details.reason || details.message || et;
+    const isBlock = et.includes('BLOCKED') || et.includes('LIMIT') || et.includes('KILL') || et.includes('COOLDOWN');
+    const isOk = et === 'TRADE_APPROVED' || et === 'POSITION_OPENED';
+    const rowCls = isBlock ? 'blocked' : (isOk ? 'placed' : 'blocked');
+    const dotCls = rowCls;
+    const label = isOk ? 'OK' : et.replace(/_/g, ' ');
+    const reasonHtml = reason ? `<div class="risk-reason">${reason.slice(0, 80)}</div>` : '';
+    return `<div class="risk-row ${rowCls}">
+      <div class="risk-dot ${dotCls}"></div>
+      <div class="risk-body">
+        <div class="risk-top">
+          <span class="risk-ticker">${ticker}</span>
+          <span class="risk-outcome ${dotCls}">${label}</span>
+        </div>
+        ${reasonHtml}
+      </div>
+      <span class="risk-time">${ts}</span>
+    </div>`;
+  }).join('');
+}
+
+async function fetchLiveData() {
+  try {
+    const [tradesRes, riskRes] = await Promise.all([
+      fetch('/api/live_trades'),
+      fetch('/api/live_risk')
+    ]);
+    const trades = await tradesRes.json();
+    const events = await riskRes.json();
+    renderLiveActions(Array.isArray(trades) ? trades : []);
+    renderRiskLog(Array.isArray(events) ? events : []);
+  } catch(e) {
+    console.error('live data fetch error:', e);
+  }
+}
+
+function renderStatusSummary(d) {
+  const rs = d.risk_status || {};
+  const ps = d.paper_stats || {};
+  const now = d.last_scan || '--';
+  document.getElementById('status-time').textContent = now;
+
+  const dailyPnl = rs.daily_pnl || 0;
+  const bankroll = rs.bankroll || ps.current_balance || d.bankroll || 500;
+  const tradesT = rs.trades_today || 0;
+  const maxT = rs.max_trades_per_day || 100;
+  const streak = rs.loss_streak || 0;
+  const streakMax = rs.loss_streak_trigger || 10;
+  const openPos = rs.open_positions || 0;
+  const killSwitch = rs.kill_switch_active || false;
+  const cooldown = rs.cooldown_active || false;
+  const opps = (d.opportunities||[]).filter(o => o.action !== 'PASS').length;
+  const arbs = (d.opportunities||[]).filter(o => o.action === 'ARB').length;
+  const bets = (d.opportunities||[]).filter(o => o.action && o.action.includes('BET')).length;
+
+  const pnlClass = dailyPnl > 0 ? 'ok' : dailyPnl < -25 ? 'danger' : dailyPnl < -10 ? 'warn' : 'ok';
+  const systemStatus = killSwitch ? 'KILL SW' : cooldown ? 'COOLDOWN' : 'LIVE';
+  const sysClass = killSwitch ? 'danger' : cooldown ? 'warn' : 'ok';
+
+  document.getElementById('status-grid').innerHTML = `
+    <div class="status-cell">
+      <div class="status-val ${sysClass}">${systemStatus}</div>
+      <div class="status-key">System</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-val ${pnlClass}">${dailyPnl >= 0 ? '+' : ''}$${dailyPnl.toFixed(2)}</div>
+      <div class="status-key">Daily P&L</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-val">${d.total_scans||0}</div>
+      <div class="status-key">Scans</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-val">${opps} <span style="font-size:9px;color:var(--muted)">(${arbs}arb/${bets}bet)</span></div>
+      <div class="status-key">Actionable</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-val">${tradesT}<span style="font-size:9px;color:var(--muted)">/${maxT}</span></div>
+      <div class="status-key">Trades Today</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-val">${openPos}</div>
+      <div class="status-key">Open Pos</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-val ${streak >= streakMax * 0.7 ? 'warn' : 'ok'}">${streak}<span style="font-size:9px;color:var(--muted)">/${streakMax}</span></div>
+      <div class="status-key">Loss Streak</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-val">${(bankroll).toFixed(0)}</div>
+      <div class="status-key">Balance $</div>
+    </div>`;
+}
+
 async function fetchState() {
   try {
     const r = await fetch('/api/state');
@@ -897,7 +1109,7 @@ async function fetchState() {
     const arbs = (d.opportunities||[]).filter(o => o.action === 'ARB').length;
     const bets = (d.opportunities||[]).filter(o => o.action && o.action.includes('BET')).length;
     const paperTrades = (d.paper_stats && d.paper_stats.total_trades) || 0;
-    
+
     document.getElementById('h-opps').textContent = (d.opportunities||[]).length;
     document.getElementById('h-arb').textContent = arbs;
     document.getElementById('h-bet').textContent = bets;
@@ -906,8 +1118,7 @@ async function fetchState() {
     document.getElementById('h-last').textContent = 'Last: ' + (d.last_scan||'--');
 
     renderOpportunities(d.opportunities || []);
-    renderArbs(d.opportunities || []);
-    renderLog(d.scan_log || []);
+    renderStatusSummary(d);
     renderPaperStats(d.paper_stats || {});
 
     startProgressBar();
@@ -922,10 +1133,14 @@ setInterval(() => {
   document.getElementById('h-clock').textContent = t;
 }, 1000);
 
-// Fetch loop
+// Main state loop (opportunities, stats, status)
 setInterval(fetchState, 5000);
 fetchState();
 startProgressBar();
+
+// Live data loop (trades + risk events from log files)
+setInterval(fetchLiveData, 4000);
+fetchLiveData();
 </script>
 </body>
 </html>"""
@@ -961,6 +1176,49 @@ def api_paper_stats():
     if paper_trader:
         return jsonify(paper_trader.get_stats())
     return jsonify({"error": "Paper trader not initialized"})
+
+
+def _read_jsonl_tail(path: str, n: int) -> list:
+    """Return the last n parsed JSON lines from a JSONL file."""
+    try:
+        with open(path, "r") as f:
+            lines = f.readlines()
+    except (FileNotFoundError, IOError):
+        return []
+    result = []
+    for line in lines[-n:]:
+        line = line.strip()
+        if line:
+            try:
+                result.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return result
+
+
+@app.route("/api/live_trades")
+def api_live_trades():
+    """Read paper trades from log file, deduplicated to latest status per trade."""
+    log_path = Path(__file__).parent / "logs" / "paper_trades.jsonl"
+    raw = _read_jsonl_tail(str(log_path), 200)
+    # Deduplicate by (ticker, open-timestamp): SETTLED takes priority over OPEN
+    seen: dict = {}
+    for record in raw:
+        key = (record.get("ticker", ""), record.get("timestamp", ""))
+        existing = seen.get(key)
+        if existing is None or record.get("status") == "SETTLED":
+            seen[key] = record
+    trades = sorted(seen.values(), key=lambda t: t.get("timestamp", ""), reverse=True)
+    return jsonify(trades[:20])
+
+
+@app.route("/api/live_risk")
+def api_live_risk():
+    """Read risk events from log file, newest first."""
+    log_path = Path(__file__).parent / "logs" / "risk_events.jsonl"
+    events = _read_jsonl_tail(str(log_path), 60)
+    events.reverse()
+    return jsonify(events[:30])
 
 
 # ─────────────────────────────────────────

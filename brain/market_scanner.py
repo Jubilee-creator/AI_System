@@ -14,6 +14,7 @@ import json
 import requests
 import statistics
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional, List
 from cryptography.hazmat.primitives import serialization
@@ -49,6 +50,11 @@ BANKROLL = float(os.getenv("BANKROLL", "500"))
 MIN_VOLUME = 0
 MIN_EDGE = 0.015
 SCAN_INTERVAL = 30
+
+# Enrichment limits (Phase 3 validation — full-scale scraping not needed)
+ENRICH_LIMIT = 400    # max markets to enrich per scan
+ENRICH_WORKERS = 8    # parallel HTTP workers
+ENRICH_TIMEOUT = 90   # total seconds budget for enrichment step
 
 
 # ─────────────────────────────────────────
@@ -275,31 +281,45 @@ def fetch_and_enrich_crypto_markets() -> List[dict]:
     if not all_markets:
         return []
     
-    # Step 3: Enrich with quotes
-    print(f"\n[SCANNER] Enriching {len(all_markets)} markets with quotes...")
-    
+    # Step 3: Enrich with quotes — cap list then run in parallel
+    to_enrich = all_markets[:ENRICH_LIMIT]
+    print(f"\n[SCANNER] Enriching {len(to_enrich)}/{len(all_markets)} markets "
+          f"({ENRICH_WORKERS} workers, {ENRICH_TIMEOUT}s budget)...")
+
     enriched = []
-    enriched_count = 0
     failed_examples = []
-    
-    for market in all_markets:
-        ticker = market.get("ticker", "")
-        enriched_market = enrich_market_with_quotes(market)
-        
-        has_quotes = any(enriched_market.get(f) is not None for f in ["yes_ask", "yes_bid", "no_ask", "no_bid"])
-        
-        if has_quotes:
-            enriched.append(enriched_market)
-            enriched_count += 1
-        else:
-            if len(failed_examples) < 5:
-                failed_examples.append(ticker)
-    
-    print(f"[SCANNER] ✓ Enriched: {enriched_count}/{len(all_markets)} have quotes")
-    
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=ENRICH_WORKERS) as executor:
+        futures = {executor.submit(enrich_market_with_quotes, m): m for m in to_enrich}
+        try:
+            for future in as_completed(futures, timeout=ENRICH_TIMEOUT):
+                try:
+                    result = future.result(timeout=12)
+                    has_quotes = any(
+                        result.get(f) is not None
+                        for f in ["yes_ask", "yes_bid", "no_ask", "no_bid"]
+                    )
+                    if has_quotes:
+                        enriched.append(result)
+                    elif len(failed_examples) < 5:
+                        failed_examples.append(result.get("ticker", "?"))
+                except Exception:
+                    pass
+
+                completed += 1
+                if completed % 100 == 0:
+                    print(f"[SCANNER]   ... {completed}/{len(to_enrich)} checked "
+                          f"({len(enriched)} with quotes so far)")
+
+        except Exception:
+            print(f"[SCANNER] ⚠️  Enrichment budget exhausted — "
+                  f"using {len(enriched)} markets collected so far")
+
+    print(f"[SCANNER] ✓ Enriched: {len(enriched)}/{len(to_enrich)} have quotes")
     if failed_examples:
         print(f"[SCANNER] Missing quotes: {', '.join(failed_examples)}")
-    
+
     return enriched
 
 
@@ -523,7 +543,7 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
     for ex in skip_examples["no_signal"]:
         print(f"[SCAN]     • {ex}")
     print(f"[SCAN]   Low volume (no ARB): {skip_reasons['low_volume']}")
-    print(f"[SCAN]   PASS (edge < {MIN_EDGE:.3f}): {skip_reasons['pass']}")
+    print(f"[SCAN]   PASS (engine rejected — low edge or low confidence): {skip_reasons['pass']}")
     for ex in skip_examples["pass"]:
         print(f"[SCAN]     • {ex}")
     print(f"[SCAN] ──────────────────────────────────────────────────────────────────")
@@ -536,7 +556,7 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
     else:
         print(f"\n[SCAN] ⚠️  NO ACTIONABLE OPPORTUNITIES")
         if skip_reasons["pass"] > 0:
-            print(f"[SCAN]   ({skip_reasons['pass']} had edge < {MIN_EDGE:.3f})")
+            print(f"[SCAN]   ({skip_reasons['pass']} rejected by engine — low edge or low confidence)")
     
     print(f"{'='*70}\n")
     return opportunities

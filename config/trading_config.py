@@ -58,7 +58,9 @@ DAILY_LOSS_LIMIT = -50.0
 WEEKLY_LOSS_LIMIT = -150.0
 
 # Maximum number of trades per day
-MAX_TRADES_PER_DAY = 20
+PROD_MAX_TRADES_PER_DAY = 20
+TEST_MAX_TRADES_PER_DAY = 100
+MAX_TRADES_PER_DAY = PROD_MAX_TRADES_PER_DAY  # overridden below when TEST_MODE is True
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -89,6 +91,18 @@ MIN_CONFIDENCE = 0.65
 
 # Minimum edge for ARB trades (can be lower since guaranteed)
 MIN_ARB_EDGE = 0.005  # 0.5¢ minimum for arb
+
+
+# ═══════════════════════════════════════════════════════════════
+# TEST MODE (Phase 4 validation — toggle back to False for production)
+# ═══════════════════════════════════════════════════════════════
+
+TEST_MODE = True  # Set False to restore production thresholds
+
+if TEST_MODE:
+    MIN_EDGE = 0.01        # relaxed from 0.03 — lets more signals through
+    MIN_CONFIDENCE = 0.60  # relaxed from 0.65
+    MAX_TRADES_PER_DAY = TEST_MAX_TRADES_PER_DAY  # raised from 20 to 100
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -199,13 +213,22 @@ STRATEGY_LIMITS = {
         "enabled": True
     },
     "TREND": {
-        "max_position_size": 30.0,
+        "max_position_size": 50.0,  # raised from 30; Kelly on $500 bankroll sizes to ~$32-46
         "max_positions": 3,
         "min_edge": 0.05,  # Higher edge required
         "min_confidence": 0.70,  # Higher confidence required
         "enabled": True
     }
 }
+
+if TEST_MODE:
+    # TREND used hardcoded literals so it didn't inherit the global TEST_MODE overrides above.
+    # Patch them here so all strategies are consistent during Phase 4 validation.
+    STRATEGY_LIMITS["TREND"]["min_confidence"] = MIN_CONFIDENCE  # 0.60
+    STRATEGY_LIMITS["TREND"]["min_edge"] = MIN_EDGE              # 0.01
+    STRATEGY_LIMITS["TREND"]["max_positions"] = 10
+    STRATEGY_LIMITS["SIGNAL"]["max_positions"] = 10
+    MAX_OPEN_POSITIONS = 10
 
 
 # ═══════════════════════════════════════════════════════════════

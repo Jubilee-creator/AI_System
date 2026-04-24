@@ -81,11 +81,21 @@ LOSS_LIMIT_COOLDOWN_HOURS = 24
 
 # Minimum edge (after fees) required to take a trade
 # 0.03 = 3¢ edge minimum
-MIN_EDGE = 0.03
 
-# Minimum model confidence to take a trade
-# 0.65 = 65% probability minimum
-MIN_CONFIDENCE = 0.65
+# --- TEST MODE (Phase 4 validation) ---
+TEST_MODE = True
+
+# Production values (keep safe)
+PROD_MIN_EDGE = 0.03
+PROD_MIN_CONFIDENCE = 0.65
+
+# Test values (looser for signal flow)
+TEST_MIN_EDGE = 0.01
+TEST_MIN_CONFIDENCE = 0.60
+
+# Active values
+MIN_EDGE = TEST_MIN_EDGE if TEST_MODE else PROD_MIN_EDGE
+MIN_CONFIDENCE = TEST_MIN_CONFIDENCE if TEST_MODE else PROD_MIN_CONFIDENCE
 
 # Minimum edge for ARB trades (can be lower since guaranteed)
 MIN_ARB_EDGE = 0.005  # 0.5¢ minimum for arb
