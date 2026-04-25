@@ -283,6 +283,19 @@ class PaperTrader:
                     return None
 
         # ═══════════════════════════════════════════════════════
+        # LIQUIDITY & SPREAD FILTER — final gate before execution
+        # Blocks non-ARB trades with wide spread or insufficient volume
+        # ═══════════════════════════════════════════════════════
+        MAX_SPREAD_THRESHOLD = 0.05
+        MIN_VOLUME = 100
+        if strategy != "ARB":
+            spread = abs(market_data.yes_price - market_data.no_price)
+            volume = market_data.volume_24h
+            if spread > MAX_SPREAD_THRESHOLD or (volume > 0 and volume < MIN_VOLUME):
+                print(f"[PAPER_DEBUG] BLOCKED: poor liquidity | spread={spread:.4f} volume={volume}")
+                return None
+
+        # ═══════════════════════════════════════════════════════
         # TRADE APPROVED - EXECUTE
         # ═══════════════════════════════════════════════════════
 
