@@ -203,13 +203,8 @@ class PaperTrader:
         edge = estimated_prob - price - 0.01  # 1¢ fee estimate
         
         # DEBUG 3: Show calculated values
-        print(f"[PAPER_DEBUG] action={action} price={price:.3f} estimated_prob={estimated_prob:.3f} edge={edge:.4f} min_edge={self.min_edge:.4f}")
-        
-        # DEBUG 4: Check minimum edge
-        if edge < self.min_edge and strategy != "ARB":
-            print(f"[PAPER_DEBUG] blocked: below min edge | edge={edge:.4f} min_edge={self.min_edge:.4f} strategy={strategy}")
-            return None
-        
+        print(f"[PAPER_DEBUG] action={action} price={price:.3f} estimated_prob={estimated_prob:.3f} edge={edge:.4f}")
+
         # Calculate bet size
         bet_size = self._calculate_kelly_size(estimated_prob, price)
         
@@ -259,7 +254,7 @@ class PaperTrader:
         # ═══════════════════════════════════════════════════════
         MIN_EDGE_THRESHOLD = 0.05
         if strategy != "ARB" and edge < MIN_EDGE_THRESHOLD:
-            print(f"[PAPER_DEBUG] BLOCKED by MIN EDGE FILTER | edge={edge:.4f} required={MIN_EDGE_THRESHOLD}")
+            print(f"[PAPER_DEBUG] BLOCKED: edge below 0.05 | edge={edge:.4f}")
             return None
 
         # ═══════════════════════════════════════════════════════
