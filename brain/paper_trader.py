@@ -53,7 +53,7 @@ class PaperTrader:
     def __init__(
         self,
         bankroll: float = 500.0,
-        min_edge: float = 0.03,
+        min_edge: float = 0.05,
         min_confidence: float = 0.90,
         max_bet_size: float = 50.0,
         kelly_fraction: float = 0.25
@@ -251,6 +251,15 @@ class PaperTrader:
         HIGH_CONFIDENCE_THRESHOLD = 0.90
         if strategy != "ARB" and estimated_prob < HIGH_CONFIDENCE_THRESHOLD:
             print(f"[PAPER_DEBUG] BLOCKED by HIGH CONFIDENCE FILTER | conf={estimated_prob:.3f} required={HIGH_CONFIDENCE_THRESHOLD}")
+            return None
+
+        # ═══════════════════════════════════════════════════════
+        # MIN EDGE FILTER — final hard gate before execution
+        # Blocks all non-ARB trades with edge < 0.05
+        # ═══════════════════════════════════════════════════════
+        MIN_EDGE_THRESHOLD = 0.05
+        if strategy != "ARB" and edge < MIN_EDGE_THRESHOLD:
+            print(f"[PAPER_DEBUG] BLOCKED by MIN EDGE FILTER | edge={edge:.4f} required={MIN_EDGE_THRESHOLD}")
             return None
 
         # ═══════════════════════════════════════════════════════

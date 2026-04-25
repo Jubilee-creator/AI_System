@@ -80,8 +80,8 @@ LOSS_LIMIT_COOLDOWN_HOURS = 24
 # ═══════════════════════════════════════════════════════════════
 
 # Minimum edge (after fees) required to take a trade
-# 0.03 = 3¢ edge minimum
-MIN_EDGE = 0.03
+# 0.05 = 5¢ edge minimum (MIN EDGE FILTER)
+MIN_EDGE = 0.05
 
 # Minimum model confidence to take a trade
 # 0.90 = 90% probability minimum (HIGH CONFIDENCE FILTER)
