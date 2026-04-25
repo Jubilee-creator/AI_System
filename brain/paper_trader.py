@@ -151,8 +151,13 @@ class PaperTrader:
         bet_size = max(bet_size, 0.0)
         
         return round(bet_size, 2)
-    
-    
+
+
+    def _get_market_family(self, ticker: str) -> str:
+        """Return the base market family: prefix before the first '-' or '_'."""
+        return ticker.replace('_', '-').split('-')[0].upper()
+
+
     def process_signal(
         self,
         market_data: MarketData,
@@ -256,6 +261,18 @@ class PaperTrader:
         if strategy != "ARB" and edge < MIN_EDGE_THRESHOLD:
             print(f"[PAPER_DEBUG] BLOCKED: edge below 0.05 | edge={edge:.4f}")
             return None
+
+        # ═══════════════════════════════════════════════════════
+        # DUPLICATE / CLUSTER PROTECTION — final gate before execution
+        # Blocks non-ARB trades when an OPEN trade already exists in
+        # the same base market family (prefix before first - or _)
+        # ═══════════════════════════════════════════════════════
+        if strategy != "ARB":
+            new_family = self._get_market_family(market_data.ticker)
+            for open_trade in self.open_trades:
+                if self._get_market_family(open_trade["ticker"]) == new_family:
+                    print(f"[PAPER_DEBUG] BLOCKED: duplicate market family | family={new_family} existing={open_trade['ticker']}")
+                    return None
 
         # ═══════════════════════════════════════════════════════
         # TRADE APPROVED - EXECUTE
