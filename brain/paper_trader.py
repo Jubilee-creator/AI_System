@@ -210,12 +210,20 @@ class PaperTrader:
         # DEBUG 3: Show calculated values
         print(f"[PAPER_DEBUG] action={action} price={price:.3f} estimated_prob={estimated_prob:.3f} edge={edge:.4f}")
 
-        # Calculate bet size
-        bet_size = self._calculate_kelly_size(estimated_prob, price)
-        
-        # DEBUG 5: Show bet size calculation
-        print(f"[PAPER_DEBUG] bet_size={bet_size:.2f} bankroll={self.bankroll:.2f} max_bet_size={self.max_bet_size:.2f}")
-        
+        # Calculate base Kelly size, then scale by trade quality
+        base_size = self._calculate_kelly_size(estimated_prob, price)
+
+        # quality = distance above both filter floors; maps to [0.5x, 2.0x]
+        quality = (estimated_prob - 0.90) + edge
+        multiplier = max(0.5, min(2.0, quality * 10))
+        bet_size = round(base_size * multiplier, 2)
+        # Re-apply hard caps after scaling
+        bet_size = min(bet_size, self.max_bet_size)
+        bet_size = min(bet_size, self.bankroll * 0.10)
+        bet_size = max(bet_size, 0.0)
+
+        print(f"[PAPER_DEBUG] size adjusted | base={base_size:.2f} adjusted={bet_size:.2f} quality={quality:.4f} multiplier={multiplier:.2f}x")
+
         # DEBUG 6: Check bet size is positive
         if bet_size <= 0:
             print(f"[PAPER_DEBUG] blocked: bet size <= 0")
