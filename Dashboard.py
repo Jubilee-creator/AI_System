@@ -17,6 +17,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+from config.trading_config import MIN_EDGE, MIN_CONFIDENCE, MAX_POSITION_SIZE, KELLY_FRACTION
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -32,7 +33,7 @@ except ImportError:
 # ─────────────────────────────────────────
 
 try:
-    from brain.market_scanner import scan_crypto_markets, fetch_crypto_markets, build_signal
+    from brain.market_scanner import scan_crypto_markets, build_signal
     from engine.decision_engine import analyze_market, compute_arb_edge
     BRAIN_OK = True
 except ImportError as e:
@@ -73,10 +74,10 @@ paper_trader = None
 if PAPER_TRADER_OK:
     paper_trader = PaperTrader(
         bankroll=BANKROLL,
-        min_edge=0.03,
-        min_confidence=0.65,
-        max_bet_size=50.0,
-        kelly_fraction=0.25
+        min_edge=MIN_EDGE,
+        min_confidence=MIN_CONFIDENCE,
+        max_bet_size=MAX_POSITION_SIZE,
+        kelly_fraction=KELLY_FRACTION
     )
     paper_trader.enable()
     print("[INIT] Paper trader enabled - will auto-log ALL signals")
