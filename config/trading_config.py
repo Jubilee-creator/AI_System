@@ -58,7 +58,7 @@ DAILY_LOSS_LIMIT = -50.0
 WEEKLY_LOSS_LIMIT = -150.0
 
 # Maximum number of trades per day
-MAX_TRADES_PER_DAY = 20
+MAX_TRADES_PER_DAY = 300
 
 
 # ═══════════════════════════════════════════════════════════════
