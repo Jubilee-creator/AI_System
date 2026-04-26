@@ -162,10 +162,6 @@ def background_scan():
         try:
             if BRAIN_OK:
                 opportunities = scan_crypto_markets(bankroll=BANKROLL)
-                
-            elif LEGACY_OK:
-                # Fallback to legacy scanner
-            if BRAIN_OK:            
 
                 state["opportunities"] = opportunities
                 state["last_scan"] = now
@@ -183,16 +179,16 @@ def background_scan():
                         # Skip PASS signals
                         if opp["action"] == "PASS":
                             continue
-                        
+
                         # Detect event type
                         event_type = detect_event_type(
                             opp.get("ticker", ""),
                             opp.get("title", "")
                         )
-                        
+
                         # Determine reason tag
                         reason_tag = determine_reason_tag(opp)
-                        
+
                         # Build MarketData object
                         market_data = MarketData(
                             ticker=opp.get("ticker", "UNKNOWN"),
@@ -209,7 +205,7 @@ def background_scan():
                             time_to_expiry=24.0,  # Default 24h
                             venue="kalshi"
                         )
-                        
+
                         # Process signal through paper trader
                         estimated_prob = opp.get("confidence", 0.5)
                         if estimated_prob > 0:
@@ -219,7 +215,7 @@ def background_scan():
                                 estimated_prob=estimated_prob,
                                 strategy=strategy_label
                             )
-                    
+
                     # Update paper stats
                     state["paper_stats"] = paper_trader.get_stats()
 
