@@ -37,18 +37,23 @@ from collections import deque
 class MarketSignal:
     """
     Raw market data input.
-    
+
     Migrated from: brain/bayesian_engine.py (unchanged)
     """
     ticker: str
-    price_yes: float          # e.g. 0.47
-    price_no: float           # e.g. 0.55
+    price_yes: float          # mid price — used as Bayesian prior only
+    price_no: float           # mid price — used as Bayesian prior only
     volume: float
     price_change: float       # ΔP_t
     volatility: float         # σ_t
     order_book_imbalance: float  # OBI_t (ask_vol - bid_vol) / total
     related_market_price: Optional[float] = None  # companion market
     timestamp: float = field(default_factory=time.time)
+    # Executable prices — used for edge and Kelly payout calculation
+    yes_ask: Optional[float] = None   # price you pay to buy YES
+    yes_bid: Optional[float] = None   # price you receive to sell YES
+    no_ask: Optional[float] = None    # price you pay to buy NO
+    no_bid: Optional[float] = None    # price you receive to sell NO
 
 
 @dataclass
@@ -348,9 +353,31 @@ def analyze_market(
     # ── Step 3: Pure arbitrage check
     arb_edge = compute_arb_edge(signal.price_yes, signal.price_no)
 
-    # ── Step 4: Directional edge
-    yes_edge = compute_edge(model_prob, signal.price_yes)
-    no_edge = compute_edge(1.0 - model_prob, signal.price_no)
+    # ── Step 4: Directional edge — use executable ask prices, not mid
+    # Fallback to mid if ask not available (older call sites)
+    exec_yes = signal.yes_ask if signal.yes_ask is not None else signal.price_yes
+    exec_no  = signal.no_ask  if signal.no_ask  is not None else signal.price_no
+
+    # Bid-ask spread width — proxy for liquidity risk / slippage
+    yes_spread = (signal.yes_ask - signal.yes_bid) if (signal.yes_ask and signal.yes_bid) else 0.0
+    no_spread  = (signal.no_ask  - signal.no_bid)  if (signal.no_ask  and signal.no_bid)  else 0.0
+
+    # Hard filter: if both sides are extremely wide, the market is untradeable
+    MAX_TRADEABLE_SPREAD = 0.15
+    if yes_spread > MAX_TRADEABLE_SPREAD and no_spread > MAX_TRADEABLE_SPREAD:
+        return TradeDecision(
+            ticker=signal.ticker,
+            action="PASS",
+            confidence=model_prob,
+            edge=0.0,
+            kelly_fraction=0.0,
+            dollar_size=0.0,
+            reasoning=f"Spread too wide: YES={yes_spread:.3f} NO={no_spread:.3f} — untradeable"
+        )
+
+    # Edge = model_prob - ask_price - fee - half_spread (slippage buffer)
+    yes_edge = model_prob          - exec_yes - TRADING_COST - (yes_spread * 0.5)
+    no_edge  = (1.0 - model_prob) - exec_no  - TRADING_COST - (no_spread  * 0.5)
 
     # ── Step 5: Stoikov-adjusted entry
     mid = (signal.price_yes + signal.price_no) / 2
@@ -399,7 +426,7 @@ def analyze_market(
             ticker=signal.ticker,
             action=lag_side,
             confidence=lag_prob,
-            edge=compute_edge(lag_prob, signal.price_yes if lag_side == "BET_YES" else signal.price_no),
+            edge=compute_edge(lag_prob, exec_yes if lag_side == "BET_YES" else exec_no),
             kelly_fraction=kelly_f,
             dollar_size=dollar_size,
             z_score=z_score,
@@ -408,8 +435,8 @@ def analyze_market(
 
     # Directional YES trade
     if model_prob >= MIN_CONFIDENCE and yes_edge > 0:
-        # Payout on Kalshi YES: win (1 - price_yes) per dollar risked
-        payout = (1.0 - signal.price_yes) / signal.price_yes
+        # Payout uses executable ask: win (1 - exec_yes) per dollar risked
+        payout = (1.0 - exec_yes) / exec_yes
         kelly_f, dollar_size = kelly_size(model_prob, payout, bankroll)
         if dollar_size > 0:
             return TradeDecision(
@@ -420,13 +447,13 @@ def analyze_market(
                 kelly_fraction=kelly_f,
                 dollar_size=dollar_size,
                 z_score=z_score,
-                reasoning=f"Model prob {model_prob:.1%} vs market {signal.price_yes:.2f}. Edge: {yes_edge:.3f}"
+                reasoning=f"Model {model_prob:.1%} vs ask {exec_yes:.3f} (mid {signal.price_yes:.3f}). Edge: {yes_edge:.3f}"
             )
 
     # Directional NO trade
     no_prob = 1.0 - model_prob
     if no_prob >= MIN_CONFIDENCE and no_edge > 0:
-        payout = (1.0 - signal.price_no) / signal.price_no
+        payout = (1.0 - exec_no) / exec_no
         kelly_f, dollar_size = kelly_size(no_prob, payout, bankroll)
         if dollar_size > 0:
             return TradeDecision(
@@ -437,7 +464,7 @@ def analyze_market(
                 kelly_fraction=kelly_f,
                 dollar_size=dollar_size,
                 z_score=z_score,
-                reasoning=f"NO side: model {no_prob:.1%} vs market {signal.price_no:.2f}. Edge: {no_edge:.3f}"
+                reasoning=f"NO: model {no_prob:.1%} vs ask {exec_no:.3f} (mid {signal.price_no:.3f}). Edge: {no_edge:.3f}"
             )
 
     # No trade

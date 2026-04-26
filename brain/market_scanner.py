@@ -470,7 +470,12 @@ def build_signal(market: dict) -> Optional[MarketSignal]:
             volume=volume * vol_spike,
             price_change=price_change,
             volatility=max(0.001, volatility),
-            order_book_imbalance=0.0
+            order_book_imbalance=0.0,
+            # Pass executable prices so edge uses ask, not mid
+            yes_ask=yes_ask,
+            yes_bid=yes_bid,
+            no_ask=no_ask,
+            no_bid=no_bid,
         )
     
     except Exception as e:
