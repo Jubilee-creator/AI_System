@@ -175,11 +175,28 @@ def background_scan():
 
                 # ─── PAPER TRADE EVERY SIGNAL ───
                 if paper_trader and PAPER_TRADER_OK:
-                    for opp in opportunities:
-                        # Skip PASS signals
-                        if opp["action"] == "PASS":
-                            continue
+                    # Step 1: filter to actionable signals only (drop PASS)
+                    candidates = [o for o in opportunities if o["action"] != "PASS"]
 
+                    # Step 2: rank best trades first — edge descending, confidence as tiebreak
+                    candidates.sort(
+                        key=lambda o: (o.get("edge", 0), o.get("confidence", 0)),
+                        reverse=True
+                    )
+
+                    # Step 3: limit to available position slots from risk manager
+                    rm_status = paper_trader.risk_manager.get_status()
+                    available_slots = max(
+                        0,
+                        rm_status["max_open_positions"] - rm_status["open_positions"]
+                    )
+                    top_candidates = candidates[:available_slots]
+
+                    print(f"[EXEC] {len(candidates)} actionable | "
+                          f"slots {rm_status['open_positions']}/{rm_status['max_open_positions']} used | "
+                          f"sending top {len(top_candidates)} to execution")
+
+                    for opp in top_candidates:
                         # Detect event type
                         event_type = detect_event_type(
                             opp.get("ticker", ""),
