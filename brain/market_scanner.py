@@ -509,7 +509,12 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
             "reasoning": decision.reasoning,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "close_time": market.get("close_time", ""),
-            "result_time": market.get("expected_expiration_time", "")
+            "result_time": market.get("expected_expiration_time", ""),
+            # Raw quote fields — carried through for execution-quality filtering
+            "yes_bid": market.get("yes_bid"),
+            "yes_ask": market.get("yes_ask"),
+            "no_bid":  market.get("no_bid"),
+            "no_ask":  market.get("no_ask"),
         }
         
         if result["action"] == "PASS":

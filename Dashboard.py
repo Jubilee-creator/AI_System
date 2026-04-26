@@ -177,24 +177,83 @@ def background_scan():
                 if paper_trader and PAPER_TRADER_OK:
                     # Step 1: filter to actionable signals only (drop PASS)
                     candidates = [o for o in opportunities if o["action"] != "PASS"]
+                    _before_quality = len(candidates)
 
-                    # Step 1b: spread quality filter — skip wide-spread markets
-                    _before_spread = len(candidates)
-                    candidates = [
-                        o for o in candidates
-                        if abs((o.get("yes_ask") or 0) - (o.get("yes_bid") or 0)) <= 0.03
-                    ]
-                    _spread_removed = _before_spread - len(candidates)
-                    if _spread_removed:
-                        print(f"[QUALITY_FILTER] removed {_spread_removed} trades due to wide spread")
+                    # ── DEBUG SAMPLE: prove quote fields are present ──────────
+                    for _s in candidates[:3]:
+                        print(
+                            f"[DEBUG_SAMPLE] ticker={_s.get('ticker')} "
+                            f"yes_bid={_s.get('yes_bid')} yes_ask={_s.get('yes_ask')} "
+                            f"no_bid={_s.get('no_bid')} no_ask={_s.get('no_ask')}"
+                        )
+                    _any_bad = any(
+                        _s.get("yes_bid") is None or _s.get("yes_ask") is None or
+                        _s.get("no_bid")  is None or _s.get("no_ask")  is None
+                        for _s in candidates[:3]
+                    )
+                    if _any_bad:
+                        print("[QUALITY_FILTER] WARNING: invalid quote data detected")
 
-                    # Step 2: rank best trades first — edge descending, confidence as tiebreak
+                    # ── Step 1b: Execution quality filter ────────────────────
+                    _rm_missing = 0
+                    _rm_invalid = 0
+                    _rm_wide    = 0
+                    filtered = []
+                    for _o in candidates:
+                        _action  = _o.get("action", "")
+                        _ya      = _o.get("yes_ask")
+                        _yb      = _o.get("yes_bid")
+                        _na      = _o.get("no_ask")
+                        _nb      = _o.get("no_bid")
+
+                        # A) Missing spread data — never default to 0
+                        if _action == "BET_NO":
+                            if _na is None or _nb is None:
+                                _rm_missing += 1
+                                continue
+                        else:
+                            if _ya is None or _yb is None:
+                                _rm_missing += 1
+                                continue
+
+                        # B) Invalid market structure (crossed/flat book)
+                        if _action == "BET_NO":
+                            if _na <= _nb:
+                                _rm_invalid += 1
+                                continue
+                            _spread = _na - _nb
+                        else:
+                            if _ya <= _yb:
+                                _rm_invalid += 1
+                                continue
+                            _spread = _ya - _yb
+
+                        # C) Wide spread
+                        if _spread > 0.03:
+                            _rm_wide += 1
+                            continue
+
+                        filtered.append(_o)
+
+                    candidates = filtered
+                    _after_quality = len(candidates)
+
+                    print(
+                        f"[QUALITY_FILTER]\n"
+                        f"  candidates_before:        {_before_quality}\n"
+                        f"  removed_missing_spread:   {_rm_missing}\n"
+                        f"  removed_invalid_structure:{_rm_invalid}\n"
+                        f"  removed_wide_spread:      {_rm_wide}\n"
+                        f"  candidates_after:         {_after_quality}"
+                    )
+
+                    # ── Step 2: rank — edge DESC, confidence DESC, volume DESC ─
                     candidates.sort(
-                        key=lambda o: (o.get("edge", 0), o.get("confidence", 0)),
+                        key=lambda o: (o.get("edge", 0), o.get("confidence", 0), o.get("volume", 0)),
                         reverse=True
                     )
 
-                    # Step 3: limit to available position slots from risk manager
+                    # ── Step 3: limit to available position slots ─────────────
                     rm_status = paper_trader.risk_manager.get_status()
                     available_slots = max(
                         0,
@@ -202,7 +261,30 @@ def background_scan():
                     )
                     top_candidates = candidates[:available_slots]
 
-                    print(f"[EXEC] {len(candidates)} actionable | "
+                    # ── Execution quality summary ─────────────────────────────
+                    if top_candidates:
+                        _avg_spread = sum(
+                            (o.get("yes_ask", 0) - o.get("yes_bid", 0))
+                            if o.get("action") != "BET_NO"
+                            else (o.get("no_ask", 0) - o.get("no_bid", 0))
+                            for o in top_candidates
+                        ) / len(top_candidates)
+                        _avg_edge  = sum(o.get("edge", 0) for o in top_candidates) / len(top_candidates)
+                        _avg_conf  = sum(o.get("confidence", 0) for o in top_candidates) / len(top_candidates)
+                    else:
+                        _avg_spread = _avg_edge = _avg_conf = 0.0
+
+                    print(
+                        f"[EXEC_QUALITY]\n"
+                        f"  before_filter:       {_before_quality}\n"
+                        f"  after_filter:        {_after_quality}\n"
+                        f"  removed_total:       {_before_quality - _after_quality}\n"
+                        f"  avg_spread_selected: {_avg_spread:.4f}\n"
+                        f"  avg_edge_selected:   {_avg_edge:.4f}\n"
+                        f"  avg_conf_selected:   {_avg_conf:.4f}"
+                    )
+
+                    print(f"[EXEC] {_after_quality} actionable | "
                           f"slots {rm_status['open_positions']}/{rm_status['max_open_positions']} used | "
                           f"sending top {len(top_candidates)} to execution")
 
