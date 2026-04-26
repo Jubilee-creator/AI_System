@@ -53,7 +53,7 @@ class PaperTrader:
     def __init__(
         self,
         bankroll: float = 500.0,
-        min_edge: float = 0.03,
+        min_edge: float = 0.02,
         min_confidence: float = 0.65,
         max_bet_size: float = 50.0,
         kelly_fraction: float = 0.25
@@ -243,7 +243,14 @@ class PaperTrader:
             print(f"  Action: {action}")
             print(f"  Size: ${bet_size:.2f}")
             return None
-        
+
+        print(f"[PAPER] ✅ ALL FILTERS PASSED → sending to execution")
+        print(f"  Ticker:  {market_data.ticker}")
+        print(f"  Action:  {action}")
+        print(f"  Conf:    {estimated_prob:.1%}")
+        print(f"  Edge:    {edge:.4f}")
+        print(f"  Size:    ${bet_size:.2f}")
+
         # ═══════════════════════════════════════════════════════
         # TRADE APPROVED - EXECUTE
         # ═══════════════════════════════════════════════════════

@@ -73,7 +73,7 @@ paper_trader = None
 if PAPER_TRADER_OK:
     paper_trader = PaperTrader(
         bankroll=BANKROLL,
-        min_edge=0.03,
+        min_edge=0.02,
         min_confidence=0.65,
         max_bet_size=50.0,
         kelly_fraction=0.25
