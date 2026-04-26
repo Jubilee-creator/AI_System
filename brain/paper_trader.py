@@ -254,9 +254,9 @@ class PaperTrader:
         
         # ═══════════════════════════════════════════════════════
         # HIGH CONFIDENCE FILTER — final hard gate before execution
-        # Blocks all non-ARB trades with confidence < 0.90
+        # Blocks all non-ARB trades with confidence < 0.85
         # ═══════════════════════════════════════════════════════
-        HIGH_CONFIDENCE_THRESHOLD = 0.90
+        HIGH_CONFIDENCE_THRESHOLD = 0.85
         if strategy != "ARB" and estimated_prob < HIGH_CONFIDENCE_THRESHOLD:
             print(f"[PAPER_DEBUG] BLOCKED by HIGH CONFIDENCE FILTER | conf={estimated_prob:.3f} required={HIGH_CONFIDENCE_THRESHOLD}")
             return None
