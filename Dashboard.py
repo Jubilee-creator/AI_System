@@ -175,7 +175,7 @@ def background_scan():
 
                 # ─── PAPER TRADE EVERY SIGNAL ───
                 if paper_trader and PAPER_TRADER_OK:
-                    # Step 1: filter to actionable signals only (drop PASS)
+                    # ── Step 1: drop PASS ─────────────────────────────────────
                     candidates = [o for o in opportunities if o["action"] != "PASS"]
                     _before_quality = len(candidates)
 
@@ -194,17 +194,17 @@ def background_scan():
                     if _any_bad:
                         print("[QUALITY_FILTER] WARNING: invalid quote data detected")
 
-                    # ── Step 1b: Execution quality filter ────────────────────
+                    # ── Step 2: spread quality filter ─────────────────────────
                     _rm_missing = 0
                     _rm_invalid = 0
                     _rm_wide    = 0
-                    filtered = []
+                    _spread_ok  = []
                     for _o in candidates:
-                        _action  = _o.get("action", "")
-                        _ya      = _o.get("yes_ask")
-                        _yb      = _o.get("yes_bid")
-                        _na      = _o.get("no_ask")
-                        _nb      = _o.get("no_bid")
+                        _action = _o.get("action", "")
+                        _ya = _o.get("yes_ask")
+                        _yb = _o.get("yes_bid")
+                        _na = _o.get("no_ask")
+                        _nb = _o.get("no_bid")
 
                         # A) Missing spread data — never default to 0
                         if _action == "BET_NO":
@@ -221,21 +221,21 @@ def background_scan():
                             if _na <= _nb:
                                 _rm_invalid += 1
                                 continue
-                            _spread = _na - _nb
+                            _sp = _na - _nb
                         else:
                             if _ya <= _yb:
                                 _rm_invalid += 1
                                 continue
-                            _spread = _ya - _yb
+                            _sp = _ya - _yb
 
                         # C) Wide spread
-                        if _spread > 0.03:
+                        if _sp > 0.03:
                             _rm_wide += 1
                             continue
 
-                        filtered.append(_o)
+                        _spread_ok.append(_o)
 
-                    candidates = filtered
+                    candidates = _spread_ok
                     _after_quality = len(candidates)
 
                     print(
@@ -247,13 +247,67 @@ def background_scan():
                         f"  candidates_after:         {_after_quality}"
                     )
 
-                    # ── Step 2: rank — edge DESC, confidence DESC, volume DESC ─
+                    # ── Step 3: pre-filter — conf and edge vs paper_trader thresholds
+                    _rm_low_conf = 0
+                    _rm_low_edge = 0
+                    _elite = []
+                    for _o in candidates:
+                        if _o.get("confidence", 0) < paper_trader.min_confidence:
+                            _rm_low_conf += 1
+                            continue
+                        if _o.get("edge", 0) < paper_trader.min_edge:
+                            _rm_low_edge += 1
+                            continue
+                        _elite.append(_o)
+
+                    candidates = _elite
+                    print(
+                        f"[PRE_FILTER]\n"
+                        f"  removed_low_conf: {_rm_low_conf}\n"
+                        f"  removed_low_edge: {_rm_low_edge}"
+                    )
+
+                    # ── Step 4: duplicate ticker protection ───────────────────
+                    # Remove already-open tickers (in-memory current session state)
+                    _open_tickers = {t.get("ticker") for t in paper_trader.open_trades}
+                    _before_dup = len(candidates)
+                    candidates = [o for o in candidates if o.get("ticker") not in _open_tickers]
+                    _dup_open = _before_dup - len(candidates)
+
+                    # Remove scan-batch duplicates: keep best-ranked (first) per ticker
+                    _seen_tickers: set = set()
+                    _deduped = []
+                    for _o in candidates:
+                        _t = _o.get("ticker")
+                        if _t not in _seen_tickers:
+                            _seen_tickers.add(_t)
+                            _deduped.append(_o)
+                    _dup_scan = len(candidates) - len(_deduped)
+                    candidates = _deduped
+
+                    if _dup_open:
+                        print(f"[DUP_FILTER] removed {_dup_open} already-open tickers")
+                    if _dup_scan:
+                        print(f"[DUP_FILTER] removed {_dup_scan} duplicate tickers within scan")
+
+                    # ── Step 5: rank elite candidates ─────────────────────────
+                    # edge DESC, confidence DESC, spread ASC (negate), volume DESC
+                    def _exec_spread(o):
+                        if o.get("action") == "BET_NO":
+                            return (o.get("no_ask") or 0) - (o.get("no_bid") or 0)
+                        return (o.get("yes_ask") or 0) - (o.get("yes_bid") or 0)
+
                     candidates.sort(
-                        key=lambda o: (o.get("edge", 0), o.get("confidence", 0), o.get("volume", 0)),
+                        key=lambda o: (
+                            o.get("edge", 0),
+                            o.get("confidence", 0),
+                            -_exec_spread(o),   # negate: tighter spread ranks higher
+                            o.get("volume", 0),
+                        ),
                         reverse=True
                     )
 
-                    # ── Step 3: limit to available position slots ─────────────
+                    # ── Step 6: take top N = available slots ──────────────────
                     rm_status = paper_trader.risk_manager.get_status()
                     available_slots = max(
                         0,
@@ -261,59 +315,27 @@ def background_scan():
                     )
                     top_candidates = candidates[:available_slots]
 
-                    # ── Step 3b: Duplicate ticker protection ──────────────────
-                    # Already-open tickers: use in-memory state (current session)
-                    _open_tickers = {t.get("ticker") for t in paper_trader.open_trades}
-                    _before_dup = len(top_candidates)
-
-                    top_candidates = [
-                        o for o in top_candidates
-                        if o.get("ticker") not in _open_tickers
-                    ]
-                    _dup_open = _before_dup - len(top_candidates)
-
-                    # Scan-batch deduplication: only the best-ranked instance per ticker
-                    _seen_tickers: set = set()
-                    _deduped = []
-                    for _o in top_candidates:
-                        _t = _o.get("ticker")
-                        if _t not in _seen_tickers:
-                            _seen_tickers.add(_t)
-                            _deduped.append(_o)
-                    _dup_scan = len(top_candidates) - len(_deduped)
-                    top_candidates = _deduped
-
-                    if _dup_open:
-                        print(f"[DUP_FILTER] removed {_dup_open} already-open tickers")
-                    if _dup_scan:
-                        print(f"[DUP_FILTER] removed {_dup_scan} duplicate tickers within scan")
-
-                    # ── Execution quality summary ─────────────────────────────
+                    # ── EXEC_TARGET summary ───────────────────────────────────
                     if top_candidates:
-                        _avg_spread = sum(
-                            (o.get("yes_ask", 0) - o.get("yes_bid", 0))
-                            if o.get("action") != "BET_NO"
-                            else (o.get("no_ask", 0) - o.get("no_bid", 0))
-                            for o in top_candidates
-                        ) / len(top_candidates)
-                        _avg_edge  = sum(o.get("edge", 0) for o in top_candidates) / len(top_candidates)
-                        _avg_conf  = sum(o.get("confidence", 0) for o in top_candidates) / len(top_candidates)
+                        _spreads  = [_exec_spread(o) for o in top_candidates]
+                        _edges    = [o.get("edge", 0) for o in top_candidates]
+                        _confs    = [o.get("confidence", 0) for o in top_candidates]
+                        print(
+                            f"[EXEC_TARGET]\n"
+                            f"  min_edge_selected:   {min(_edges):.4f}\n"
+                            f"  avg_edge_selected:   {sum(_edges)/len(_edges):.4f}\n"
+                            f"  min_conf_selected:   {min(_confs):.4f}\n"
+                            f"  avg_conf_selected:   {sum(_confs)/len(_confs):.4f}\n"
+                            f"  avg_spread_selected: {sum(_spreads)/len(_spreads):.4f}"
+                        )
                     else:
-                        _avg_spread = _avg_edge = _avg_conf = 0.0
+                        print("[EXEC_TARGET] no elite candidates this scan")
 
                     print(
-                        f"[EXEC_QUALITY]\n"
-                        f"  before_filter:       {_before_quality}\n"
-                        f"  after_filter:        {_after_quality}\n"
-                        f"  removed_total:       {_before_quality - _after_quality}\n"
-                        f"  avg_spread_selected: {_avg_spread:.4f}\n"
-                        f"  avg_edge_selected:   {_avg_edge:.4f}\n"
-                        f"  avg_conf_selected:   {_avg_conf:.4f}"
+                        f"[EXEC] elite_candidates={len(candidates)} | "
+                        f"available_slots={available_slots} | "
+                        f"sending={len(top_candidates)}"
                     )
-
-                    print(f"[EXEC] {_after_quality} actionable | "
-                          f"slots {rm_status['open_positions']}/{rm_status['max_open_positions']} used | "
-                          f"sending top {len(top_candidates)} to execution")
 
                     for opp in top_candidates:
                         # Detect event type
