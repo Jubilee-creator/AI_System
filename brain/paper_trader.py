@@ -54,7 +54,7 @@ class PaperTrader:
         self,
         bankroll: float = 500.0,
         min_edge: float = 0.03,
-        min_confidence: float = 0.85,
+        min_confidence: float = 0.70,
         max_bet_size: float = 50.0,
         kelly_fraction: float = 0.25
     ):
@@ -247,7 +247,7 @@ class PaperTrader:
         base_size = self._calculate_kelly_size(estimated_prob, price)
 
         # quality = distance above both filter floors; maps to [0.5x, 2.0x]
-        quality = (estimated_prob - 0.85) + edge
+        quality = (estimated_prob - 0.70) + edge
         multiplier = max(0.5, min(2.0, quality * 10))
         bet_size = round(base_size * multiplier, 2)
         # Re-apply hard caps after scaling
@@ -289,9 +289,9 @@ class PaperTrader:
         
         # ═══════════════════════════════════════════════════════
         # HIGH CONFIDENCE FILTER — final hard gate before execution
-        # Blocks all non-ARB trades with confidence < 0.85
+        # Blocks all non-ARB trades with confidence < 0.70
         # ═══════════════════════════════════════════════════════
-        HIGH_CONFIDENCE_THRESHOLD = 0.85
+        HIGH_CONFIDENCE_THRESHOLD = 0.70
         if strategy != "ARB" and estimated_prob < HIGH_CONFIDENCE_THRESHOLD:
             self.scan_stats["blocked_conf_gate"] += 1
             print(f"[PAPER_DEBUG] BLOCKED by HIGH CONFIDENCE FILTER | conf={estimated_prob:.3f} required={HIGH_CONFIDENCE_THRESHOLD}")
