@@ -261,6 +261,33 @@ def background_scan():
                     )
                     top_candidates = candidates[:available_slots]
 
+                    # ── Step 3b: Duplicate ticker protection ──────────────────
+                    # Already-open tickers: use in-memory state (current session)
+                    _open_tickers = {t.get("ticker") for t in paper_trader.open_trades}
+                    _before_dup = len(top_candidates)
+
+                    top_candidates = [
+                        o for o in top_candidates
+                        if o.get("ticker") not in _open_tickers
+                    ]
+                    _dup_open = _before_dup - len(top_candidates)
+
+                    # Scan-batch deduplication: only the best-ranked instance per ticker
+                    _seen_tickers: set = set()
+                    _deduped = []
+                    for _o in top_candidates:
+                        _t = _o.get("ticker")
+                        if _t not in _seen_tickers:
+                            _seen_tickers.add(_t)
+                            _deduped.append(_o)
+                    _dup_scan = len(top_candidates) - len(_deduped)
+                    top_candidates = _deduped
+
+                    if _dup_open:
+                        print(f"[DUP_FILTER] removed {_dup_open} already-open tickers")
+                    if _dup_scan:
+                        print(f"[DUP_FILTER] removed {_dup_scan} duplicate tickers within scan")
+
                     # ── Execution quality summary ─────────────────────────────
                     if top_candidates:
                         _avg_spread = sum(
@@ -780,8 +807,16 @@ body::after {
           <div class="stat-label-small">Total Trades</div>
         </div>
         <div class="stat-cell">
+          <div class="stat-val-big" id="p-open">0</div>
+          <div class="stat-label-small">Open</div>
+        </div>
+        <div class="stat-cell">
           <div class="stat-val-big" id="p-settled">0</div>
           <div class="stat-label-small">Settled</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val-big" id="p-exposure">$0</div>
+          <div class="stat-label-small">Open Exposure</div>
         </div>
         <div class="stat-cell">
           <div class="stat-val-big" id="p-winrate">--</div>
@@ -789,7 +824,7 @@ body::after {
         </div>
         <div class="stat-cell">
           <div class="stat-val-big" id="p-pnl">$0</div>
-          <div class="stat-label-small">Total P&L</div>
+          <div class="stat-label-small">Realized P&L</div>
         </div>
         <div class="stat-cell">
           <div class="stat-val-big" id="p-edge">--</div>
@@ -928,7 +963,9 @@ function renderLog(logs) {
 function renderPaperStats(stats) {
   if (!stats || Object.keys(stats).length === 0) {
     document.getElementById('p-trades').textContent = '0';
+    document.getElementById('p-open').textContent = '0';
     document.getElementById('p-settled').textContent = '0';
+    document.getElementById('p-exposure').textContent = '$0.00';
     document.getElementById('p-winrate').textContent = '--';
     document.getElementById('p-pnl').textContent = '$0';
     document.getElementById('p-edge').textContent = '--';
@@ -939,19 +976,23 @@ function renderPaperStats(stats) {
     return;
   }
 
-  const total = stats.total_trades || 0;
-  const settled = stats.settled_trades || 0;
-  const winRate = stats.win_rate || 0;
-  const pnl = stats.total_pnl || 0;
-  const edge = stats.avg_edge || 0;
-  const ev = stats.avg_ev || 0;
-  const clv = stats.avg_clv || 0;
-  const sharpe = stats.sharpe || 0;
+  const total    = stats.total_trades    || 0;
+  const open     = stats.open_trades     || 0;
+  const settled  = stats.settled_trades  || 0;
+  const exposure = stats.open_exposure   || 0;
+  const winRate  = stats.win_rate        || 0;
+  const pnl      = stats.total_pnl       || 0;
+  const edge     = stats.avg_edge        || 0;
+  const ev       = stats.avg_ev          || 0;
+  const clv      = stats.avg_clv         || 0;
+  const sharpe   = stats.sharpe          || 0;
 
   document.getElementById('p-trades').textContent = total;
+  document.getElementById('p-open').textContent = open;
   document.getElementById('p-settled').textContent = settled;
+  document.getElementById('p-exposure').textContent = '$' + exposure.toFixed(2);
   document.getElementById('p-winrate').textContent = settled > 0 ? (winRate * 100).toFixed(1) + '%' : '--';
-  
+
   const pnlEl = document.getElementById('p-pnl');
   pnlEl.textContent = pnl >= 0 ? '+$' + pnl.toFixed(2) : '-$' + Math.abs(pnl).toFixed(2);
   pnlEl.className = 'stat-val-big ' + (pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');

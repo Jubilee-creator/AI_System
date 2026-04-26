@@ -411,10 +411,13 @@ class PaperTrader:
         has_edge = avg_edge > 0
         beats_closing = avg_clv > 0
         
+        open_exposure = round(sum(t.get("size", 0) for t in self.open_trades), 2)
+
         return {
             "total_trades": self.total_trades,
             "settled_trades": self.settled_trades,
             "open_trades": len(self.open_trades),
+            "open_exposure": open_exposure,
             "wins": self.wins,
             "losses": self.losses,
             "win_rate": round(win_rate, 3),
@@ -429,7 +432,7 @@ class PaperTrader:
             "bankroll": self.bankroll,
             "current_balance": round(self.bankroll + self.total_pnl, 2)
         }
-    
+
     
     def get_risk_status(self) -> Dict[str, Any]:
         """
