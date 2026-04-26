@@ -174,8 +174,40 @@ def enrich_market_with_quotes(market: dict) -> dict:
     """
     ticker = market.get("ticker", "")
     enriched = dict(market)
-    
-    # Try market detail (PRIMARY)
+
+    # STEP 0: Read *_dollars fields already present on the market dict.
+    # The Kalshi /markets listing endpoint includes these directly —
+    # no extra API call needed. This is the primary price source.
+    _dollars_map = [
+        ("yes_ask_dollars", "yes_ask"),
+        ("yes_bid_dollars", "yes_bid"),
+        ("no_ask_dollars",  "no_ask"),
+        ("no_bid_dollars",  "no_bid"),
+    ]
+    for src, dst in _dollars_map:
+        raw = market.get(src)
+        if raw is not None and enriched.get(dst) is None:
+            try:
+                enriched[dst] = float(raw)
+            except (TypeError, ValueError):
+                pass
+
+    # Also pull volume from *_fp fields if not already set
+    for src in ("volume_24h_fp", "volume_fp", "open_interest_fp"):
+        raw = market.get(src)
+        if raw is not None and enriched.get("volume") is None:
+            try:
+                enriched["volume"] = float(raw)
+                break
+            except (TypeError, ValueError):
+                pass
+
+    # Check if step 0 already gave us quotes
+    has_quotes = any(enriched.get(f) is not None for f in ["yes_ask", "yes_bid", "no_ask", "no_bid"])
+    if has_quotes:
+        return enriched
+
+    # STEP 1: Try market detail endpoint (secondary — fills gaps)
     detail = kalshi_get(f"/markets/{ticker}", silent=True)
     if detail and "market" in detail:
         market_data = detail["market"]
@@ -339,12 +371,45 @@ def build_signal(market: dict) -> Optional[MarketSignal]:
     try:
         ticker = market.get("ticker", "")
         
-        # Extract quotes (already floats in 0-1 range)
+        # Extract quotes (set by enrichment pipeline)
         yes_ask = market.get("yes_ask")
         yes_bid = market.get("yes_bid")
-        no_ask = market.get("no_ask")
-        no_bid = market.get("no_bid")
-        
+        no_ask  = market.get("no_ask")
+        no_bid  = market.get("no_bid")
+
+        # Direct *_dollars fallback: if enrichment didn't set the fields,
+        # read them straight from the raw market dict here.
+        if yes_ask is None:
+            raw = market.get("yes_ask_dollars")
+            if raw is not None:
+                try: yes_ask = float(raw)
+                except (TypeError, ValueError): pass
+        if yes_bid is None:
+            raw = market.get("yes_bid_dollars")
+            if raw is not None:
+                try: yes_bid = float(raw)
+                except (TypeError, ValueError): pass
+        if no_ask is None:
+            raw = market.get("no_ask_dollars")
+            if raw is not None:
+                try: no_ask = float(raw)
+                except (TypeError, ValueError): pass
+        if no_bid is None:
+            raw = market.get("no_bid_dollars")
+            if raw is not None:
+                try: no_bid = float(raw)
+                except (TypeError, ValueError): pass
+
+        # Price validation — skip if no usable ask or bid on either side
+        if (yes_ask or 0) == 0 and (yes_bid or 0) == 0:
+            return None
+
+        # Volume filter — skip very thin markets
+        volume_24h_fp = market.get("volume_24h_fp")
+        raw_vol = float(volume_24h_fp) if volume_24h_fp is not None else float(market.get("volume", 0))
+        if raw_vol < 50:
+            return None
+
         # Calculate mid prices
         yes_mid = None
         no_mid = None
