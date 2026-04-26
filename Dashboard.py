@@ -178,6 +178,16 @@ def background_scan():
                     # Step 1: filter to actionable signals only (drop PASS)
                     candidates = [o for o in opportunities if o["action"] != "PASS"]
 
+                    # Step 1b: spread quality filter — skip wide-spread markets
+                    _before_spread = len(candidates)
+                    candidates = [
+                        o for o in candidates
+                        if abs((o.get("yes_ask") or 0) - (o.get("yes_bid") or 0)) <= 0.03
+                    ]
+                    _spread_removed = _before_spread - len(candidates)
+                    if _spread_removed:
+                        print(f"[QUALITY_FILTER] removed {_spread_removed} trades due to wide spread")
+
                     # Step 2: rank best trades first — edge descending, confidence as tiebreak
                     candidates.sort(
                         key=lambda o: (o.get("edge", 0), o.get("confidence", 0)),
