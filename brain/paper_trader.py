@@ -53,8 +53,8 @@ class PaperTrader:
     def __init__(
         self,
         bankroll: float = 500.0,
-        min_edge: float = 0.05,
-        min_confidence: float = 0.90,
+        min_edge: float = 0.03,
+        min_confidence: float = 0.85,
         max_bet_size: float = 50.0,
         kelly_fraction: float = 0.25
     ):
@@ -89,6 +89,13 @@ class PaperTrader:
         # Trade tracking
         self.open_trades = []
         self.trade_history = []
+
+        # Per-scan diagnostic counters (reset each scan cycle)
+        self.scan_stats = {
+            "total": 0, "blocked_confidence": 0, "blocked_size": 0,
+            "blocked_risk": 0, "blocked_conf_gate": 0, "blocked_edge": 0,
+            "blocked_duplicate": 0, "blocked_liquidity": 0, "executed": 0
+        }
         
         # Logger
         self.logger = TradeLogger()
@@ -157,6 +164,29 @@ class PaperTrader:
         """Return the base market family: prefix before the first '-' or '_'."""
         return ticker.replace('_', '-').split('-')[0].upper()
 
+    def reset_scan_stats(self) -> None:
+        """Reset per-scan diagnostic counters. Call before each scan cycle."""
+        self.scan_stats = {
+            "total": 0, "blocked_confidence": 0, "blocked_size": 0,
+            "blocked_risk": 0, "blocked_conf_gate": 0, "blocked_edge": 0,
+            "blocked_duplicate": 0, "blocked_liquidity": 0, "executed": 0
+        }
+
+    def print_scan_summary(self, n_opps: int = 0) -> None:
+        """Print a one-line-per-filter block count after each scan cycle."""
+        s = self.scan_stats
+        print(
+            f"[PAPER] scan summary | opps={n_opps}"
+            f" evaluated={s['total']}"
+            f" conf={s['blocked_confidence']}"
+            f" conf_gate={s['blocked_conf_gate']}"
+            f" edge={s['blocked_edge']}"
+            f" risk={s['blocked_risk']}"
+            f" dup={s['blocked_duplicate']}"
+            f" liq={s['blocked_liquidity']}"
+            f" size={s['blocked_size']}"
+            f" executed={s['executed']}"
+        )
 
     def process_signal(
         self,
@@ -183,9 +213,12 @@ class PaperTrader:
         if not self.enabled:
             print(f"[PAPER_DEBUG] blocked: trader disabled")
             return None
-        
+
+        self.scan_stats["total"] += 1
+
         # DEBUG 2: Check minimum confidence
         if estimated_prob < self.min_confidence and strategy != "ARB":
+            self.scan_stats["blocked_confidence"] += 1
             print(f"[PAPER_DEBUG] blocked: below min confidence | estimated_prob={estimated_prob:.3f} min_confidence={self.min_confidence:.3f} strategy={strategy}")
             return None
         
@@ -214,7 +247,7 @@ class PaperTrader:
         base_size = self._calculate_kelly_size(estimated_prob, price)
 
         # quality = distance above both filter floors; maps to [0.5x, 2.0x]
-        quality = (estimated_prob - 0.90) + edge
+        quality = (estimated_prob - 0.85) + edge
         multiplier = max(0.5, min(2.0, quality * 10))
         bet_size = round(base_size * multiplier, 2)
         # Re-apply hard caps after scaling
@@ -226,6 +259,7 @@ class PaperTrader:
 
         # DEBUG 6: Check bet size is positive
         if bet_size <= 0:
+            self.scan_stats["blocked_size"] += 1
             print(f"[PAPER_DEBUG] blocked: bet size <= 0")
             return None
         
@@ -246,6 +280,7 @@ class PaperTrader:
         )
         
         if not approved:
+            self.scan_stats["blocked_risk"] += 1
             print(f"[PAPER] ❌ Trade blocked by risk manager: {block_reason}")
             print(f"  Ticker: {market_data.ticker}")
             print(f"  Action: {action}")
@@ -258,6 +293,7 @@ class PaperTrader:
         # ═══════════════════════════════════════════════════════
         HIGH_CONFIDENCE_THRESHOLD = 0.85
         if strategy != "ARB" and estimated_prob < HIGH_CONFIDENCE_THRESHOLD:
+            self.scan_stats["blocked_conf_gate"] += 1
             print(f"[PAPER_DEBUG] BLOCKED by HIGH CONFIDENCE FILTER | conf={estimated_prob:.3f} required={HIGH_CONFIDENCE_THRESHOLD}")
             return None
 
@@ -265,9 +301,10 @@ class PaperTrader:
         # MIN EDGE FILTER — final hard gate before execution
         # Blocks all non-ARB trades with edge < 0.05
         # ═══════════════════════════════════════════════════════
-        MIN_EDGE_THRESHOLD = 0.05
+        MIN_EDGE_THRESHOLD = 0.03
         if strategy != "ARB" and edge < MIN_EDGE_THRESHOLD:
-            print(f"[PAPER_DEBUG] BLOCKED: edge below 0.05 | edge={edge:.4f}")
+            self.scan_stats["blocked_edge"] += 1
+            print(f"[PAPER_DEBUG] BLOCKED: edge below 0.03 | edge={edge:.4f}")
             return None
 
         # ═══════════════════════════════════════════════════════
@@ -279,6 +316,7 @@ class PaperTrader:
             new_family = self._get_market_family(market_data.ticker)
             for open_trade in self.open_trades:
                 if self._get_market_family(open_trade["ticker"]) == new_family:
+                    self.scan_stats["blocked_duplicate"] += 1
                     print(f"[PAPER_DEBUG] BLOCKED: duplicate market family | family={new_family} existing={open_trade['ticker']}")
                     return None
 
@@ -292,6 +330,7 @@ class PaperTrader:
             spread = abs(market_data.yes_price - market_data.no_price)
             volume = market_data.volume_24h
             if spread > MAX_SPREAD_THRESHOLD or (volume > 0 and volume < MIN_VOLUME):
+                self.scan_stats["blocked_liquidity"] += 1
                 print(f"[PAPER_DEBUG] BLOCKED: poor liquidity | spread={spread:.4f} volume={volume}")
                 return None
 
@@ -318,10 +357,11 @@ class PaperTrader:
         
         # Log to file
         self.logger.log_trade(trade)
-        
+
         # Track internally
         self.open_trades.append(trade)
         self.total_trades += 1
+        self.scan_stats["executed"] += 1
         
         # PHASE 4: Track position with risk manager
         self.risk_manager.add_position(bet_size)

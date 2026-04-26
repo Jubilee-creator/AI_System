@@ -176,6 +176,7 @@ def background_scan():
 
                 # ─── PAPER TRADE EVERY SIGNAL ───
                 if paper_trader and PAPER_TRADER_OK:
+                    paper_trader.reset_scan_stats()
                     for opp in opportunities:
                         # Skip PASS signals
                         if opp["action"] == "PASS":
@@ -217,6 +218,7 @@ def background_scan():
                                 strategy=strategy_label
                             )
 
+                    paper_trader.print_scan_summary(len(opportunities))
                     # Update paper stats
                     state["paper_stats"] = paper_trader.get_stats()
 
