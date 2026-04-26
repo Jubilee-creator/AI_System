@@ -25,6 +25,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.decision_engine import (
     MarketSignal, TradeDecision, analyze_market, compute_arb_edge
 )
+from config.trading_config import MAX_SPREAD
 
 
 # ─────────────────────────────────────────
@@ -433,8 +434,8 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
     print(f"[SCAN] {datetime.now().strftime('%H:%M:%S')} — Crypto market scan")
     print(f"{'='*70}")
     
-    skip_reasons = {"no_signal": 0, "low_volume": 0, "pass": 0}
-    skip_examples = {"no_signal": [], "pass": []}
+    skip_reasons = {"no_signal": 0, "low_volume": 0, "wide_spread": 0, "pass": 0}
+    skip_examples = {"no_signal": [], "wide_spread": [], "pass": []}
     
     markets = fetch_and_enrich_crypto_markets()
     
@@ -462,7 +463,25 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
         if signal.volume < MIN_VOLUME and arb_edge is None:
             skip_reasons["low_volume"] += 1
             continue
-        
+
+        # Phase 2: Pre-filter wide-spread markets before ranking.
+        # ARB opportunities bypass this check (spread is irrelevant when buying both sides).
+        if arb_edge is None:
+            yes_ask = market.get("yes_ask")
+            yes_bid = market.get("yes_bid")
+            no_ask  = market.get("no_ask")
+            no_bid  = market.get("no_bid")
+            yes_spread = (yes_ask - yes_bid) if (yes_ask is not None and yes_bid is not None) else None
+            no_spread  = (no_ask  - no_bid)  if (no_ask  is not None and no_bid  is not None) else None
+            spreads = [s for s in [yes_spread, no_spread] if s is not None]
+            if spreads and min(spreads) > MAX_SPREAD:
+                skip_reasons["wide_spread"] += 1
+                if len(skip_examples["wide_spread"]) < 3:
+                    skip_examples["wide_spread"].append(
+                        f"{ticker}: spread={min(spreads):.4f} (max={MAX_SPREAD:.2f})"
+                    )
+                continue
+
         companion = find_companion(signal.ticker, markets)
         
         decision = analyze_market(
@@ -523,6 +542,9 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
     for ex in skip_examples["no_signal"]:
         print(f"[SCAN]     • {ex}")
     print(f"[SCAN]   Low volume (no ARB): {skip_reasons['low_volume']}")
+    print(f"[SCAN]   Wide spread (>{MAX_SPREAD:.2f}): {skip_reasons['wide_spread']}")
+    for ex in skip_examples["wide_spread"]:
+        print(f"[SCAN]     • {ex}")
     print(f"[SCAN]   PASS (edge < {MIN_EDGE:.3f}): {skip_reasons['pass']}")
     for ex in skip_examples["pass"]:
         print(f"[SCAN]     • {ex}")
