@@ -111,8 +111,77 @@ class PaperTrader:
         """Disable paper trading."""
         self.enabled = False
         print(f"[PAPER] DISABLED")
-    
-    
+
+
+    def load_open_trades_from_log(self) -> int:
+        """
+        Reconstruct open_trades from paper_trades.jsonl.
+
+        Only processes new-format records (those that have a 'status' field).
+        For each ticker, counts OPEN records vs SETTLED records in file order;
+        a ticker is currently open when open_count > settled_count, meaning the
+        most recent trade for that ticker has never been closed.
+
+        Skips tickers already present in self.open_trades to avoid duplicates
+        when the Dashboard is running alongside this script.
+
+        Returns the number of open trades loaded into self.open_trades.
+        """
+        log_path = self.logger.log_file
+        if not os.path.exists(log_path):
+            print(f"[PAPER] Log file not found: {log_path}")
+            return 0
+
+        records = []
+        with open(log_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+        # Only new-format records carry a 'status' field
+        new_fmt = [r for r in records if "status" in r]
+
+        # Walk in file order: OPEN starts a position, SETTLED closes one
+        open_recs: dict = {}    # ticker → most-recent OPEN record
+        settled_count: dict = {}  # ticker → number of SETTLED records seen
+
+        for r in new_fmt:
+            ticker = r.get("ticker", "")
+            status = r.get("status", "")
+            if status == "OPEN":
+                open_recs[ticker] = r          # keep last OPEN per ticker
+            elif status == "SETTLED":
+                settled_count[ticker] = settled_count.get(ticker, 0) + 1
+
+        # Currently open = tickers whose OPEN count exceeds their SETTLED count
+        already_loaded = {t.get("ticker") for t in self.open_trades}
+        loaded = 0
+
+        for ticker, rec in open_recs.items():
+            open_count = sum(
+                1 for r in new_fmt
+                if r.get("ticker") == ticker and r.get("status") == "OPEN"
+            )
+            closed_count = settled_count.get(ticker, 0)
+
+            if open_count > closed_count and ticker not in already_loaded:
+                self.open_trades.append(dict(rec))
+                already_loaded.add(ticker)
+                loaded += 1
+
+        if loaded:
+            print(f"[PAPER] Loaded {loaded} open trade(s) from log")
+        else:
+            print(f"[PAPER] No unreconciled open trades found in log")
+
+        return loaded
+
+
     def _calculate_kelly_size(
         self,
         prob: float,
