@@ -553,8 +553,8 @@ class RiskManager:
         # Update P&L
         self.daily_pnl += pnl
         self.weekly_pnl += pnl
-        self.trades_today += 1
-        
+        # trades_today is incremented at open (add_position), NOT here
+
         # Track loss streak
         if result == "LOSS":
             if self.last_trade_result == "LOSS":
@@ -622,10 +622,12 @@ class RiskManager:
     # ───────────────────────────────────────────────────────────
     
     def add_position(self, size: float) -> None:
-        """Record new open position."""
+        """Record new open position and count it against the daily trade limit."""
         self.open_positions += 1
         self.total_exposure += size
+        self.trades_today += 1  # count when trade OPENS, not when it settles
         self._save_state()
+        print(f"[RISK_MANAGER] trades_today: {self.trades_today}/{MAX_TRADES_PER_DAY}")
     
     
     def close_position(self, size: float) -> None:
