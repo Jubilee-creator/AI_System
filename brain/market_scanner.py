@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from cryptography.hazmat.primitives import serialization
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Local engine
 import sys
@@ -253,54 +254,113 @@ def enrich_market_with_quotes(market: dict) -> dict:
     return enriched
 
 
+_QUOTE_FIELDS = ("yes_ask", "yes_bid", "no_ask", "no_bid")
+
+# Conservative worker count: enough to keep all TCP connections busy without
+# hammering Kalshi's rate limits. Each series fetch is one GET request (~250ms);
+# 15 workers turns ~45s of sequential fetches into ~3-4s.
+_SERIES_FETCH_WORKERS = 15
+
+
 def fetch_and_enrich_crypto_markets() -> List[dict]:
-    """Main market fetching pipeline."""
-    # Step 1: Discover series
+    """Main market fetching pipeline with parallel series fetching."""
+    t0_total = time.time()
+
+    # ── Step 1: Discover series ───────────────────────────────────
+    t0_series = time.time()
     crypto_series = discover_crypto_series()
-    
+    t_series = time.time() - t0_series
+
     if not crypto_series:
         return []
-    
-    # Step 2: Fetch markets per series
-    print(f"\n[SCANNER] Fetching markets for {len(crypto_series)} crypto series...")
-    
-    all_markets = []
-    
-    for series in crypto_series:
-        markets = fetch_markets_for_series(series)
-        if markets:
-            all_markets.extend(markets)
-    
+
+    # ── Step 2: Fetch markets per series — parallel ───────────────
+    # All requests still go through kalshi_get() with the same auth and
+    # timeout. No rate limiter is bypassed; workers are limited to
+    # _SERIES_FETCH_WORKERS concurrent connections.
+    print(f"\n[SCANNER] Fetching markets for {len(crypto_series)} crypto series "
+          f"(parallel, workers={_SERIES_FETCH_WORKERS})...")
+
+    t0_markets = time.time()
+    all_markets: List[dict] = []
+    series_success = 0
+    series_empty   = 0
+
+    with ThreadPoolExecutor(max_workers=_SERIES_FETCH_WORKERS) as executor:
+        futures = {executor.submit(fetch_markets_for_series, s): s
+                   for s in crypto_series}
+        for fut in as_completed(futures):
+            try:
+                markets = fut.result()
+            except Exception as exc:
+                print(f"[SCANNER] WARN: {futures[fut]} fetch error: {exc}")
+                markets = []
+            if markets:
+                all_markets.extend(markets)
+                series_success += 1
+            else:
+                series_empty += 1
+
+    t_markets = time.time() - t0_markets
+
+    print(f"[SCANNER] Market fetch:")
+    print(f"[SCANNER]   series_requested: {len(crypto_series)}")
+    print(f"[SCANNER]   series_success:   {series_success}")
+    print(f"[SCANNER]   series_empty:     {series_empty}")
+    print(f"[SCANNER]   markets_found:    {len(all_markets)}")
     print(f"[SCANNER] ✓ Found {len(all_markets)} total crypto markets")
-    
+
     if not all_markets:
         return []
-    
-    # Step 3: Enrich with quotes
+
+    # ── Step 3: Enrich with quotes ────────────────────────────────
     print(f"\n[SCANNER] Enriching {len(all_markets)} markets with quotes...")
-    
-    enriched = []
-    enriched_count = 0
-    failed_examples = []
-    
+    t0_enrich = time.time()
+
+    enriched:  List[dict] = []
+    enriched_count   = 0
+    list_only        = 0   # quotes already in the list-endpoint response
+    detail_fetched   = 0   # quotes added by the /markets/{ticker} detail call
+    orderbook_fetched = 0  # quotes added by the orderbook fallback
+    failed_examples: List[str] = []
+
     for market in all_markets:
         ticker = market.get("ticker", "")
+
+        # Record which quote fields the list endpoint already provided
+        pre_quotes = any(market.get(f) is not None for f in _QUOTE_FIELDS)
+
         enriched_market = enrich_market_with_quotes(market)
-        
-        has_quotes = any(enriched_market.get(f) is not None for f in ["yes_ask", "yes_bid", "no_ask", "no_bid"])
-        
+
+        has_quotes = any(enriched_market.get(f) is not None for f in _QUOTE_FIELDS)
+
         if has_quotes:
             enriched.append(enriched_market)
             enriched_count += 1
+            if pre_quotes:
+                list_only += 1
+            else:
+                detail_fetched += 1   # came from detail or orderbook call
         else:
             if len(failed_examples) < 5:
                 failed_examples.append(ticker)
-    
+
+    t_enrich = time.time() - t0_enrich
+    t_total  = time.time() - t0_total
+
     print(f"[SCANNER] ✓ Enriched: {enriched_count}/{len(all_markets)} have quotes")
-    
+    print(f"[SCANNER] Quote src: list-only={list_only}, "
+          f"detail-fetched={detail_fetched}, orderbook-fetched={orderbook_fetched}")
+
     if failed_examples:
         print(f"[SCANNER] Missing quotes: {', '.join(failed_examples)}")
-    
+
+    print(f"\n[SCANNER] Timing:")
+    print(f"[SCANNER]   series_fetch_time:  {t_series:.1f}s")
+    print(f"[SCANNER]   markets_fetch_time: {t_markets:.1f}s")
+    print(f"[SCANNER]   enrichment_time:    {t_enrich:.1f}s")
+    print(f"[SCANNER]   total_scan_time:    {t_total:.1f}s")
+
     return enriched
 
 
