@@ -25,7 +25,11 @@ from brain.risk_manager import RiskManager
 # Import dependencies
 from logs.trade_logger import TradeLogger
 from engine.edge_calculator import MarketData
-from config.trading_config import PAPER_VALIDATION_MODE, PAPER_VALIDATION_MAX_BET_SIZE
+from config.trading_config import (
+    PAPER_VALIDATION_MODE,
+    PAPER_VALIDATION_MAX_BET_SIZE,
+    MAX_POSITIONS_PER_TICKER,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -254,7 +258,16 @@ class PaperTrader:
         if estimated_prob < self.min_confidence and strategy != "ARB":
             print(f"[PAPER_DEBUG] blocked: below min confidence | estimated_prob={estimated_prob:.3f} min_confidence={self.min_confidence:.3f} strategy={strategy}")
             return None
-        
+
+        # Duplicate-ticker guard: enforce MAX_POSITIONS_PER_TICKER
+        ticker_open_count = sum(
+            1 for t in self.open_trades if t.get("ticker") == market_data.ticker
+        )
+        if ticker_open_count >= MAX_POSITIONS_PER_TICKER:
+            print(f"[RISK_BLOCK] Duplicate ticker — skipping {market_data.ticker} "
+                  f"({ticker_open_count} open position(s) already)")
+            return None
+
         # Determine action and price
         if estimated_prob >= 0.5:
             action = "BET_YES"
