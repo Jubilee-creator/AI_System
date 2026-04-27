@@ -475,6 +475,7 @@ def build_signal(market: dict) -> Optional[MarketSignal]:
             ticker=ticker,
             price_yes=price_yes,          # ASK price — actual cost for BET_YES
             price_no=price_no,            # ASK price — actual cost for BET_NO
+            yes_mid=yes_mid,              # bid/ask mid — used as Bayesian prior only
             volume=volume * vol_spike,
             price_change=price_change,
             volatility=max(0.001, volatility),
