@@ -657,8 +657,30 @@ class RiskManager:
         self.open_positions = max(0, self.open_positions - 1)
         self.total_exposure = max(0, self.total_exposure - size)
         self._save_state()
-    
-    
+
+
+    def rebuild_from_trade_log(self, open_trades: list) -> None:
+        """
+        Reconcile open_positions and total_exposure with the actual open trades.
+
+        Call this after settlement to resync counters with paper_trades.jsonl.
+        Only updates position/exposure fields.  daily_pnl, weekly_pnl,
+        loss_streak, cooldown, and trades_today are left unchanged.
+
+        Args:
+            open_trades: Current open-trade list from PaperTrader.open_trades
+        """
+        self.open_positions = len(open_trades)
+        self.total_exposure = round(
+            sum(float(t.get("size", 0.0)) for t in open_trades), 2
+        )
+        self._save_state()
+        print(
+            f"[RISK_SYNC] Rebuilt from log: "
+            f"positions={self.open_positions} exposure=${self.total_exposure:.2f}"
+        )
+
+
     # ───────────────────────────────────────────────────────────
     # STATUS & REPORTING
     # ───────────────────────────────────────────────────────────
