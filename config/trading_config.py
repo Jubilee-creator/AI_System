@@ -230,6 +230,9 @@ MIN_CLV_TO_GO_LIVE = 0.0
 PAPER_VALIDATION_MODE = True
 PAPER_VALIDATION_MAX_BET_SIZE = 10.00  # $ per trade while in validation mode
 
+# Maximum concurrent open positions per ticker (1 = no duplicate exposure)
+MAX_POSITIONS_PER_TICKER = 1
+
 
 # ═══════════════════════════════════════════════════════════════
 # LOGGING & PERSISTENCE
