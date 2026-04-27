@@ -32,6 +32,8 @@ from brokers.kalshi_client import kalshi_get, get_client
 # CONFIG
 # ─────────────────────────────────────────
 
+_QUOTE_FIELDS = ["yes_bid", "yes_ask", "no_bid", "no_ask"]
+
 CRYPTO_KEYWORDS = [
     "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
     "crypto", "xrp", "ripple", "cardano", "ada", "dogecoin",
@@ -100,99 +102,152 @@ def fetch_markets_for_series(series_ticker: str) -> List[dict]:
 # QUOTE ENRICHMENT
 # ─────────────────────────────────────────
 
-def enrich_market_with_quotes(market: dict) -> dict:
+def _extract_quotes_from_dict(d: dict) -> dict:
     """
-    Enrich market with quote data.
-    
-    PRIMARY: Market detail endpoint provides:
-    - yes_bid_dollars (string like "0.2000")
-    - yes_ask_dollars (string like "0.2400")
-    - no_bid_dollars (string like "0.7600")
-    - no_ask_dollars (string like "0.8000")
-    Already in probability units (0.00-1.00), NOT cents.
-    
-    FALLBACK: Orderbook if detail missing quotes:
-    - Extract highest bid from yes_dollars and no_dollars arrays
-    - Derive asks: yes_ask = 1 - no_bid, no_ask = 1 - yes_bid
+    Extract quote + volume from any Kalshi market dict, regardless of format.
+
+    The Kalshi list endpoint returns integer cents:
+        yes_bid = 25   →  0.25 probability
+    The detail endpoint returns string dollars:
+        yes_bid_dollars = "0.2500"  →  0.25 probability
+    Internal dicts may already hold floats in [0, 1].
+
+    After extracting whatever is present, derives any missing sides using
+    the Kalshi identity:  yes + no = 1.00  (complementary contracts).
+    Returns only fields that are present and valid; missing fields are absent.
+    """
+    def to_prob(val) -> Optional[float]:
+        if val is None:
+            return None
+        # JSON integer from list endpoint → cents (1 = 1¢ = 0.01, not 100%)
+        if isinstance(val, int):
+            if 0 <= val <= 100:
+                return round(val / 100.0, 6)
+            return None
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return None
+        if 0.0 <= v <= 1.0:
+            return round(v, 6)
+        if 1.0 < v <= 100.0:   # float-cents edge case
+            return round(v / 100.0, 6)
+        return None
+
+    out: dict = {}
+
+    # Priority 1: string-dollar fields (detail endpoint format)
+    for src, dst in [
+        ("yes_bid_dollars", "yes_bid"),
+        ("yes_ask_dollars", "yes_ask"),
+        ("no_bid_dollars",  "no_bid"),
+        ("no_ask_dollars",  "no_ask"),
+    ]:
+        v = to_prob(d.get(src))
+        if v is not None:
+            out[dst] = v
+
+    # Priority 2: direct bid/ask fields (list endpoint integer-cents)
+    for field in _QUOTE_FIELDS:
+        if field not in out:
+            v = to_prob(d.get(field))
+            if v is not None:
+                out[field] = v
+
+    # Derive missing sides: yes + no = 1.00 (Kalshi complementary identity)
+    if "yes_bid" in out and "no_ask" not in out:
+        out["no_ask"] = round(1.0 - out["yes_bid"], 6)
+    if "yes_ask" in out and "no_bid" not in out:
+        out["no_bid"] = round(1.0 - out["yes_ask"], 6)
+    if "no_bid" in out and "yes_ask" not in out:
+        out["yes_ask"] = round(1.0 - out["no_bid"], 6)
+    if "no_ask" in out and "yes_bid" not in out:
+        out["yes_bid"] = round(1.0 - out["no_ask"], 6)
+
+    # Volume: prefer dollar-volume from detail, fall back to contract count from list
+    for f in ("volume_fp", "volume_24h_fp", "open_interest_fp", "volume", "open_interest"):
+        raw = d.get(f)
+        if raw is not None:
+            try:
+                out["volume"] = float(raw)
+                break
+            except (TypeError, ValueError):
+                pass
+
+    return out
+
+
+def _has_full_quotes(d: dict) -> bool:
+    """True if all four bid/ask fields are present (not None)."""
+    return all(d.get(f) is not None for f in _QUOTE_FIELDS)
+
+
+def enrich_market_with_quotes(market: dict) -> tuple[dict, int]:
+    """
+    Enrich market with quote data using a 3-tier waterfall.
+
+    Tier 0 (no extra API call):  list-response data already contains quotes.
+    Tier 1 (1 API call):         GET /markets/{ticker} fills missing fields.
+    Tier 2 (1 API call):         GET /markets/{ticker}/orderbook last resort.
+
+    Returns (enriched_market, tier_used) where tier_used is 0, 1, or 2.
+    Signal generation, edge logic, and filters are untouched downstream.
     """
     ticker = market.get("ticker", "")
     enriched = dict(market)
-    
-    # Try market detail (PRIMARY)
+
+    # ── Tier 0: list-response data ────────────────────────────────
+    list_quotes = _extract_quotes_from_dict(market)
+    enriched.update(list_quotes)
+
+    if _has_full_quotes(enriched) and enriched.get("volume") is not None:
+        return enriched, 0
+
+    # ── Tier 1: market detail endpoint ───────────────────────────
     detail = kalshi_get(f"/markets/{ticker}", silent=True)
     if detail and "market" in detail:
-        market_data = detail["market"]
-        
-        # Extract quote fields (already in probability units)
-        yes_bid_str = market_data.get("yes_bid_dollars")
-        yes_ask_str = market_data.get("yes_ask_dollars")
-        no_bid_str = market_data.get("no_bid_dollars")
-        no_ask_str = market_data.get("no_ask_dollars")
-        
-        # Convert to floats if present
-        if yes_bid_str is not None:
-            enriched["yes_bid"] = float(yes_bid_str)
-        if yes_ask_str is not None:
-            enriched["yes_ask"] = float(yes_ask_str)
-        if no_bid_str is not None:
-            enriched["no_bid"] = float(no_bid_str)
-        if no_ask_str is not None:
-            enriched["no_ask"] = float(no_ask_str)
-        
-        # Extract volume fields
-        volume_fp = market_data.get("volume_fp")
-        volume_24h_fp = market_data.get("volume_24h_fp")
-        open_interest_fp = market_data.get("open_interest_fp")
-        
-        if volume_fp is not None:
-            enriched["volume"] = float(volume_fp)
-        elif volume_24h_fp is not None:
-            enriched["volume"] = float(volume_24h_fp)
-        elif open_interest_fp is not None:
-            enriched["volume"] = float(open_interest_fp)
-    
-    # Check if we have quotes now
-    has_quotes = any(enriched.get(f) is not None for f in ["yes_ask", "yes_bid", "no_ask", "no_bid"])
-    
-    # FALLBACK: Try orderbook if still missing quotes
-    if not has_quotes:
-        orderbook = kalshi_get(f"/markets/{ticker}/orderbook", silent=True)
-        if orderbook and "orderbook_fp" in orderbook:
-            ob_fp = orderbook["orderbook_fp"]
-            
-            yes_levels = ob_fp.get("yes_dollars", [])
-            no_levels = ob_fp.get("no_dollars", [])
-            
-            yes_bid = None
-            no_bid = None
-            
-            # Extract highest bids (first element in arrays)
-            if yes_levels and isinstance(yes_levels, list) and len(yes_levels) > 0:
-                if isinstance(yes_levels[0], list) and len(yes_levels[0]) > 0:
-                    yes_bid = float(yes_levels[0][0])
-            
-            if no_levels and isinstance(no_levels, list) and len(no_levels) > 0:
-                if isinstance(no_levels[0], list) and len(no_levels[0]) > 0:
-                    no_bid = float(no_levels[0][0])
-            
-            # Derive asks from bids
-            if yes_bid is not None and no_bid is not None:
-                enriched["yes_bid"] = yes_bid
-                enriched["no_bid"] = no_bid
-                enriched["yes_ask"] = 1.0 - no_bid
-                enriched["no_ask"] = 1.0 - yes_bid
-            elif yes_bid is not None:
-                enriched["yes_bid"] = yes_bid
-                enriched["yes_ask"] = min(1.0, yes_bid + 0.01)
-                enriched["no_ask"] = 1.0 - yes_bid
-                enriched["no_bid"] = max(0.0, 1.0 - enriched["yes_ask"])
-            elif no_bid is not None:
-                enriched["no_bid"] = no_bid
-                enriched["no_ask"] = min(1.0, no_bid + 0.01)
-                enriched["yes_ask"] = 1.0 - no_bid
-                enriched["yes_bid"] = max(0.0, 1.0 - enriched["no_ask"])
-    
-    return enriched
+        detail_quotes = _extract_quotes_from_dict(detail["market"])
+        for k, v in detail_quotes.items():
+            if enriched.get(k) is None:  # never overwrite good list data
+                enriched[k] = v
+
+    if _has_full_quotes(enriched):
+        return enriched, 1
+
+    # ── Tier 2: orderbook fallback ────────────────────────────────
+    orderbook = kalshi_get(f"/markets/{ticker}/orderbook", silent=True)
+    if orderbook and "orderbook_fp" in orderbook:
+        ob_fp = orderbook["orderbook_fp"]
+        yes_levels = ob_fp.get("yes_dollars", [])
+        no_levels  = ob_fp.get("no_dollars",  [])
+
+        yes_bid = no_bid = None
+
+        if yes_levels and isinstance(yes_levels, list) and len(yes_levels) > 0:
+            if isinstance(yes_levels[0], list) and len(yes_levels[0]) > 0:
+                yes_bid = float(yes_levels[0][0])
+
+        if no_levels and isinstance(no_levels, list) and len(no_levels) > 0:
+            if isinstance(no_levels[0], list) and len(no_levels[0]) > 0:
+                no_bid = float(no_levels[0][0])
+
+        if yes_bid is not None and no_bid is not None:
+            enriched["yes_bid"] = yes_bid
+            enriched["no_bid"]  = no_bid
+            enriched["yes_ask"] = 1.0 - no_bid
+            enriched["no_ask"]  = 1.0 - yes_bid
+        elif yes_bid is not None:
+            enriched["yes_bid"] = yes_bid
+            enriched["yes_ask"] = min(1.0, yes_bid + 0.01)
+            enriched["no_ask"]  = 1.0 - yes_bid
+            enriched["no_bid"]  = max(0.0, 1.0 - enriched["yes_ask"])
+        elif no_bid is not None:
+            enriched["no_bid"]  = no_bid
+            enriched["no_ask"]  = min(1.0, no_bid + 0.01)
+            enriched["yes_ask"] = 1.0 - no_bid
+            enriched["yes_bid"] = max(0.0, 1.0 - enriched["no_ask"])
+
+    return enriched, 2
 
 
 def fetch_and_enrich_crypto_markets() -> List[dict]:
@@ -223,47 +278,52 @@ def fetch_and_enrich_crypto_markets() -> List[dict]:
     if not all_markets:
         return []
 
-    # Step 3: Parallel enrichment (rate-limited via shared client)
+    # Step 3: Parallel enrichment — 3-tier waterfall, rate-limited
     print(f"\n[SCANNER] Enriching {len(all_markets)} markets"
           f" ({MAX_ENRICH_WORKERS} workers, rate-limited)...")
 
-    enriched = []
-    enriched_count = 0
+    enriched_list   = []
     failed_examples = []
+    tier_counts     = [0, 0, 0]   # [list-only, detail-called, orderbook-called]
 
     with ThreadPoolExecutor(max_workers=MAX_ENRICH_WORKERS) as pool:
         futures = {pool.submit(enrich_market_with_quotes, m): m for m in all_markets}
         for future in as_completed(futures):
-            enriched_market = future.result()
-            ticker = enriched_market.get("ticker", "?")
+            enriched_market, tier = future.result()
+            tier_counts[min(tier, 2)] += 1
             has_quotes = any(
-                enriched_market.get(f) is not None
-                for f in ["yes_ask", "yes_bid", "no_ask", "no_bid"]
+                enriched_market.get(f) is not None for f in _QUOTE_FIELDS
             )
             if has_quotes:
-                enriched.append(enriched_market)
-                enriched_count += 1
+                enriched_list.append(enriched_market)
             elif len(failed_examples) < 5:
-                failed_examples.append(ticker)
+                failed_examples.append(enriched_market.get("ticker", "?"))
 
     t3 = time.monotonic()
-
     stats = client.scan_stats()
+    enriched_count = len(enriched_list)
+
     print(f"[SCANNER] ✓ Enriched: {enriched_count}/{len(all_markets)} have quotes")
     print(
-        f"[SCANNER] Timing  : series={t1-t0:.1f}s | "
+        f"[SCANNER] Quote src : "
+        f"list-only={tier_counts[0]} | detail-fetched={tier_counts[1]}"
+        f" | orderbook-fetched={tier_counts[2]}"
+        f"  (detail skipped={tier_counts[0]}/{len(all_markets)})"
+    )
+    print(
+        f"[SCANNER] Timing   : series={t1-t0:.1f}s | "
         f"markets={t2-t1:.1f}s | enrich={t3-t2:.1f}s | total={t3-t0:.1f}s"
     )
     print(
-        f"[SCANNER] API rate: {stats['requests']} requests @ {stats['rate_rps']} req/s"
+        f"[SCANNER] API stats: {stats['requests']} requests @ {stats['rate_rps']} req/s"
         f" | throttled={stats['throttled']} | retried={stats['retried']}"
         f" | wait={stats['wait_ms_total']:.0f}ms"
     )
 
     if failed_examples:
-        print(f"[SCANNER] Missing quotes: {', '.join(failed_examples)}")
+        print(f"[SCANNER] No-quote markets: {', '.join(failed_examples)}")
 
-    return enriched
+    return enriched_list
 
 
 # ─────────────────────────────────────────
