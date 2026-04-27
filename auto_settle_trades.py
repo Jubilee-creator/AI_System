@@ -147,6 +147,10 @@ def run(dry_run: bool) -> None:
 
         print()
 
+    # ── Reconcile risk state with actual open trades ───────────────────────────
+    if not dry_run:
+        trader.risk_manager.rebuild_from_trade_log(trader.open_trades)
+
     # ── Summary ────────────────────────────────────────────────────────────────
     print("=" * 60)
     print(f"[AUTO-SETTLE] {mode_label} SUMMARY")
