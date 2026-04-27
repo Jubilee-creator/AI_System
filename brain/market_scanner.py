@@ -372,51 +372,36 @@ def build_signal(market: dict) -> Optional[MarketSignal]:
         no_ask = market.get("no_ask")
         no_bid = market.get("no_bid")
         
-        # Calculate mid prices
-        yes_mid = None
-        no_mid = None
-        
-        if yes_ask is not None and yes_bid is not None:
-            yes_mid = (yes_ask + yes_bid) / 2
-        elif yes_ask is not None:
-            yes_mid = yes_ask
-        elif yes_bid is not None:
-            yes_mid = yes_bid
-        
-        if no_ask is not None and no_bid is not None:
-            no_mid = (no_ask + no_bid) / 2
-        elif no_ask is not None:
-            no_mid = no_ask
-        elif no_bid is not None:
-            no_mid = no_bid
-        
-        if yes_mid is None and no_mid is None:
+        # Entry prices: ASK is the actual cost to enter each side.
+        # Derive from Kalshi identity (yes_ask = 1 - no_bid) where missing.
+        entry_yes = yes_ask if yes_ask is not None else (
+            round(1.0 - no_bid, 6) if no_bid is not None else None
+        )
+        entry_no = no_ask if no_ask is not None else (
+            round(1.0 - yes_bid, 6) if yes_bid is not None else None
+        )
+
+        if entry_yes is None or entry_no is None:
             return None
-        
-        # Infer missing side
-        if yes_mid is None and no_mid is not None:
-            yes_mid = 1.0 - no_mid
-        if no_mid is None and yes_mid is not None:
-            no_mid = 1.0 - yes_mid
-        
-        if yes_mid is None or no_mid is None:
-            return None
-        
+
+        # Mid kept for price-history tracking only (avoids bid/ask bounce in trend signal)
+        yes_mid = (yes_ask + yes_bid) / 2 if (yes_ask is not None and yes_bid is not None) else entry_yes
+
         # Volume
         volume = market.get("volume", 0.0)
         volume = float(volume)
         vol_spike = _volume_tracker.update(ticker, volume)
-        
-        # Price history
+
+        # Price history (use mid to smooth bid/ask bounce)
         price_hist = _price_history[ticker]
         price_hist.append(yes_mid)
         if len(price_hist) > 20:
             price_hist.pop(0)
-        
+
         price_change = 0.0
         if len(price_hist) >= 3:
             price_change = price_hist[-1] - price_hist[-3]
-        
+
         # Volatility
         volatility = 0.03
         if len(price_hist) >= 5:
@@ -424,11 +409,11 @@ def build_signal(market: dict) -> Optional[MarketSignal]:
                 volatility = statistics.stdev(price_hist[-5:])
             except:
                 volatility = 0.03
-        
+
         return MarketSignal(
             ticker=ticker,
-            price_yes=yes_mid,
-            price_no=no_mid,
+            price_yes=entry_yes,   # YES ask — price paid to enter YES
+            price_no=entry_no,     # NO ask — price paid to enter NO
             volume=volume * vol_spike,
             price_change=price_change,
             volatility=max(0.001, volatility),
@@ -508,8 +493,12 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
             "edge": round(decision.edge, 4),
             "kelly_frac": round(decision.kelly_fraction, 4),
             "bet_size": round(decision.dollar_size, 2),
-            "price_yes": round(signal.price_yes, 3),
-            "price_no": round(signal.price_no, 3),
+            "price_yes": round(signal.price_yes, 4),   # yes_ask
+            "price_no": round(signal.price_no, 4),     # no_ask
+            "yes_bid": round(market.get("yes_bid") or signal.price_yes, 4),
+            "yes_ask": round(signal.price_yes, 4),
+            "no_bid":  round(market.get("no_bid") or signal.price_no, 4),
+            "no_ask":  round(signal.price_no, 4),
             "yes_plus_no": round(signal.price_yes + signal.price_no, 3),
             "arb_edge": decision.arb_edge,
             "z_score": round(decision.z_score, 2) if decision.z_score else None,
