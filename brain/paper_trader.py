@@ -92,7 +92,10 @@ class PaperTrader:
         
         # Logger
         self.logger = TradeLogger()
-        
+
+        # Rebuild counters and open trades from persisted log
+        self._load_state_from_trade_log()
+
         print(f"[PAPER] Initialized PaperTrader")
         print(f"  Bankroll: ${self.bankroll:.2f}")
         print(f"  Min edge: {self.min_edge*100:.1f}%")
@@ -101,6 +104,73 @@ class PaperTrader:
         print(f"  Kelly fraction: {self.kelly_fraction}")
     
     
+    def _load_state_from_trade_log(self) -> None:
+        """
+        Rebuild in-memory state from logs/paper_trades.jsonl on startup.
+
+        The log may contain two entries per trade (OPEN then SETTLED).
+        Deduplication key: (ticker, timestamp) — last line seen wins, so
+        a SETTLED entry always supersedes its corresponding OPEN entry.
+
+        Read-only: never writes to the log during this call.
+        Safe to call on missing or malformed log files.
+        """
+        log_path = self.logger.log_file
+
+        if not os.path.exists(log_path):
+            print("[PAPER] No trade log found — starting clean")
+            return
+
+        trades_by_key: dict = {}
+        lines_skipped = 0
+
+        try:
+            with open(log_path, "r") as fh:
+                for raw in fh:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        trade = json.loads(raw)
+                        key = (trade.get("ticker", ""), trade.get("timestamp", ""))
+                        trades_by_key[key] = trade
+                    except Exception:
+                        lines_skipped += 1
+                        continue
+        except Exception as exc:
+            print(f"[PAPER] Warning: could not read trade log: {exc}")
+            return
+
+        if lines_skipped:
+            print(f"[PAPER] Warning: skipped {lines_skipped} malformed line(s) in trade log")
+
+        for trade in trades_by_key.values():
+            status = trade.get("status", "")
+            result = trade.get("result")
+            pnl    = float(trade.get("pnl") or 0.0)
+
+            if status == "OPEN":
+                self.open_trades.append(trade)
+                self.total_trades += 1
+            elif status == "SETTLED":
+                self.trade_history.append(trade)
+                self.total_trades  += 1
+                self.settled_trades += 1
+                self.total_pnl     += pnl
+                if result == "WIN":
+                    self.wins += 1
+                elif result == "LOSS":
+                    self.losses += 1
+
+        if self.total_trades > 0:
+            print(
+                f"[PAPER] State rebuilt: {self.total_trades} total | "
+                f"{self.settled_trades} settled | "
+                f"{len(self.open_trades)} open | "
+                f"P&L=${self.total_pnl:.2f}"
+            )
+
+
     def enable(self) -> None:
         """Enable paper trading - will log all signals."""
         self.enabled = True
