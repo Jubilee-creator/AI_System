@@ -6,17 +6,17 @@ Targets Kalshi BTC/ETH/SOL crypto markets.
 Feeds raw market data → decision_engine → ranked opportunities.
 
 PRODUCTION VERSION: Series-based discovery with correct quote parsing
+M-7: Rate-limited via brokers.kalshi_client; parallel market enrichment.
 """
 
 import os
 import time
 import json
-import requests
 import statistics
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional, List
-from cryptography.hazmat.primitives import serialization
 from collections import defaultdict
 
 # Local engine
@@ -25,18 +25,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.decision_engine import (
     MarketSignal, TradeDecision, analyze_market, compute_arb_edge
 )
+from brokers.kalshi_client import kalshi_get, get_client
 
 
 # ─────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────
-
-KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-KEY_ID = os.getenv("KALSHI_API_KEY_ID", "")
-PRIVATE_KEY_PATH = os.getenv(
-    "KALSHI_PRIVATE_KEY_PATH",
-    "/Users/samuel/Desktop/AI_System/kalshi_private_key.pem"
-)
 
 CRYPTO_KEYWORDS = [
     "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
@@ -49,59 +43,8 @@ BANKROLL = float(os.getenv("BANKROLL", "500"))
 MIN_VOLUME = 0
 MIN_EDGE = 0.015
 SCAN_INTERVAL = 30
+MAX_ENRICH_WORKERS = 15  # parallel threads for market detail calls
 
-
-# ─────────────────────────────────────────
-# AUTH
-# ─────────────────────────────────────────
-
-def _load_private_key():
-    try:
-        with open(PRIVATE_KEY_PATH, "rb") as f:
-            return serialization.load_pem_private_key(f.read(), password=None)
-    except Exception as e:
-        print(f"[AUTH ERROR] {e}")
-        return None
-
-
-def _build_auth_header(method: str, path: str) -> dict:
-    private_key = _load_private_key()
-    if not private_key:
-        return {}
-    
-    timestamp = str(int(time.time() * 1000))
-    msg = timestamp + method.upper() + path
-    
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import padding
-    import base64
-    
-    signature = private_key.sign(msg.encode(), padding.PKCS1v15(), hashes.SHA256())
-    sig_b64 = base64.b64encode(signature).decode()
-    
-    return {
-        "KALSHI-ACCESS-KEY": KEY_ID,
-        "KALSHI-ACCESS-TIMESTAMP": timestamp,
-        "KALSHI-ACCESS-SIGNATURE": sig_b64,
-        "Content-Type": "application/json"
-    }
-
-
-def kalshi_get(path: str, silent: bool = False) -> Optional[dict]:
-    headers = _build_auth_header("GET", path)
-    if not headers:
-        return None
-    try:
-        r = requests.get(KALSHI_API_BASE + path, headers=headers, timeout=10)
-        if r.status_code == 200:
-            return r.json()
-        elif not silent:
-            print(f"[API] {path} → {r.status_code}")
-        return None
-    except Exception as e:
-        if not silent:
-            print(f"[API ERROR] {e}")
-        return None
 
 
 # ─────────────────────────────────────────
@@ -253,53 +196,73 @@ def enrich_market_with_quotes(market: dict) -> dict:
 
 
 def fetch_and_enrich_crypto_markets() -> List[dict]:
-    """Main market fetching pipeline."""
+    """Main market fetching pipeline — rate-limited, parallel enrichment."""
+    client = get_client()
+    client.start_scan()
+    t0 = time.monotonic()
+
     # Step 1: Discover series
     crypto_series = discover_crypto_series()
-    
+    t1 = time.monotonic()
+
     if not crypto_series:
         return []
-    
-    # Step 2: Fetch markets per series
+
+    # Step 2: Fetch markets per series (N series calls, sequential)
     print(f"\n[SCANNER] Fetching markets for {len(crypto_series)} crypto series...")
-    
+
     all_markets = []
-    
     for series in crypto_series:
         markets = fetch_markets_for_series(series)
         if markets:
             all_markets.extend(markets)
-    
+
+    t2 = time.monotonic()
     print(f"[SCANNER] ✓ Found {len(all_markets)} total crypto markets")
-    
+
     if not all_markets:
         return []
-    
-    # Step 3: Enrich with quotes
-    print(f"\n[SCANNER] Enriching {len(all_markets)} markets with quotes...")
-    
+
+    # Step 3: Parallel enrichment (rate-limited via shared client)
+    print(f"\n[SCANNER] Enriching {len(all_markets)} markets"
+          f" ({MAX_ENRICH_WORKERS} workers, rate-limited)...")
+
     enriched = []
     enriched_count = 0
     failed_examples = []
-    
-    for market in all_markets:
-        ticker = market.get("ticker", "")
-        enriched_market = enrich_market_with_quotes(market)
-        
-        has_quotes = any(enriched_market.get(f) is not None for f in ["yes_ask", "yes_bid", "no_ask", "no_bid"])
-        
-        if has_quotes:
-            enriched.append(enriched_market)
-            enriched_count += 1
-        else:
-            if len(failed_examples) < 5:
+
+    with ThreadPoolExecutor(max_workers=MAX_ENRICH_WORKERS) as pool:
+        futures = {pool.submit(enrich_market_with_quotes, m): m for m in all_markets}
+        for future in as_completed(futures):
+            enriched_market = future.result()
+            ticker = enriched_market.get("ticker", "?")
+            has_quotes = any(
+                enriched_market.get(f) is not None
+                for f in ["yes_ask", "yes_bid", "no_ask", "no_bid"]
+            )
+            if has_quotes:
+                enriched.append(enriched_market)
+                enriched_count += 1
+            elif len(failed_examples) < 5:
                 failed_examples.append(ticker)
-    
+
+    t3 = time.monotonic()
+
+    stats = client.scan_stats()
     print(f"[SCANNER] ✓ Enriched: {enriched_count}/{len(all_markets)} have quotes")
-    
+    print(
+        f"[SCANNER] Timing  : series={t1-t0:.1f}s | "
+        f"markets={t2-t1:.1f}s | enrich={t3-t2:.1f}s | total={t3-t0:.1f}s"
+    )
+    print(
+        f"[SCANNER] API rate: {stats['requests']} requests @ {stats['rate_rps']} req/s"
+        f" | throttled={stats['throttled']} | retried={stats['retried']}"
+        f" | wait={stats['wait_ms_total']:.0f}ms"
+    )
+
     if failed_examples:
         print(f"[SCANNER] Missing quotes: {', '.join(failed_examples)}")
-    
+
     return enriched
 
 
@@ -543,9 +506,10 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
 
 
 def continuous_scan(interval: int = SCAN_INTERVAL, bankroll: float = BANKROLL):
-    """Run continuous scan loop."""
-    print(f"[SCANNER] Starting | interval={interval}s | bankroll=${bankroll}")
+    """Run continuous scan loop — sleeps only the time remaining after each scan."""
+    print(f"[SCANNER] Starting | min_interval={interval}s | bankroll=${bankroll}")
     while True:
+        t_start = time.monotonic()
         try:
             results = scan_crypto_markets(bankroll)
             output_path = os.path.join(
@@ -566,8 +530,16 @@ def continuous_scan(interval: int = SCAN_INTERVAL, bankroll: float = BANKROLL):
             import traceback
             print(f"[SCANNER ERROR] {e}")
             traceback.print_exc()
-        
-        time.sleep(interval)
+            time.sleep(interval)
+            continue
+
+        elapsed = time.monotonic() - t_start
+        sleep_s = max(0.0, interval - elapsed)
+        if sleep_s > 0:
+            print(f"[SCANNER] Next scan in {sleep_s:.0f}s")
+            time.sleep(sleep_s)
+        else:
+            print(f"[SCANNER] Scan took {elapsed:.1f}s (>{interval}s interval) — restarting immediately")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,11 @@
 .env
 *.pem
 .DS_Store
+
+# Runtime log files — never commit these
+logs/*.jsonl
+logs/*.log
+
+# Runtime data / state files — never commit these
+data/*.json
+data/risk_state.json
