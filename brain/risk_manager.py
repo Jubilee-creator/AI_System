@@ -378,7 +378,7 @@ class RiskManager:
             self.logger.log_trade_blocked(ticker, reason)
             return False, reason
         
-        # ── CHECK 3: Daily loss limit ──
+        # ── CHECK 3: Daily loss limit (realized) ──
         if self.daily_pnl <= DAILY_LOSS_LIMIT:
             reason = f"Daily loss limit hit: ${self.daily_pnl:.2f} / ${DAILY_LOSS_LIMIT:.2f}"
             self.logger.log_loss_limit_hit(
@@ -386,13 +386,37 @@ class RiskManager:
                 loss_limit=DAILY_LOSS_LIMIT,
                 trades_today=self.trades_today
             )
-            
+
             # Auto-activate kill switch on loss limit hit
             if not self.kill_switch_active:
                 self.activate_kill_switch(reason="Daily loss limit reached")
-            
+
             return False, reason
-        
+
+        # ── CHECK 3b: Effective daily risk (realized P&L + open exposure) ──
+        # Worst-case: all open positions lose their full size.
+        effective_daily_risk = self.daily_pnl - self.total_exposure
+        if effective_daily_risk <= DAILY_LOSS_LIMIT:
+            reason = (
+                f"Effective daily risk breaches limit — "
+                f"daily_pnl=${self.daily_pnl:.2f} "
+                f"open_exposure=${self.total_exposure:.2f} "
+                f"effective=${effective_daily_risk:.2f} "
+                f"limit=${DAILY_LOSS_LIMIT:.2f}"
+            )
+            self.logger.log_event(
+                event_type="TRADE_BLOCKED",
+                details={
+                    "reason": "Effective daily risk includes open exposure",
+                    "daily_pnl": self.daily_pnl,
+                    "open_exposure": self.total_exposure,
+                    "effective_daily_risk": effective_daily_risk,
+                    "daily_loss_limit": DAILY_LOSS_LIMIT,
+                },
+                severity="CRITICAL"
+            )
+            return False, reason
+
         # ── CHECK 4: Weekly loss limit ──
         if self.weekly_pnl <= WEEKLY_LOSS_LIMIT:
             reason = f"Weekly loss limit hit: ${self.weekly_pnl:.2f} / ${WEEKLY_LOSS_LIMIT:.2f}"
