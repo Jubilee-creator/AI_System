@@ -45,8 +45,7 @@ BANKROLL = float(os.getenv("BANKROLL", "500"))
 MIN_VOLUME = 0
 MIN_EDGE = 0.015
 SCAN_INTERVAL = 30
-MAX_ENRICH_WORKERS = 15       # parallel threads for market detail/enrichment calls
-MAX_SERIES_FETCH_WORKERS = 10  # parallel threads for per-series market-list fetches
+MAX_ENRICH_WORKERS = 15  # parallel threads for market detail calls
 
 
 
@@ -264,17 +263,14 @@ def fetch_and_enrich_crypto_markets() -> List[dict]:
     if not crypto_series:
         return []
 
-    # Step 2: SERIES_FETCH — parallel market-list fetches, rate-limited via kalshi_client
-    print(f"\n[SCANNER] SERIES_FETCH {len(crypto_series)} series"
-          f" ({MAX_SERIES_FETCH_WORKERS} workers, rate-limited)...")
+    # Step 2: Fetch markets per series (N series calls, sequential)
+    print(f"\n[SCANNER] Fetching markets for {len(crypto_series)} crypto series...")
 
-    all_markets: list = []
-    with ThreadPoolExecutor(max_workers=MAX_SERIES_FETCH_WORKERS) as pool:
-        sf_futures = {pool.submit(fetch_markets_for_series, s): s for s in crypto_series}
-        for future in as_completed(sf_futures):
-            markets = future.result()
-            if markets:
-                all_markets.extend(markets)
+    all_markets = []
+    for series in crypto_series:
+        markets = fetch_markets_for_series(series)
+        if markets:
+            all_markets.extend(markets)
 
     t2 = time.monotonic()
     print(f"[SCANNER] ✓ Found {len(all_markets)} total crypto markets")
