@@ -164,8 +164,8 @@ def background_scan():
                 opportunities = scan_crypto_markets(bankroll=BANKROLL)
                 
             elif LEGACY_OK:
-                # Fallback to legacy scanner
-            if BRAIN_OK:            
+                pass  # handled in the second branch below
+            if BRAIN_OK:
 
                 state["opportunities"] = opportunities
                 state["last_scan"] = now
@@ -193,20 +193,25 @@ def background_scan():
                         # Determine reason tag
                         reason_tag = determine_reason_tag(opp)
                         
-                        # Build MarketData object
+                        # Build MarketData with real quotes from scanner
+                        _yes_ask = opp.get("yes_ask", opp.get("price_yes", 0.5))
+                        _yes_bid = opp.get("yes_bid", _yes_ask)
+                        _no_ask  = opp.get("no_ask",  opp.get("price_no",  0.5))
+                        _no_bid  = opp.get("no_bid",  _no_ask)
+                        _spread  = round(_yes_ask - _yes_bid, 4)
                         market_data = MarketData(
                             ticker=opp.get("ticker", "UNKNOWN"),
-                            yes_price=opp.get("price_yes", 0.5),
-                            no_price=opp.get("price_no", 0.5),
-                            yes_bid=opp.get("price_yes", 0.5) - 0.01,
-                            yes_ask=opp.get("price_yes", 0.5) + 0.01,
-                            no_bid=opp.get("price_no", 0.5) - 0.01,
-                            no_ask=opp.get("price_no", 0.5) + 0.01,
+                            yes_price=_yes_ask,
+                            no_price=_no_ask,
+                            yes_bid=_yes_bid,
+                            yes_ask=_yes_ask,
+                            no_bid=_no_bid,
+                            no_ask=_no_ask,
                             volume_24h=opp.get("volume", 0),
-                            spread=0.02,  # Default 2¢ spread
-                            liquidity=opp.get("volume", 0) // 10,  # Estimate
-                            fee_rate=0.01,  # Kalshi 1% fee
-                            time_to_expiry=24.0,  # Default 24h
+                            spread=_spread,
+                            liquidity=opp.get("volume", 0) // 10,
+                            fee_rate=0.01,
+                            time_to_expiry=24.0,
                             venue="kalshi"
                         )
                         
