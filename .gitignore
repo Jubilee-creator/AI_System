@@ -4,3 +4,7 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# Runtime files
+logs/*.jsonl
+data/*.json
