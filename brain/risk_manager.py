@@ -200,8 +200,12 @@ class RiskManager:
     
     
     def _save_state(self) -> None:
-        """Persist state to file."""
-        state = {
+        """Persist state to file, merging with any existing content.
+
+        Reads the current file first so unrecognised fields (written by other
+        tools) are preserved.  Risk-manager fields always win on conflict.
+        """
+        new_fields = {
             "daily_pnl": self.daily_pnl,
             "weekly_pnl": self.weekly_pnl,
             "trades_today": self.trades_today,
@@ -216,14 +220,24 @@ class RiskManager:
             "kill_switch_active": self.kill_switch_active,
             "last_updated": datetime.now(timezone.utc).isoformat()
         }
-        
+
         try:
-            # Ensure directory exists
             os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
-            
+
+            # Merge: load existing file, overlay with new values
+            existing = {}
+            if os.path.exists(self.state_file):
+                try:
+                    with open(self.state_file, "r") as f:
+                        existing = json.load(f)
+                except Exception:
+                    pass  # corrupt / empty file — overwrite cleanly
+
+            existing.update(new_fields)  # risk_manager values always win
+
             with open(self.state_file, "w") as f:
-                json.dump(state, f, indent=2)
-        
+                json.dump(existing, f, indent=2)
+
         except Exception as e:
             print(f"[RISK_MANAGER] Failed to save state: {e}")
     

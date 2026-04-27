@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
 settle_trade.py - Manually settle paper trades when markets resolve
-Usage: Edit the trade_id, outcome, and final_price below, then run
+Usage: Set TICKER and OUTCOME below, then run:
+  python3 settle_trade.py
+
+TICKER  — the market ticker exactly as logged in paper_trades.jsonl
+OUTCOME — the market resolution: "YES" or "NO"
+          (the trader figures out win/loss from your bet direction)
 """
 
 import sys
@@ -12,31 +17,30 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from brain.paper_trader import PaperTrader
 
-# Initialize trader
+# Initialize trader (reloads open trades from paper_trades.jsonl)
 trader = PaperTrader()
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # EDIT THESE VALUES ↓
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-TRADE_ID = "trade_20260414_005842_986671"  # Get this from logs/paper_trades.jsonl
-OUTCOME = "win"  # "win" or "loss"
-FINAL_MARKET_PRICE = 0.68  # What the market closed at (for CLV calculation)
+TICKER  = "KXBTCUSD-23DEC1-T12345"  # Copy exact ticker from paper_trades.jsonl
+OUTCOME = "YES"                      # "YES" or "NO" — what the market resolved to
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 if __name__ == "__main__":
     print(f"\n{'='*60}")
-    print(f"SETTLING TRADE: {TRADE_ID}")
+    print(f"SETTLING TRADE: {TICKER}  →  outcome={OUTCOME}")
     print(f"{'='*60}\n")
-    
-    trader.settle_trade(
-        trade_id=TRADE_ID,
-        outcome=OUTCOME,
-        final_market_price=FINAL_MARKET_PRICE
-    )
-    
-    print(f"\n{'='*60}")
-    print("UPDATED STATS")
-    print(f"{'='*60}")
-    trader.print_stats()
+
+    result = trader.settle_trade(TICKER, OUTCOME)
+
+    if result:
+        print(f"\n{'='*60}")
+        print("UPDATED STATS")
+        print(f"{'='*60}")
+        trader.print_stats()
+    else:
+        print(f"[ERROR] No open trade found for ticker: {TICKER}")
+        print("Check paper_trades.jsonl for the exact ticker string.")
