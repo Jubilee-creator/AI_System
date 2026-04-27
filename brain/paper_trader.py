@@ -25,6 +25,7 @@ from brain.risk_manager import RiskManager
 # Import dependencies
 from logs.trade_logger import TradeLogger
 from engine.edge_calculator import MarketData
+from config.trading_config import PAPER_VALIDATION_MODE, PAPER_VALIDATION_MAX_BET_SIZE
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -282,7 +283,13 @@ class PaperTrader:
         
         # Calculate bet size
         bet_size = self._calculate_kelly_size(estimated_prob, price)
-        
+
+        # Validation-mode cap: limit trade size while collecting edge data.
+        # Daily loss limit, exposure check, min_edge, and min_confidence are unchanged.
+        if PAPER_VALIDATION_MODE and bet_size > PAPER_VALIDATION_MAX_BET_SIZE:
+            print(f"[PAPER_DEBUG] validation cap applied: original_size={bet_size:.2f} capped_size={PAPER_VALIDATION_MAX_BET_SIZE:.2f}")
+            bet_size = PAPER_VALIDATION_MAX_BET_SIZE
+
         # DEBUG 5: Show bet size calculation
         print(f"[PAPER_DEBUG] bet_size={bet_size:.2f} bankroll={self.bankroll:.2f} max_bet_size={self.max_bet_size:.2f}")
         
