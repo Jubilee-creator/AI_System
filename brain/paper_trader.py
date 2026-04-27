@@ -99,6 +99,9 @@ class PaperTrader:
         print(f"  Min confidence: {self.min_confidence*100:.1f}%")
         print(f"  Max bet: ${self.max_bet_size:.2f}")
         print(f"  Kelly fraction: {self.kelly_fraction}")
+
+        # Rebuild full state from persistent log so restarts are transparent
+        self.load_state_from_logs()
     
     
     def enable(self) -> None:
@@ -111,6 +114,98 @@ class PaperTrader:
         """Disable paper trading."""
         self.enabled = False
         print(f"[PAPER] DISABLED")
+
+
+    def load_state_from_logs(self) -> None:
+        """
+        Reconstruct full paper_trader state from logs/paper_trades.jsonl.
+
+        Called automatically on __init__ so restarts are transparent.
+
+        Rebuilds:
+          open_trades   — tickers whose OPEN count exceeds SETTLED count
+          trade_history — all SETTLED records
+          total_trades  — count of OPEN records (= trades placed)
+          settled_trades, wins, losses, total_pnl — from SETTLED records
+
+        Rules:
+          - Only processes new-format records (those with a 'status' field)
+          - Corrupted / incomplete lines are skipped safely
+          - Per-ticker: latest OPEN record is used; SETTLED count tracks closures
+          - If self.open_trades already has an entry for a ticker it is kept
+            (guards against double-loading when called alongside settle_trade.py)
+        """
+        log_path = self.logger.log_file
+        if not os.path.exists(log_path):
+            return
+
+        raw_records: list = []
+        with open(log_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    raw_records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+        # Only new-format records carry a 'status' field
+        new_fmt = [r for r in raw_records if "status" in r and r.get("ticker")]
+
+        if not new_fmt:
+            return
+
+        # Walk in file order, tracking the most-recent OPEN record and all
+        # SETTLED records per ticker.
+        open_recs:    dict = {}  # ticker → most-recent OPEN record
+        open_counts:  dict = {}  # ticker → number of OPEN records written
+        settled_recs: dict = {}  # ticker → list of SETTLED records (in order)
+
+        for r in new_fmt:
+            ticker = r.get("ticker", "")
+            status = r.get("status", "")
+            if not ticker or status not in ("OPEN", "SETTLED"):
+                continue
+
+            if status == "OPEN":
+                open_recs[ticker]  = r
+                open_counts[ticker] = open_counts.get(ticker, 0) + 1
+            else:  # SETTLED
+                settled_recs.setdefault(ticker, []).append(r)
+
+        # ── Rebuild open_trades ────────────────────────────────────────
+        # A ticker is currently open when its OPEN count exceeds its SETTLED count
+        already_loaded = {t.get("ticker") for t in self.open_trades}
+
+        for ticker, rec in open_recs.items():
+            if open_counts.get(ticker, 0) > len(settled_recs.get(ticker, [])):
+                if ticker not in already_loaded:
+                    self.open_trades.append(dict(rec))
+                    already_loaded.add(ticker)
+
+        # ── Rebuild stats from SETTLED records ─────────────────────────
+        all_settled = []
+        for recs in settled_recs.values():
+            all_settled.extend(recs)
+
+        wins      = sum(1 for r in all_settled if r.get("result") == "WIN")
+        losses    = sum(1 for r in all_settled if r.get("result") == "LOSS")
+        total_pnl = sum(float(r.get("pnl", 0.0)) for r in all_settled)
+
+        self.total_trades   = sum(open_counts.values())   # every OPEN record = one trade placed
+        self.settled_trades = len(all_settled)
+        self.wins           = wins
+        self.losses         = losses
+        self.total_pnl      = round(total_pnl, 2)
+        self.trade_history  = [dict(r) for r in all_settled]
+
+        print(
+            f"[PAPER_REBUILD] open_trades={len(self.open_trades)} "
+            f"settled_trades={self.settled_trades} "
+            f"wins={self.wins} losses={self.losses} "
+            f"total_pnl=${self.total_pnl:+.2f}"
+        )
 
 
     def load_open_trades_from_log(self) -> int:
