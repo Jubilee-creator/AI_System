@@ -224,6 +224,12 @@ MIN_AVG_EDGE_TO_GO_LIVE = 0.02
 # Minimum CLV (closing line value) to go live
 MIN_CLV_TO_GO_LIVE = 0.0
 
+# Validation mode: cap individual trade size to collect more trades
+# before daily exposure limit is consumed.  All other risk controls
+# (daily loss limit, exposure check, confidence, edge) remain unchanged.
+PAPER_VALIDATION_MODE = True
+PAPER_VALIDATION_MAX_BET_SIZE = 10.00  # $ per trade while in validation mode
+
 
 # ═══════════════════════════════════════════════════════════════
 # LOGGING & PERSISTENCE
