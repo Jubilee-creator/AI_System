@@ -335,80 +335,92 @@ _price_history: dict[str, list] = defaultdict(list)
 def build_signal(market: dict) -> Optional[MarketSignal]:
     """
     Convert enriched market dict → MarketSignal.
-    Quote fields are already floats in 0.0-1.0 probability units.
+
+    price_yes = yes_ask  (actual entry price for BET_YES — what you pay)
+    price_no  = no_ask   (actual entry price for BET_NO  — what you pay)
+
+    Mid prices are retained only for price-history, price_change, and
+    volatility tracking so those signals remain centered on the market.
     """
     try:
         ticker = market.get("ticker", "")
-        
+
         # Extract quotes (already floats in 0-1 range)
         yes_ask = market.get("yes_ask")
         yes_bid = market.get("yes_bid")
-        no_ask = market.get("no_ask")
-        no_bid = market.get("no_bid")
-        
-        # Calculate mid prices
+        no_ask  = market.get("no_ask")
+        no_bid  = market.get("no_bid")
+
+        # ── Mid prices: used ONLY for history / price_change / volatility ──
         yes_mid = None
-        no_mid = None
-        
+        no_mid  = None
+
         if yes_ask is not None and yes_bid is not None:
             yes_mid = (yes_ask + yes_bid) / 2
         elif yes_ask is not None:
             yes_mid = yes_ask
         elif yes_bid is not None:
             yes_mid = yes_bid
-        
+
         if no_ask is not None and no_bid is not None:
             no_mid = (no_ask + no_bid) / 2
         elif no_ask is not None:
             no_mid = no_ask
         elif no_bid is not None:
             no_mid = no_bid
-        
+
         if yes_mid is None and no_mid is None:
             return None
-        
-        # Infer missing side
-        if yes_mid is None and no_mid is not None:
+
+        # Infer missing mid from complement
+        if yes_mid is None:
             yes_mid = 1.0 - no_mid
-        if no_mid is None and yes_mid is not None:
+        if no_mid is None:
             no_mid = 1.0 - yes_mid
-        
-        if yes_mid is None or no_mid is None:
-            return None
-        
+
+        # ── Execution prices: ASK (what you actually pay to enter) ──
+        # BET_YES → buy YES contracts at yes_ask
+        # BET_NO  → buy NO  contracts at no_ask
+        price_yes = yes_ask if yes_ask is not None else yes_mid
+        price_no  = no_ask  if no_ask  is not None else no_mid
+
+        # Infer missing ask from complement of the other ask
+        if yes_ask is None and no_ask is not None:
+            price_yes = 1.0 - no_ask
+        if no_ask is None and yes_ask is not None:
+            price_no = 1.0 - yes_ask
+
         # Volume
-        volume = market.get("volume", 0.0)
-        volume = float(volume)
+        volume    = float(market.get("volume", 0.0))
         vol_spike = _volume_tracker.update(ticker, volume)
-        
-        # Price history
+
+        # Price history uses mid (tracks market center, not cost-to-enter)
         price_hist = _price_history[ticker]
         price_hist.append(yes_mid)
         if len(price_hist) > 20:
             price_hist.pop(0)
-        
+
         price_change = 0.0
         if len(price_hist) >= 3:
             price_change = price_hist[-1] - price_hist[-3]
-        
-        # Volatility
+
         volatility = 0.03
         if len(price_hist) >= 5:
             try:
                 volatility = statistics.stdev(price_hist[-5:])
             except:
                 volatility = 0.03
-        
+
         return MarketSignal(
             ticker=ticker,
-            price_yes=yes_mid,
-            price_no=no_mid,
+            price_yes=price_yes,          # ASK price — actual cost for BET_YES
+            price_no=price_no,            # ASK price — actual cost for BET_NO
             volume=volume * vol_spike,
             price_change=price_change,
             volatility=max(0.001, volatility),
             order_book_imbalance=0.0
         )
-    
+
     except Exception as e:
         print(f"[BUILD_SIGNAL] Error on {market.get('ticker', '?')}: {e}")
         return None

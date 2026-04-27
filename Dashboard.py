@@ -347,20 +347,24 @@ def background_scan():
                         # Determine reason tag
                         reason_tag = determine_reason_tag(opp)
 
-                        # Build MarketData object
+                        # Build MarketData object — use real quotes from scanner
+                        _ya = opp.get("yes_ask", opp.get("price_yes", 0.5))
+                        _yb = opp.get("yes_bid", opp.get("price_yes", 0.5))
+                        _na = opp.get("no_ask",  opp.get("price_no",  0.5))
+                        _nb = opp.get("no_bid",  opp.get("price_no",  0.5))
                         market_data = MarketData(
                             ticker=opp.get("ticker", "UNKNOWN"),
-                            yes_price=opp.get("price_yes", 0.5),
-                            no_price=opp.get("price_no", 0.5),
-                            yes_bid=opp.get("price_yes", 0.5) - 0.01,
-                            yes_ask=opp.get("price_yes", 0.5) + 0.01,
-                            no_bid=opp.get("price_no", 0.5) - 0.01,
-                            no_ask=opp.get("price_no", 0.5) + 0.01,
+                            yes_price=_ya,   # entry price for BET_YES = yes_ask
+                            no_price=_na,    # entry price for BET_NO  = no_ask
+                            yes_bid=_yb,
+                            yes_ask=_ya,
+                            no_bid=_nb,
+                            no_ask=_na,
                             volume_24h=opp.get("volume", 0),
-                            spread=0.02,  # Default 2¢ spread
-                            liquidity=opp.get("volume", 0) // 10,  # Estimate
-                            fee_rate=0.01,  # Kalshi 1% fee
-                            time_to_expiry=24.0,  # Default 24h
+                            spread=round(_ya - _yb, 4),
+                            liquidity=opp.get("volume", 0) // 10,
+                            fee_rate=0.01,
+                            time_to_expiry=24.0,
                             venue="kalshi"
                         )
 

@@ -253,24 +253,32 @@ class PaperTrader:
             print(f"[PAPER_DEBUG] blocked: below min confidence | estimated_prob={estimated_prob:.3f} min_confidence={self.min_confidence:.3f} strategy={strategy}")
             return None
         
-        # Determine action and price
+        # Determine action and price — use ASK (actual cost to enter)
         if estimated_prob >= 0.5:
             action = "BET_YES"
-            price = market_data.yes_price
+            price  = market_data.yes_ask   # what you pay to buy YES
         else:
             action = "BET_NO"
-            price = market_data.no_price
+            price  = market_data.no_ask    # what you pay to buy NO
             estimated_prob = 1.0 - estimated_prob  # Flip for NO side
-        
+
         # ARB override
         if strategy == "ARB":
             action = "ARB"
-            # For ARB, estimated_prob is near 1.0
             estimated_prob = 0.99
-        
-        # Calculate edge (after fees)
+
+        # Calculate edge (after fees) — using ask price so edge is conservative
         edge = estimated_prob - price - 0.01  # 1¢ fee estimate
-        
+
+        # PRICE_DEBUG: confirm ask price is being used, not mid
+        _bid_shown = market_data.yes_bid if action != "BET_NO" else market_data.no_bid
+        _ask_shown = market_data.yes_ask if action != "BET_NO" else market_data.no_ask
+        print(
+            f"[PRICE_DEBUG] ticker={market_data.ticker} action={action} "
+            f"model_prob={estimated_prob:.4f} bid={_bid_shown:.4f} "
+            f"ask={_ask_shown:.4f} price_used={price:.4f} edge={edge:.4f}"
+        )
+
         # DEBUG 3: Show calculated values
         print(f"[PAPER_DEBUG] action={action} price={price:.3f} estimated_prob={estimated_prob:.3f} edge={edge:.4f} min_edge={self.min_edge:.4f}")
         
