@@ -32,7 +32,7 @@ except ImportError:
 # ─────────────────────────────────────────
 
 try:
-    from brain.market_scanner import scan_crypto_markets, fetch_crypto_markets, build_signal
+    from brain.market_scanner import scan_crypto_markets, fetch_and_enrich_crypto_markets, build_signal
     from engine.decision_engine import analyze_market, compute_arb_edge
     BRAIN_OK = True
 except ImportError as e:
