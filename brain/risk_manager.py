@@ -574,10 +574,9 @@ class RiskManager:
             ticker: Market ticker (optional)
         """
         
-        # Update P&L
+        # Update P&L (trades_today incremented at open in add_position, not here)
         self.daily_pnl += pnl
         self.weekly_pnl += pnl
-        self.trades_today += 1
         
         # Track loss streak
         if result == "LOSS":
@@ -646,9 +645,10 @@ class RiskManager:
     # ───────────────────────────────────────────────────────────
     
     def add_position(self, size: float) -> None:
-        """Record new open position."""
+        """Record new open position. Increments trades_today at open."""
         self.open_positions += 1
         self.total_exposure += size
+        self.trades_today += 1
         self._save_state()
     
     
