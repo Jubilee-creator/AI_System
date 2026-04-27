@@ -87,12 +87,31 @@ def load_risk_state() -> dict:
         return {}
 
 
-def save_risk_state(state: dict) -> None:
-    """Write risk_state.json, creating data/ directory if needed."""
+def save_risk_state(updates: dict) -> None:
+    """
+    Merge `updates` into the existing risk_state.json and write back.
+
+    Always reads the current file first so no field is silently wiped.
+    Callers only need to supply the fields they intend to change.
+
+    Fields that must NEVER be wiped by position-reset operations:
+      daily_pnl, weekly_pnl, trades_today, loss_streak,
+      last_trade_result, last_reset_date, week_start_date
+    """
+    existing = load_risk_state()           # full on-disk state (or {} if absent)
+    merged   = {**existing, **updates}     # existing fields win unless overridden
+    merged["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+    # Safety log: confirm the critical accounting fields survived the merge
+    _preserved_keys = ["daily_pnl", "weekly_pnl", "trades_today", "loss_streak"]
+    _present = {k: merged[k] for k in _preserved_keys if k in merged}
+    if _present:
+        parts = ", ".join(f"{k}={v}" for k, v in _present.items())
+        print(f"  [PAPER_STATE] Preserved risk fields: {parts}")
+
     RISK_STATE.parent.mkdir(parents=True, exist_ok=True)
-    state["last_updated"] = datetime.now(timezone.utc).isoformat()
     with open(RISK_STATE, "w") as f:
-        json.dump(state, f, indent=2)
+        json.dump(merged, f, indent=2)
     print(f"  Saved → {RISK_STATE}")
 
 
