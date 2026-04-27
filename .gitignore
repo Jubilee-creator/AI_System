@@ -1,6 +1,9 @@
 .env
 *.pem
 .DS_Store
+__pycache__/
+*.pyc
+*.pyo
 
 # Runtime log files — never commit these
 logs/*.jsonl
