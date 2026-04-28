@@ -32,7 +32,7 @@ except ImportError:
 # ─────────────────────────────────────────
 
 try:
-    from brain.market_scanner import scan_crypto_markets, fetch_crypto_markets, build_signal
+    from brain.market_scanner import scan_crypto_markets, build_signal
     from engine.decision_engine import analyze_market, compute_arb_edge
     BRAIN_OK = True
 except ImportError as e:
@@ -73,7 +73,7 @@ paper_trader = None
 if PAPER_TRADER_OK:
     paper_trader = PaperTrader(
         bankroll=BANKROLL,
-        min_edge=0.03,
+        min_edge=0.02,
         min_confidence=0.65,
         max_bet_size=50.0,
         kelly_fraction=0.25
@@ -162,10 +162,6 @@ def background_scan():
         try:
             if BRAIN_OK:
                 opportunities = scan_crypto_markets(bankroll=BANKROLL)
-                
-            elif LEGACY_OK:
-                # Fallback to legacy scanner
-            if BRAIN_OK:            
 
                 state["opportunities"] = opportunities
                 state["last_scan"] = now
@@ -179,37 +175,199 @@ def background_scan():
 
                 # ─── PAPER TRADE EVERY SIGNAL ───
                 if paper_trader and PAPER_TRADER_OK:
-                    for opp in opportunities:
-                        # Skip PASS signals
-                        if opp["action"] == "PASS":
+                    # ── Step 1: drop PASS ─────────────────────────────────────
+                    candidates = [o for o in opportunities if o["action"] != "PASS"]
+                    _before_quality = len(candidates)
+
+                    # ── DEBUG SAMPLE: prove quote fields are present ──────────
+                    for _s in candidates[:3]:
+                        print(
+                            f"[DEBUG_SAMPLE] ticker={_s.get('ticker')} "
+                            f"yes_bid={_s.get('yes_bid')} yes_ask={_s.get('yes_ask')} "
+                            f"no_bid={_s.get('no_bid')} no_ask={_s.get('no_ask')}"
+                        )
+                    _any_bad = any(
+                        _s.get("yes_bid") is None or _s.get("yes_ask") is None or
+                        _s.get("no_bid")  is None or _s.get("no_ask")  is None
+                        for _s in candidates[:3]
+                    )
+                    if _any_bad:
+                        print("[QUALITY_FILTER] WARNING: invalid quote data detected")
+
+                    # ── Step 2: spread quality filter ─────────────────────────
+                    _rm_missing = 0
+                    _rm_invalid = 0
+                    _rm_wide    = 0
+                    _spread_ok  = []
+                    for _o in candidates:
+                        _action = _o.get("action", "")
+                        _ya = _o.get("yes_ask")
+                        _yb = _o.get("yes_bid")
+                        _na = _o.get("no_ask")
+                        _nb = _o.get("no_bid")
+
+                        # A) Missing spread data — never default to 0
+                        if _action == "BET_NO":
+                            if _na is None or _nb is None:
+                                _rm_missing += 1
+                                continue
+                        else:
+                            if _ya is None or _yb is None:
+                                _rm_missing += 1
+                                continue
+
+                        # B) Invalid market structure (crossed/flat book)
+                        if _action == "BET_NO":
+                            if _na <= _nb:
+                                _rm_invalid += 1
+                                continue
+                            _sp = _na - _nb
+                        else:
+                            if _ya <= _yb:
+                                _rm_invalid += 1
+                                continue
+                            _sp = _ya - _yb
+
+                        # C) Wide spread
+                        if _sp > 0.03:
+                            _rm_wide += 1
                             continue
-                        
+
+                        _spread_ok.append(_o)
+
+                    candidates = _spread_ok
+                    _after_quality = len(candidates)
+
+                    print(
+                        f"[QUALITY_FILTER]\n"
+                        f"  candidates_before:        {_before_quality}\n"
+                        f"  removed_missing_spread:   {_rm_missing}\n"
+                        f"  removed_invalid_structure:{_rm_invalid}\n"
+                        f"  removed_wide_spread:      {_rm_wide}\n"
+                        f"  candidates_after:         {_after_quality}"
+                    )
+
+                    # ── Step 3: pre-filter — conf and edge vs paper_trader thresholds
+                    _rm_low_conf = 0
+                    _rm_low_edge = 0
+                    _elite = []
+                    for _o in candidates:
+                        if _o.get("confidence", 0) < paper_trader.min_confidence:
+                            _rm_low_conf += 1
+                            continue
+                        if _o.get("edge", 0) < paper_trader.min_edge:
+                            _rm_low_edge += 1
+                            continue
+                        _elite.append(_o)
+
+                    candidates = _elite
+                    print(
+                        f"[PRE_FILTER]\n"
+                        f"  removed_low_conf: {_rm_low_conf}\n"
+                        f"  removed_low_edge: {_rm_low_edge}"
+                    )
+
+                    # ── Step 4: duplicate ticker protection ───────────────────
+                    # Remove already-open tickers (in-memory current session state)
+                    _open_tickers = {t.get("ticker") for t in paper_trader.open_trades}
+                    _before_dup = len(candidates)
+                    candidates = [o for o in candidates if o.get("ticker") not in _open_tickers]
+                    _dup_open = _before_dup - len(candidates)
+
+                    # Remove scan-batch duplicates: keep best-ranked (first) per ticker
+                    _seen_tickers: set = set()
+                    _deduped = []
+                    for _o in candidates:
+                        _t = _o.get("ticker")
+                        if _t not in _seen_tickers:
+                            _seen_tickers.add(_t)
+                            _deduped.append(_o)
+                    _dup_scan = len(candidates) - len(_deduped)
+                    candidates = _deduped
+
+                    if _dup_open:
+                        print(f"[DUP_FILTER] removed {_dup_open} already-open tickers")
+                    if _dup_scan:
+                        print(f"[DUP_FILTER] removed {_dup_scan} duplicate tickers within scan")
+
+                    # ── Step 5: rank elite candidates ─────────────────────────
+                    # edge DESC, confidence DESC, spread ASC (negate), volume DESC
+                    def _exec_spread(o):
+                        if o.get("action") == "BET_NO":
+                            return (o.get("no_ask") or 0) - (o.get("no_bid") or 0)
+                        return (o.get("yes_ask") or 0) - (o.get("yes_bid") or 0)
+
+                    candidates.sort(
+                        key=lambda o: (
+                            o.get("edge", 0),
+                            o.get("confidence", 0),
+                            -_exec_spread(o),   # negate: tighter spread ranks higher
+                            o.get("volume", 0),
+                        ),
+                        reverse=True
+                    )
+
+                    # ── Step 6: take top N = available slots ──────────────────
+                    rm_status = paper_trader.risk_manager.get_status()
+                    available_slots = max(
+                        0,
+                        rm_status["max_open_positions"] - rm_status["open_positions"]
+                    )
+                    top_candidates = candidates[:available_slots]
+
+                    # ── EXEC_TARGET summary ───────────────────────────────────
+                    if top_candidates:
+                        _spreads  = [_exec_spread(o) for o in top_candidates]
+                        _edges    = [o.get("edge", 0) for o in top_candidates]
+                        _confs    = [o.get("confidence", 0) for o in top_candidates]
+                        print(
+                            f"[EXEC_TARGET]\n"
+                            f"  min_edge_selected:   {min(_edges):.4f}\n"
+                            f"  avg_edge_selected:   {sum(_edges)/len(_edges):.4f}\n"
+                            f"  min_conf_selected:   {min(_confs):.4f}\n"
+                            f"  avg_conf_selected:   {sum(_confs)/len(_confs):.4f}\n"
+                            f"  avg_spread_selected: {sum(_spreads)/len(_spreads):.4f}"
+                        )
+                    else:
+                        print("[EXEC_TARGET] no elite candidates this scan")
+
+                    print(
+                        f"[EXEC] elite_candidates={len(candidates)} | "
+                        f"available_slots={available_slots} | "
+                        f"sending={len(top_candidates)}"
+                    )
+
+                    for opp in top_candidates:
                         # Detect event type
                         event_type = detect_event_type(
                             opp.get("ticker", ""),
                             opp.get("title", "")
                         )
-                        
+
                         # Determine reason tag
                         reason_tag = determine_reason_tag(opp)
-                        
-                        # Build MarketData object
+
+                        # Build MarketData object — use real quotes from scanner
+                        _ya = opp.get("yes_ask", opp.get("price_yes", 0.5))
+                        _yb = opp.get("yes_bid", opp.get("price_yes", 0.5))
+                        _na = opp.get("no_ask",  opp.get("price_no",  0.5))
+                        _nb = opp.get("no_bid",  opp.get("price_no",  0.5))
                         market_data = MarketData(
                             ticker=opp.get("ticker", "UNKNOWN"),
-                            yes_price=opp.get("price_yes", 0.5),
-                            no_price=opp.get("price_no", 0.5),
-                            yes_bid=opp.get("price_yes", 0.5) - 0.01,
-                            yes_ask=opp.get("price_yes", 0.5) + 0.01,
-                            no_bid=opp.get("price_no", 0.5) - 0.01,
-                            no_ask=opp.get("price_no", 0.5) + 0.01,
+                            yes_price=_ya,   # entry price for BET_YES = yes_ask
+                            no_price=_na,    # entry price for BET_NO  = no_ask
+                            yes_bid=_yb,
+                            yes_ask=_ya,
+                            no_bid=_nb,
+                            no_ask=_na,
                             volume_24h=opp.get("volume", 0),
-                            spread=0.02,  # Default 2¢ spread
-                            liquidity=opp.get("volume", 0) // 10,  # Estimate
-                            fee_rate=0.01,  # Kalshi 1% fee
-                            time_to_expiry=24.0,  # Default 24h
+                            spread=round(_ya - _yb, 4),
+                            liquidity=opp.get("volume", 0) // 10,
+                            fee_rate=0.01,
+                            time_to_expiry=24.0,
                             venue="kalshi"
                         )
-                        
+
                         # Process signal through paper trader
                         estimated_prob = opp.get("confidence", 0.5)
                         if estimated_prob > 0:
@@ -219,7 +377,7 @@ def background_scan():
                                 estimated_prob=estimated_prob,
                                 strategy=strategy_label
                             )
-                    
+
                     # Update paper stats
                     state["paper_stats"] = paper_trader.get_stats()
 
@@ -675,8 +833,16 @@ body::after {
           <div class="stat-label-small">Total Trades</div>
         </div>
         <div class="stat-cell">
+          <div class="stat-val-big" id="p-open">0</div>
+          <div class="stat-label-small">Open</div>
+        </div>
+        <div class="stat-cell">
           <div class="stat-val-big" id="p-settled">0</div>
           <div class="stat-label-small">Settled</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val-big" id="p-exposure">$0</div>
+          <div class="stat-label-small">Open Exposure</div>
         </div>
         <div class="stat-cell">
           <div class="stat-val-big" id="p-winrate">--</div>
@@ -684,7 +850,7 @@ body::after {
         </div>
         <div class="stat-cell">
           <div class="stat-val-big" id="p-pnl">$0</div>
-          <div class="stat-label-small">Total P&L</div>
+          <div class="stat-label-small">Realized P&L</div>
         </div>
         <div class="stat-cell">
           <div class="stat-val-big" id="p-edge">--</div>
@@ -823,7 +989,9 @@ function renderLog(logs) {
 function renderPaperStats(stats) {
   if (!stats || Object.keys(stats).length === 0) {
     document.getElementById('p-trades').textContent = '0';
+    document.getElementById('p-open').textContent = '0';
     document.getElementById('p-settled').textContent = '0';
+    document.getElementById('p-exposure').textContent = '$0.00';
     document.getElementById('p-winrate').textContent = '--';
     document.getElementById('p-pnl').textContent = '$0';
     document.getElementById('p-edge').textContent = '--';
@@ -834,19 +1002,23 @@ function renderPaperStats(stats) {
     return;
   }
 
-  const total = stats.total_trades || 0;
-  const settled = stats.settled_trades || 0;
-  const winRate = stats.win_rate || 0;
-  const pnl = stats.total_pnl || 0;
-  const edge = stats.avg_edge || 0;
-  const ev = stats.avg_ev || 0;
-  const clv = stats.avg_clv || 0;
-  const sharpe = stats.sharpe || 0;
+  const total    = stats.total_trades    || 0;
+  const open     = stats.open_trades     || 0;
+  const settled  = stats.settled_trades  || 0;
+  const exposure = stats.open_exposure   || 0;
+  const winRate  = stats.win_rate        || 0;
+  const pnl      = stats.total_pnl       || 0;
+  const edge     = stats.avg_edge        || 0;
+  const ev       = stats.avg_ev          || 0;
+  const clv      = stats.avg_clv         || 0;
+  const sharpe   = stats.sharpe          || 0;
 
   document.getElementById('p-trades').textContent = total;
+  document.getElementById('p-open').textContent = open;
   document.getElementById('p-settled').textContent = settled;
+  document.getElementById('p-exposure').textContent = '$' + exposure.toFixed(2);
   document.getElementById('p-winrate').textContent = settled > 0 ? (winRate * 100).toFixed(1) + '%' : '--';
-  
+
   const pnlEl = document.getElementById('p-pnl');
   pnlEl.textContent = pnl >= 0 ? '+$' + pnl.toFixed(2) : '-$' + Math.abs(pnl).toFixed(2);
   pnlEl.className = 'stat-val-big ' + (pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');

@@ -37,16 +37,20 @@ from collections import deque
 class MarketSignal:
     """
     Raw market data input.
-    
-    Migrated from: brain/bayesian_engine.py (unchanged)
+
+    price_yes / price_no  = ASK prices (execution cost — what you pay to enter)
+    yes_mid               = (yes_bid + yes_ask) / 2 — market fair-value estimate,
+                            used as the Bayesian prior so model_prob is unbiased.
+                            Falls back to price_yes if not provided (backward compat).
     """
     ticker: str
-    price_yes: float          # e.g. 0.47
-    price_no: float           # e.g. 0.55
+    price_yes: float          # yes_ask — actual execution price for BET_YES
+    price_no: float           # no_ask  — actual execution price for BET_NO
     volume: float
     price_change: float       # ΔP_t
     volatility: float         # σ_t
     order_book_imbalance: float  # OBI_t (ask_vol - bid_vol) / total
+    yes_mid: Optional[float] = None  # (yes_bid+yes_ask)/2 — Bayesian prior only
     related_market_price: Optional[float] = None  # companion market
     timestamp: float = field(default_factory=time.time)
 
@@ -162,11 +166,13 @@ def signal_to_likelihoods(signal_score: float) -> tuple[float, float]:
 def compute_model_probability(signal: MarketSignal) -> float:
     """
     Full pipeline: raw signal → Bayesian posterior probability.
-    Uses market price as the prior (market is partially right).
-    
-    Migrated from: brain/bayesian_engine.py (unchanged)
+
+    Prior = yes_mid (market fair-value, midpoint of bid/ask).
+    Using ask as prior would inflate model_prob by ~half the spread and
+    make edge = model_prob - yes_ask appear positive even with zero true edge.
+    Falls back to signal.price_yes (=ask) when yes_mid is not available.
     """
-    prior = signal.price_yes
+    prior = signal.yes_mid if signal.yes_mid is not None else signal.price_yes
     raw_signal = parse_signal(signal)
     like_true, like_false = signal_to_likelihoods(raw_signal)
     posterior = bayes_update(prior, like_true, like_false)

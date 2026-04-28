@@ -33,3 +33,6 @@
 {"timestamp": "2026-04-17T10:29:15.901108+00:00", "event_type": "LOSS_LIMIT_HIT", "severity": "CRITICAL", "details": {"daily_pnl": -63.400000000000006, "loss_limit": -50.0, "trades_today": 3, "message": "Daily loss limit hit: $-63.40 / $-50.00"}}
 {"timestamp": "2026-04-17T10:29:15.901421+00:00", "event_type": "KILL_SWITCH_ACTIVATED", "severity": "CRITICAL", "details": {"reason": "Daily loss limit reached", "activated_by": "manual", "message": "\ud83d\udea8 KILL SWITCH ACTIVATED - ALL TRADING STOPPED"}}
 {"timestamp": "2026-04-17T10:29:15.901491+00:00", "event_type": "TRADE_BLOCKED", "severity": "INFO", "details": {"ticker": "TEST-003", "reason": "Kill switch active - all trading stopped"}}
+{"timestamp": "2026-04-27T00:57:45.447380+00:00", "event_type": "TRADE_BLOCKED", "severity": "INFO", "details": {"ticker": "KXTEST", "reason": "Max trades per day reached: 20/20"}}
+{"timestamp": "2026-04-27T00:57:45.448063+00:00", "event_type": "DAILY_RESET", "severity": "INFO", "details": {"previous_pnl": 5.0, "trades_yesterday": 20, "message": "Daily reset - Yesterday: $5.00 P&L, 20 trades"}}
+{"timestamp": "2026-04-27T01:30:11.546220+00:00", "event_type": "TRADE_BLOCKED", "severity": "INFO", "details": {"ticker": "KXTEST-X", "reason": "Effective daily risk limit: $-60.00 / $-50.00 (realized $0.00, open exposure $60.00)"}}

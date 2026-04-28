@@ -80,8 +80,8 @@ LOSS_LIMIT_COOLDOWN_HOURS = 24
 # ═══════════════════════════════════════════════════════════════
 
 # Minimum edge (after fees) required to take a trade
-# 0.03 = 3¢ edge minimum
-MIN_EDGE = 0.03
+# 0.02 = 2¢ edge minimum
+MIN_EDGE = 0.02
 
 # Minimum model confidence to take a trade
 # 0.65 = 65% probability minimum
@@ -202,7 +202,7 @@ STRATEGY_LIMITS = {
         "max_position_size": 30.0,
         "max_positions": 3,
         "min_edge": 0.05,  # Higher edge required
-        "min_confidence": 0.70,  # Higher confidence required
+        "min_confidence": 0.65,
         "enabled": True
     }
 }

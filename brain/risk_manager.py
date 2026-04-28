@@ -111,7 +111,8 @@ class RiskManager:
         
         # Position tracking
         self.open_positions = 0
-        self.total_exposure = 0.0  # $ amount in open positions
+        self.total_exposure = 0.0        # $ currently deployed in open positions
+        self.open_risk_exposure = 0.0    # worst-case downside from open positions (= total_exposure for binary markets)
         
         # Loss tracking
         self.loss_streak = 0
@@ -167,8 +168,10 @@ class RiskManager:
             self.daily_pnl = state.get("daily_pnl", 0.0)
             self.weekly_pnl = state.get("weekly_pnl", 0.0)
             self.trades_today = state.get("trades_today", 0)
-            self.open_positions = state.get("open_positions", 0)
-            self.total_exposure = state.get("total_exposure", 0.0)
+            self.open_positions     = state.get("open_positions", 0)
+            self.total_exposure     = state.get("total_exposure", 0.0)
+            self.open_risk_exposure = state.get("open_risk_exposure",
+                                                state.get("total_exposure", 0.0))
             self.loss_streak = state.get("loss_streak", 0)
             self.last_trade_result = state.get("last_trade_result")
             
@@ -207,6 +210,7 @@ class RiskManager:
             "trades_today": self.trades_today,
             "open_positions": self.open_positions,
             "total_exposure": self.total_exposure,
+            "open_risk_exposure": self.open_risk_exposure,
             "loss_streak": self.loss_streak,
             "last_trade_result": self.last_trade_result,
             "last_reset_date": self.last_reset_date.isoformat(),
@@ -392,7 +396,17 @@ class RiskManager:
                 self.activate_kill_switch(reason="Daily loss limit reached")
             
             return False, reason
-        
+
+        # ── CHECK 3b: Effective daily risk (open-position worst-case downside) ──
+        effective_daily_risk = self.daily_pnl - self.open_risk_exposure
+        if effective_daily_risk <= DAILY_LOSS_LIMIT:
+            reason = (
+                f"Effective daily risk limit: ${effective_daily_risk:.2f} / ${DAILY_LOSS_LIMIT:.2f} "
+                f"(realized ${self.daily_pnl:.2f}, open exposure ${self.open_risk_exposure:.2f})"
+            )
+            self.logger.log_trade_blocked(ticker, reason)
+            return False, reason
+
         # ── CHECK 4: Weekly loss limit ──
         if self.weekly_pnl <= WEEKLY_LOSS_LIMIT:
             reason = f"Weekly loss limit hit: ${self.weekly_pnl:.2f} / ${WEEKLY_LOSS_LIMIT:.2f}"
@@ -553,8 +567,8 @@ class RiskManager:
         # Update P&L
         self.daily_pnl += pnl
         self.weekly_pnl += pnl
-        self.trades_today += 1
-        
+        # trades_today is incremented at open (add_position), NOT here
+
         # Track loss streak
         if result == "LOSS":
             if self.last_trade_result == "LOSS":
@@ -622,16 +636,23 @@ class RiskManager:
     # ───────────────────────────────────────────────────────────
     
     def add_position(self, size: float) -> None:
-        """Record new open position."""
-        self.open_positions += 1
-        self.total_exposure += size
+        """Record new open position and count it against the daily trade limit."""
+        self.open_positions      += 1
+        self.total_exposure      += size
+        self.open_risk_exposure  += size   # worst-case downside grows by full trade size
+        self.trades_today        += 1      # count when trade OPENS, not when it settles
         self._save_state()
+        effective = self.daily_pnl - self.open_risk_exposure
+        print(f"[RISK_MANAGER] trades_today: {self.trades_today}/{MAX_TRADES_PER_DAY}")
+        print(f"[RISK_MANAGER] open_risk_exposure: ${self.open_risk_exposure:.2f}")
+        print(f"[RISK_MANAGER] effective_daily_risk: ${effective:.2f} / limit ${DAILY_LOSS_LIMIT:.2f}")
     
     
     def close_position(self, size: float) -> None:
         """Record position close."""
-        self.open_positions = max(0, self.open_positions - 1)
-        self.total_exposure = max(0, self.total_exposure - size)
+        self.open_positions     = max(0,   self.open_positions - 1)
+        self.total_exposure     = max(0.0, self.total_exposure - size)
+        self.open_risk_exposure = max(0.0, self.open_risk_exposure - size)
         self._save_state()
     
     
@@ -648,59 +669,68 @@ class RiskManager:
         """
         now = datetime.now(timezone.utc)
         
-        # Calculate limits remaining
-        loss_limit_remaining = abs(DAILY_LOSS_LIMIT - self.daily_pnl)
-        loss_limit_pct = (self.daily_pnl / DAILY_LOSS_LIMIT) if DAILY_LOSS_LIMIT != 0 else 0
-        
+        # Effective daily risk: realized P&L minus worst-case open downside
+        effective_daily_risk = round(self.daily_pnl - self.open_risk_exposure, 2)
+
+        # Remaining room before the daily limit is breached (uses effective risk)
+        loss_limit_remaining = abs(DAILY_LOSS_LIMIT - effective_daily_risk)
+        loss_limit_pct = (effective_daily_risk / DAILY_LOSS_LIMIT) if DAILY_LOSS_LIMIT != 0 else 0
+
         # Cooldown status
         cooldown_active = False
         cooldown_remaining = 0
         if self.cooldown_until and now < self.cooldown_until:
             cooldown_active = True
             cooldown_remaining = (self.cooldown_until - now).total_seconds() / 60
-        
-        # Trading allowed?
+
+        # Trading allowed? Uses effective risk so open downside is considered
         trading_allowed = (
             not self.kill_switch_active
             and not self.trading_paused
-            and self.daily_pnl > DAILY_LOSS_LIMIT
+            and self.daily_pnl > DAILY_LOSS_LIMIT          # realized must be above limit
+            and effective_daily_risk > DAILY_LOSS_LIMIT     # effective must also be above limit
             and not cooldown_active
         )
-        
+
         return {
-            # P&L
+            # P&L — realized only (settlement-driven)
             "daily_pnl": round(self.daily_pnl, 2),
+            "daily_pnl_realized": round(self.daily_pnl, 2),   # explicit alias
             "weekly_pnl": round(self.weekly_pnl, 2),
             "bankroll": round(self.bankroll, 2),
-            
-            # Limits
+
+            # Open-position risk
+            "open_risk_exposure": round(self.open_risk_exposure, 2),
+            "effective_daily_risk": effective_daily_risk,
+
+            # Limits (based on effective risk)
             "daily_loss_limit": DAILY_LOSS_LIMIT,
             "loss_limit_remaining": round(loss_limit_remaining, 2),
             "loss_limit_pct_used": round(loss_limit_pct, 2),
-            
+
             # Positions
             "open_positions": self.open_positions,
             "max_open_positions": MAX_OPEN_POSITIONS,
             "total_exposure": round(self.total_exposure, 2),
-            
+
             # Trades
             "trades_today": self.trades_today,
             "max_trades_per_day": MAX_TRADES_PER_DAY,
-            
+
             # Loss streak
             "loss_streak": self.loss_streak,
             "loss_streak_trigger": LOSS_STREAK_TRIGGER,
-            
+
             # Cooldown
             "cooldown_active": cooldown_active,
             "cooldown_remaining_minutes": round(cooldown_remaining, 1) if cooldown_active else 0,
             "cooldown_reason": self.cooldown_reason if cooldown_active else "",
-            
+
             # Kill switch
             "kill_switch_active": self.kill_switch_active,
             "trading_paused": self.trading_paused,
             "trading_allowed": trading_allowed,
-            
+
             # Dates
             "last_reset_date": self.last_reset_date.isoformat(),
             "week_start_date": self.week_start_date.isoformat(),
@@ -711,10 +741,12 @@ class RiskManager:
         """Quick check if trading is globally allowed."""
         self._check_daily_reset()
         
+        effective = self.daily_pnl - self.open_risk_exposure
         return (
             not self.kill_switch_active
             and not self.trading_paused
             and self.daily_pnl > DAILY_LOSS_LIMIT
+            and effective > DAILY_LOSS_LIMIT
             and (not self.cooldown_until or datetime.now(timezone.utc) >= self.cooldown_until)
         )
     
