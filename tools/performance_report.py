@@ -1,191 +1,154 @@
-#!/usr/bin/env python3
 """
-tools/performance_report.py — Paper trading performance report
+tools/performance_report.py
+----------------------------
+Aggregate performance summary of paper trading activity.
 
-Reads logs/paper_trades.jsonl (read-only) and prints a full performance
-breakdown.  Does not touch any trading, risk, or settlement logic.
+Reads logs/paper_trades.jsonl and reports stats on SETTLED trades only.
+
+Excluded from all stats:
+  - status="VOID_LEGACY_DUPLICATE"  (cleanup artifacts)
+  - status="OPEN"                   (not yet resolved)
+  - Records with no "status" field  (old-format pre-M13 test records)
 
 Usage:
-    python3 tools/performance_report.py
-    python3 tools/performance_report.py --log path/to/custom.jsonl
+  python3 tools/performance_report.py
 """
 
 import json
-import argparse
-import os
-import sys
 from pathlib import Path
-from typing import List, Dict, Any
-
-# Locate the default log relative to this file's position (tools/ → project root)
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_LOG = str(_PROJECT_ROOT / "logs" / "paper_trades.jsonl")
 
 
-# ── Log loading ────────────────────────────────────────────────────────────────
+# ─── PATHS ──────────────────────────────────────────────────────────────────
 
-def load_trades(log_path: str) -> List[Dict[str, Any]]:
-    """
-    Load all trade records from a JSONL file.
+ROOT       = Path(__file__).parent.parent
+TRADES_LOG = ROOT / "logs" / "paper_trades.jsonl"
 
-    Deduplicates by (ticker, timestamp) — last line wins — matching the same
-    logic PaperTrader uses on startup.  Returns the deduplicated trade list.
-    """
-    if not os.path.exists(log_path):
-        print(f"[ERROR] Log file not found: {log_path}")
-        sys.exit(1)
 
-    trades_by_key: dict = {}
-    skipped = 0
+# ─── HELPERS ────────────────────────────────────────────────────────────────
 
-    with open(log_path, "r") as fh:
-        for raw in fh:
-            raw = raw.strip()
-            if not raw:
+def load_trades() -> list:
+    if not TRADES_LOG.exists():
+        return []
+    records = []
+    with open(TRADES_LOG) as f:
+        for i, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
                 continue
             try:
-                t = json.loads(raw)
-                key = (t.get("ticker", ""), t.get("timestamp", ""))
-                trades_by_key[key] = t
-            except json.JSONDecodeError:
-                skipped += 1
-
-    if skipped:
-        print(f"[WARN] Skipped {skipped} malformed line(s) in {log_path}")
-
-    return list(trades_by_key.values())
+                records.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                print(f"  [WARN] Line {i} skipped (bad JSON): {e}")
+    return records
 
 
-# ── Statistics ─────────────────────────────────────────────────────────────────
-
-def _avg(values: list) -> float:
-    return sum(values) / len(values) if values else 0.0
+def get_pnl(rec: dict) -> float:
+    return float(rec.get("pnl") or rec.get("realized_pnl") or 0.0)
 
 
-def compute_stats(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Compute all performance metrics from the deduplicated trade list."""
-
-    total   = len(trades)
-    open_t  = [t for t in trades if t.get("status") == "OPEN"]
-    settled = [t for t in trades if t.get("status") == "SETTLED"]
-    wins    = [t for t in settled if t.get("result") == "WIN"]
-    losses  = [t for t in settled if t.get("result") == "LOSS"]
-
-    n_settled = len(settled)
-    n_wins    = len(wins)
-    n_losses  = len(losses)
-    win_rate  = n_wins / n_settled if n_settled else 0.0
-
-    # P&L
-    pnls        = [float(t.get("pnl", 0.0)) for t in settled]
-    win_pnls    = [float(t.get("pnl", 0.0)) for t in wins]
-    loss_pnls   = [abs(float(t.get("pnl", 0.0))) for t in losses]  # positive magnitude
-
-    total_pnl = sum(pnls)
-    avg_pnl   = _avg(pnls)
-    avg_win   = _avg(win_pnls)
-    avg_loss  = _avg(loss_pnls)
-
-    # Expectancy: avg profit per trade if played many times
-    # expectancy = (win_rate × avg_win) − ((1 − win_rate) × avg_loss)
-    expectancy = (win_rate * avg_win) - ((1.0 - win_rate) * avg_loss)
-
-    # Edge & confidence breakdown by outcome
-    win_edges  = [float(t["edge"])      for t in wins   if t.get("edge")       is not None]
-    loss_edges = [float(t["edge"])      for t in losses if t.get("edge")       is not None]
-    win_confs  = [float(t["confidence"])for t in wins   if t.get("confidence") is not None]
-    loss_confs = [float(t["confidence"])for t in losses if t.get("confidence") is not None]
-
-    # Open exposure
-    open_exposure = sum(float(t.get("size", 0.0)) for t in open_t)
-
-    return {
-        "total_trades":    total,
-        "open_trades":     len(open_t),
-        "open_exposure":   open_exposure,
-        "settled_trades":  n_settled,
-        "wins":            n_wins,
-        "losses":          n_losses,
-        "win_rate":        win_rate,
-        "total_pnl":       total_pnl,
-        "avg_pnl":         avg_pnl,
-        "avg_win":         avg_win,
-        "avg_loss":        avg_loss,
-        "expectancy":      expectancy,
-        "avg_edge_wins":   _avg(win_edges),
-        "avg_edge_losses": _avg(loss_edges),
-        "avg_conf_wins":   _avg(win_confs),
-        "avg_conf_losses": _avg(loss_confs),
-    }
+def get_size(rec: dict) -> float:
+    return float(rec.get("size") or rec.get("entry_cost") or 0.0)
 
 
-# ── Report rendering ───────────────────────────────────────────────────────────
+# ─── REPORT ─────────────────────────────────────────────────────────────────
 
-def print_report(stats: Dict[str, Any], log_path: str) -> None:
-    s = stats
-    n_settled = s["settled_trades"]
+def run() -> None:
+    all_records = load_trades()
 
-    def pct(v: float) -> str:
-        return f"{v * 100:.1f}%"
+    total_lines = len(all_records)
+    void_count  = sum(1 for r in all_records
+                      if r.get("status") == "VOID_LEGACY_DUPLICATE")
+    open_count  = sum(1 for r in all_records if r.get("status") == "OPEN")
+    no_status   = sum(1 for r in all_records if "status" not in r)
 
-    def dollar(v: float, sign: bool = False) -> str:
-        return f"${v:+.2f}" if sign else f"${v:.2f}"
+    # Only SETTLED records count toward performance
+    settled = [r for r in all_records if r.get("status") == "SETTLED"]
+
+    wins   = [r for r in settled if get_pnl(r) > 0]
+    losses = [r for r in settled if get_pnl(r) < 0]
+    pushes = [r for r in settled if get_pnl(r) == 0]
+
+    total_pnl     = sum(get_pnl(r) for r in settled)
+    gross_profit  = sum(get_pnl(r) for r in wins)
+    gross_loss    = sum(get_pnl(r) for r in losses)    # negative value
+    total_wagered = sum(get_size(r) for r in settled)
+
+    win_rate      = len(wins) / len(settled) * 100 if settled else 0.0
+    avg_win       = gross_profit / len(wins)   if wins   else 0.0
+    avg_loss      = gross_loss   / len(losses) if losses else 0.0
+    profit_factor = (gross_profit / abs(gross_loss)
+                     if gross_loss != 0 else float("inf"))
+    roi           = (total_pnl / total_wagered * 100) if total_wagered > 0 else 0.0
+
+    conf_vals = [float(r["confidence"]) for r in settled if "confidence" in r]
+    edge_vals = [float(r["edge"])       for r in settled if "edge"       in r]
+    avg_conf  = sum(conf_vals) / len(conf_vals) if conf_vals else None
+    avg_edge  = sum(edge_vals) / len(edge_vals) if edge_vals else None
+
+    # Per-ticker breakdown
+    tickers = {}
+    for r in settled:
+        tk = r.get("ticker", "?")
+        if tk not in tickers:
+            tickers[tk] = {"count": 0, "pnl": 0.0, "wins": 0, "losses": 0}
+        tickers[tk]["count"] += 1
+        tickers[tk]["pnl"]   += get_pnl(r)
+        if get_pnl(r) > 0:
+            tickers[tk]["wins"]   += 1
+        elif get_pnl(r) < 0:
+            tickers[tk]["losses"] += 1
+
+    # ── Print ────────────────────────────────────────────────────────────────
+    print("\n" + "=" * 66)
+    print("PAPER TRADING PERFORMANCE REPORT")
+    print("=" * 66)
+    print(f"  Log:            {TRADES_LOG}")
+    print(f"  Total records:  {total_lines}")
+    print(f"    SETTLED:      {len(settled)}")
+    print(f"    OPEN:         {open_count}")
+    print(f"    VOIDED:       {void_count}  (excluded — cleanup artifacts)")
+    print(f"    no-status:    {no_status}   (excluded — old format)")
+
+    if not settled:
+        print("\n  No SETTLED trades to report.")
+        print("=" * 66 + "\n")
+        return
 
     print()
-    print("=" * 46)
-    print("  PERFORMANCE REPORT")
-    print(f"  {log_path}")
-    print("=" * 46)
-
-    print(f"\n  {'Trades (total):':<28} {s['total_trades']}")
-    print(f"  {'Open:':<28} {s['open_trades']}  (${s['open_exposure']:.2f} exposure)")
-    print(f"  {'Settled:':<28} {n_settled}")
-    print(f"  {'Wins:':<28} {s['wins']}")
-    print(f"  {'Losses:':<28} {s['losses']}")
-
-    print(f"\n  {'Win rate:':<28} {pct(s['win_rate'])}")
-    print(f"  {'Total P&L:':<28} {dollar(s['total_pnl'], sign=True)}")
-    print(f"  {'Avg P&L per settled trade:':<28} {dollar(s['avg_pnl'], sign=True)}")
-    print(f"  {'Avg win size:':<28} {dollar(s['avg_win'])}")
-    print(f"  {'Avg loss size:':<28} {dollar(s['avg_loss'])}")
-    print(f"  {'Expectancy:':<28} {dollar(s['expectancy'], sign=True)}")
-
-    print(f"\n  {'Avg edge (wins):':<28} {s['avg_edge_wins']:.4f}")
-    print(f"  {'Avg edge (losses):':<28} {s['avg_edge_losses']:.4f}")
-    print(f"  {'Avg confidence (wins):':<28} {pct(s['avg_conf_wins'])}")
-    print(f"  {'Avg confidence (losses):':<28} {pct(s['avg_conf_losses'])}")
-
-    # Verdict
+    print("── OVERALL ─────────────────────────────────────────────────")
+    print(f"  Trades settled: {len(settled)}")
+    print(f"    Wins:         {len(wins)}")
+    print(f"    Losses:       {len(losses)}")
+    print(f"    Pushes:       {len(pushes)}")
+    print(f"  Win rate:       {win_rate:.1f}%")
     print()
-    if n_settled == 0:
-        verdict = "No settled trades yet."
-    elif s["expectancy"] > 0:
-        verdict = f"Positive expectancy — edge exists over {n_settled} settled trades."
-    else:
-        verdict = f"Negative expectancy over {n_settled} settled trades — review strategy."
+    print(f"  Total P&L:      ${total_pnl:+.2f}")
+    print(f"  Gross profit:   ${gross_profit:.2f}")
+    print(f"  Gross loss:     ${gross_loss:.2f}")
+    pf_str = f"{profit_factor:.2f}" if profit_factor != float("inf") else "∞ (no losses)"
+    print(f"  Profit factor:  {pf_str}")
+    print(f"  Avg win:        ${avg_win:+.2f}")
+    print(f"  Avg loss:       ${avg_loss:+.2f}")
+    print(f"  Total wagered:  ${total_wagered:.2f}")
+    print(f"  ROI:            {roi:+.2f}%")
+    if avg_conf is not None:
+        print(f"  Avg confidence: {avg_conf:.3f}")
+    if avg_edge is not None:
+        print(f"  Avg edge:       {avg_edge:.4f}")
 
-    print(f"  Verdict: {verdict}")
-    print("=" * 46)
-    print()
+    if len(tickers) > 1:
+        print()
+        print("── PER-TICKER ──────────────────────────────────────────────")
+        for tk, info in sorted(tickers.items(),
+                               key=lambda x: x[1]["pnl"], reverse=True):
+            wr = info["wins"] / info["count"] * 100 if info["count"] else 0
+            print(f"  {tk:<42}  n={info['count']:>3}  "
+                  f"pnl=${info['pnl']:+7.2f}  wr={wr:.0f}%")
+
+    print("=" * 66 + "\n")
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="performance_report.py",
-        description="Paper trading performance report (read-only)"
-    )
-    parser.add_argument(
-        "--log", default=DEFAULT_LOG, metavar="PATH",
-        help=f"Path to JSONL trade log (default: {DEFAULT_LOG})"
-    )
-    args = parser.parse_args()
-
-    trades = load_trades(args.log)
-    stats  = compute_stats(trades)
-    print_report(stats, args.log)
-
+# ─── ENTRY POINT ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    main()
+    run()
