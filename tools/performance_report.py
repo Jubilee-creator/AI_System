@@ -6,7 +6,8 @@ Aggregate performance summary of paper trading activity.
 Reads logs/paper_trades.jsonl and reports stats on SETTLED trades only.
 
 Excluded from all stats:
-  - status="VOID_LEGACY_DUPLICATE"  (cleanup artifacts)
+  - status="VOID_LEGACY_DUPLICATE"  (duplicate cleanup artifacts)
+  - status="FORCED_CLOSE"           (validation reset records)
   - status="OPEN"                   (not yet resolved)
   - Records with no "status" field  (old-format pre-M13 test records)
 
@@ -55,11 +56,16 @@ def get_size(rec: dict) -> float:
 def run() -> None:
     all_records = load_trades()
 
-    total_lines = len(all_records)
-    void_count  = sum(1 for r in all_records
-                      if r.get("status") == "VOID_LEGACY_DUPLICATE")
-    open_count  = sum(1 for r in all_records if r.get("status") == "OPEN")
-    no_status   = sum(1 for r in all_records if "status" not in r)
+    # Statuses excluded from performance stats
+    _EXCLUDED = {"VOID_LEGACY_DUPLICATE", "FORCED_CLOSE", "OPEN"}
+
+    total_lines    = len(all_records)
+    void_count     = sum(1 for r in all_records
+                         if r.get("status") == "VOID_LEGACY_DUPLICATE")
+    forced_count   = sum(1 for r in all_records
+                         if r.get("status") == "FORCED_CLOSE")
+    open_count     = sum(1 for r in all_records if r.get("status") == "OPEN")
+    no_status      = sum(1 for r in all_records if "status" not in r)
 
     # Only SETTLED records count toward performance
     settled = [r for r in all_records if r.get("status") == "SETTLED"]
@@ -106,7 +112,8 @@ def run() -> None:
     print(f"  Total records:  {total_lines}")
     print(f"    SETTLED:      {len(settled)}")
     print(f"    OPEN:         {open_count}")
-    print(f"    VOIDED:       {void_count}  (excluded — cleanup artifacts)")
+    print(f"    VOIDED:       {void_count}  (excluded — duplicate cleanup)")
+    print(f"    FORCED_CLOSE: {forced_count}  (excluded — validation reset)")
     print(f"    no-status:    {no_status}   (excluded — old format)")
 
     if not settled:
