@@ -132,17 +132,30 @@ def load_risk_state() -> dict:
 
 def rebuild_risk_state(lines: list) -> None:
     """
-    Count real OPEN trades from lines, then merge-write risk_state.json.
+    Count real OPEN paper trades from lines, then merge-write risk_state.json.
     Accounting fields (daily_pnl, weekly_pnl, trades_today, loss_streak)
     are always preserved from the existing file.
+
+    Inclusion criteria (ALL must be true):
+      status == "OPEN"
+      is_paper == True
+      not a test ticker
+
+    Explicitly excluded:
+      status == "VOID_LEGACY_DUPLICATE"
+      status == "SETTLED"
+      is_paper != True
     """
     real_open_count    = 0
     real_open_exposure = 0.0
+    counted_trades     = []
 
     for _, _, rec in lines:
         if rec is None:
             continue
         if rec.get("status") != "OPEN":
+            continue
+        if rec.get("is_paper") is not True:
             continue
         ticker = rec.get("ticker", "")
         if _is_test_ticker(ticker):
@@ -150,6 +163,13 @@ def rebuild_risk_state(lines: list) -> None:
         size = float(rec.get("size") or rec.get("entry_cost") or 0.0)
         real_open_count    += 1
         real_open_exposure += size
+        counted_trades.append((ticker, size))
+
+    print(f"  [REBUILD] Counting {real_open_count} valid OPEN paper trade(s):")
+    for tk, sz in counted_trades:
+        print(f"    {tk}  ${sz:.2f}")
+    if not counted_trades:
+        print("    (none)")
 
     existing = load_risk_state()
     merged   = dict(existing)
