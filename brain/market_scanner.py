@@ -408,14 +408,9 @@ def build_signal(market: dict) -> Optional[MarketSignal]:
 
         return MarketSignal(
             ticker=ticker,
-<<<<<<< HEAD
-            price_yes=entry_yes,   # YES ask — price paid to enter YES
-            price_no=entry_no,     # NO ask — price paid to enter NO
-=======
-            price_yes=price_yes,          # ASK price — actual cost for BET_YES
-            price_no=price_no,            # ASK price — actual cost for BET_NO
-            yes_mid=yes_mid,              # bid/ask mid — used as Bayesian prior only
->>>>>>> c2e53da (M15: correct edge calculation to use ask price)
+            price_yes=entry_yes,   # YES ask — actual cost for BET_YES
+            price_no=entry_no,     # NO ask — actual cost for BET_NO
+            yes_mid=yes_mid,       # bid/ask mid — Bayesian prior only
             volume=volume * vol_spike,
             price_change=price_change,
             volatility=max(0.001, volatility),
