@@ -81,6 +81,56 @@ if PAPER_TRADER_OK:
     paper_trader.enable()
     print("[INIT] Paper trader enabled - will auto-log ALL signals")
 
+# ─────────────────────────────────────────
+# HELPER: Real-time risk status snapshot (M-18)
+# ─────────────────────────────────────────
+
+def get_risk_status() -> dict:
+    if not paper_trader:
+        return {}
+    rm   = paper_trader.risk_manager
+    rm_s = rm.get_status()
+    open_trades    = paper_trader.open_trades
+    open_count     = len(open_trades)
+    total_exposure = round(sum(float(t.get("size", 0.0)) for t in open_trades), 2)
+    daily_pnl            = rm.daily_pnl
+    loss_limit           = rm_s["daily_loss_limit"]
+    effective_daily_risk = round(daily_pnl - total_exposure, 2)
+    remaining_risk_room  = round(effective_daily_risk - loss_limit, 2)
+    risk_used_pct = (round(abs(effective_daily_risk) / abs(loss_limit) * 100, 1)
+                     if loss_limit != 0 else 0.0)
+    cooldown_active    = rm_s["cooldown_active"]
+    cooldown_remaining = rm_s["cooldown_remaining_minutes"]
+    cooldown_reason    = rm_s["cooldown_reason"]
+    if rm.kill_switch_active:                system_status = "KILL_SWITCH"
+    elif effective_daily_risk <= loss_limit: system_status = "HARD_STOP"
+    elif remaining_risk_room <= 10:          system_status = "NEAR_LIMIT"
+    else:                                    system_status = "NORMAL"
+    can_trade = (not rm.kill_switch_active and not cooldown_active
+                 and effective_daily_risk > loss_limit)
+    last_result = last_pnl = None
+    if paper_trader.trade_history:
+        lt = paper_trader.trade_history[-1]
+        last_result = lt.get("result")
+        last_pnl    = lt.get("pnl")
+    exposure_breakdown = [
+        {"ticker": t.get("ticker", "?"), "action": t.get("action", "?"),
+         "size": float(t.get("size", 0.0)), "entry_price": float(t.get("entry_price", 0.0))}
+        for t in open_trades
+    ]
+    return {
+        "daily_pnl": round(daily_pnl, 2), "weekly_pnl": round(rm.weekly_pnl, 2),
+        "open_positions": open_count, "total_exposure": total_exposure,
+        "effective_daily_risk": effective_daily_risk, "daily_loss_limit": loss_limit,
+        "remaining_risk_room": remaining_risk_room, "risk_used_pct": risk_used_pct,
+        "loss_streak": rm.loss_streak, "kill_switch_active": rm.kill_switch_active,
+        "cooldown_active": cooldown_active, "cooldown_remaining_min": cooldown_remaining,
+        "cooldown_reason": cooldown_reason, "system_status": system_status,
+        "can_trade": can_trade, "last_result": last_result, "last_pnl": last_pnl,
+        "exposure_breakdown": exposure_breakdown,
+    }
+
+
 # Shared state
 state = {
     "markets": [],          # raw crypto markets
@@ -97,6 +147,7 @@ state = {
     "brain_ok": BRAIN_OK,
     "paper_trader_ok": PAPER_TRADER_OK,
     "paper_stats": {},      # Paper trading stats
+    "risk_status": {},      # Risk manager snapshot (M-18)
 }
 
 
@@ -227,6 +278,7 @@ def background_scan():
                     
                     # Update paper stats
                     state["paper_stats"] = paper_trader.get_stats()
+                    state["risk_status"] = get_risk_status()
 
                 # Fire alerts for high-confidence signals
                 for o in opportunities:
@@ -582,6 +634,68 @@ body::after {
 .verdict-icon.fail { color: var(--red); }
 
 .empty { padding: 20px 10px; color: var(--muted); font-size: 10px; text-align: center; }
+
+/* ── RISK STATUS PANEL (M-18) ── */
+#risk-status-box {
+  flex-shrink: 0;
+  border-top: 2px solid var(--border);
+  overflow-y: auto;
+  max-height: 48vh;
+}
+#risk-status-box::-webkit-scrollbar { width: 3px; }
+#risk-status-box::-webkit-scrollbar-thumb { background: var(--green-dim); }
+
+.risk-ph {
+  padding: 6px 10px;
+  background: rgba(0,255,65,0.03);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.risk-ph-title {
+  font-family: 'Orbitron', monospace;
+  font-size: 8px;
+  letter-spacing: 3px;
+  color: var(--green);
+  text-transform: uppercase;
+}
+.status-pill {
+  font-family: 'Orbitron', monospace;
+  font-size: 8px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 3px;
+  letter-spacing: 1px;
+}
+.sp-normal     { background: rgba(0,255,65,0.12);  color: var(--green2);  border: 1px solid var(--green2); }
+.sp-near_limit { background: rgba(255,214,0,0.12); color: var(--yellow);  border: 1px solid var(--yellow); }
+.sp-hard_stop  { background: rgba(255,23,68,0.15); color: var(--red);     border: 1px solid var(--red); }
+.sp-kill_switch{ background: rgba(255,23,68,0.25); color: #fff;           border: 1px solid var(--red); }
+
+.risk-body { padding: 8px 10px; }
+.risk-row  { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; border-bottom: 1px solid rgba(13,40,13,0.4); }
+.risk-label { font-size: 9px; color: var(--muted); letter-spacing: 1px; }
+.risk-val   { font-size: 10px; color: var(--text); font-weight: 500; }
+.risk-val.positive { color: var(--green2); }
+.risk-val.negative { color: var(--red); }
+.risk-val.warning  { color: var(--yellow); }
+
+.can-trade-yes { color: var(--green2); font-weight: 700; font-size: 10px; }
+.can-trade-no  { color: var(--red);    font-weight: 700; font-size: 10px; }
+
+.exp-section-hdr {
+  font-size: 8px; color: var(--muted); letter-spacing: 2px;
+  text-transform: uppercase; margin: 8px 0 4px;
+}
+.exp-row {
+  display: flex; justify-content: space-between;
+  font-size: 9px; padding: 2px 0;
+  border-bottom: 1px solid rgba(13,40,13,0.3);
+}
+.exp-ticker { color: var(--cyan); }
+.exp-size   { color: var(--green); }
 </style>
 </head>
 <body>
@@ -671,7 +785,7 @@ body::after {
       <span class="ph-title">📊 Paper Trade Performance</span>
       <span class="ph-sub" id="paper-progress">0 / 100 trades</span>
     </div>
-    <div class="pb" style="padding:0">
+    <div class="pb" style="padding:0;min-height:0">
 
       <!-- Stats Grid -->
       <div class="stat-grid">
@@ -729,6 +843,72 @@ body::after {
         </div>
       </div>
 
+    </div>
+
+    <!-- RISK STATUS — outside .pb so it's always visible (M-18) -->
+    <div id="risk-status-box">
+      <div class="risk-ph">
+        <span class="risk-ph-title">🛡 Risk Status</span>
+        <span id="r-status-pill" class="status-pill sp-normal">🟢 NORMAL</span>
+      </div>
+      <div class="risk-body">
+        <div class="risk-row">
+          <span class="risk-label">CAN OPEN NEW TRADES</span>
+          <span id="r-can-trade" class="can-trade-yes">YES</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Daily P&amp;L</span>
+          <span id="r-daily-pnl" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Weekly P&amp;L</span>
+          <span id="r-weekly-pnl" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Open Positions</span>
+          <span id="r-open-pos" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Total Exposure</span>
+          <span id="r-exposure" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Effective Daily Risk</span>
+          <span id="r-eff-risk" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Daily Loss Limit</span>
+          <span id="r-loss-limit" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Remaining Room</span>
+          <span id="r-room" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Risk Used</span>
+          <span id="r-risk-pct" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Loss Streak</span>
+          <span id="r-streak" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Kill Switch</span>
+          <span id="r-kill" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Cooldown</span>
+          <span id="r-cooldown" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Last Trade</span>
+          <span id="r-last-trade" class="risk-val">--</span>
+        </div>
+        <div id="r-exp-section" style="display:none">
+          <div class="exp-section-hdr">Open Exposure Breakdown</div>
+          <div id="r-exp-list"></div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -893,16 +1073,111 @@ function renderPaperStats(stats) {
   document.getElementById('verdict-msg').innerHTML = msg;
 }
 
+function renderRiskStatus(risk) {
+  if (!risk || Object.keys(risk).length === 0) return;
+
+  const status = (risk.system_status || 'NORMAL').toUpperCase();
+  const pillEl = document.getElementById('r-status-pill');
+  const pillMap = {
+    'NORMAL':      ['sp-normal',      '🟢 NORMAL'],
+    'NEAR_LIMIT':  ['sp-near_limit',  '🟡 NEAR LIMIT'],
+    'HARD_STOP':   ['sp-hard_stop',   '🔴 HARD STOP'],
+    'KILL_SWITCH': ['sp-kill_switch', '🚨 KILL SWITCH'],
+  };
+  const [pillCls, pillTxt] = pillMap[status] || pillMap['NORMAL'];
+  pillEl.className = 'status-pill ' + pillCls;
+  pillEl.textContent = pillTxt;
+
+  const canEl = document.getElementById('r-can-trade');
+  canEl.textContent = risk.can_trade ? 'YES' : 'NO';
+  canEl.className = risk.can_trade ? 'can-trade-yes' : 'can-trade-no';
+
+  function fmtPnl(v) {
+    if (v == null) return '--';
+    return (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
+  }
+  function pnlClass(v) {
+    return v > 0 ? 'risk-val positive' : v < 0 ? 'risk-val negative' : 'risk-val';
+  }
+
+  const dpEl = document.getElementById('r-daily-pnl');
+  dpEl.textContent = fmtPnl(risk.daily_pnl);
+  dpEl.className = pnlClass(risk.daily_pnl);
+
+  const wpEl = document.getElementById('r-weekly-pnl');
+  wpEl.textContent = fmtPnl(risk.weekly_pnl);
+  wpEl.className = pnlClass(risk.weekly_pnl);
+
+  document.getElementById('r-open-pos').textContent  = risk.open_positions != null ? risk.open_positions : '--';
+  document.getElementById('r-exposure').textContent  = risk.total_exposure  != null ? '$' + risk.total_exposure.toFixed(2) : '--';
+
+  const effEl = document.getElementById('r-eff-risk');
+  effEl.textContent = fmtPnl(risk.effective_daily_risk);
+  effEl.className = pnlClass(risk.effective_daily_risk);
+
+  document.getElementById('r-loss-limit').textContent = risk.daily_loss_limit != null ? '$' + risk.daily_loss_limit.toFixed(2) : '--';
+
+  const roomEl = document.getElementById('r-room');
+  roomEl.textContent = risk.remaining_risk_room != null ? fmtPnl(risk.remaining_risk_room) : '--';
+  roomEl.className = (risk.remaining_risk_room != null && risk.remaining_risk_room <= 10)
+    ? 'risk-val warning' : pnlClass(risk.remaining_risk_room);
+
+  const pctEl = document.getElementById('r-risk-pct');
+  pctEl.textContent = risk.risk_used_pct != null ? risk.risk_used_pct.toFixed(1) + '%' : '--';
+  pctEl.className = (risk.risk_used_pct >= 90) ? 'risk-val negative' : (risk.risk_used_pct >= 70) ? 'risk-val warning' : 'risk-val';
+
+  document.getElementById('r-streak').textContent = risk.loss_streak != null ? risk.loss_streak : '--';
+
+  document.getElementById('r-kill').textContent = risk.kill_switch_active ? '🔴 ACTIVE' : '⚫ OFF';
+  document.getElementById('r-kill').className = risk.kill_switch_active ? 'risk-val negative' : 'risk-val';
+
+  let coolTxt = 'None';
+  if (risk.cooldown_active) {
+    coolTxt = '⏳ ' + (risk.cooldown_remaining_min || 0).toFixed(0) + ' min';
+    if (risk.cooldown_reason) coolTxt += ' — ' + risk.cooldown_reason;
+  }
+  document.getElementById('r-cooldown').textContent = coolTxt;
+  document.getElementById('r-cooldown').className = risk.cooldown_active ? 'risk-val warning' : 'risk-val';
+
+  let lastTxt = '--';
+  if (risk.last_result != null) {
+    lastTxt = risk.last_result + (risk.last_pnl != null ? ' ' + fmtPnl(risk.last_pnl) : '');
+  }
+  const ltEl = document.getElementById('r-last-trade');
+  ltEl.textContent = lastTxt;
+  ltEl.className = (risk.last_result === 'WIN') ? 'risk-val positive' : (risk.last_result === 'LOSS') ? 'risk-val negative' : 'risk-val';
+
+  const expSection = document.getElementById('r-exp-section');
+  const expList    = document.getElementById('r-exp-list');
+  const breakdown  = risk.exposure_breakdown || [];
+  if (breakdown.length > 0) {
+    expSection.style.display = '';
+    expList.innerHTML = breakdown.map(e =>
+      `<div class="exp-row">
+        <span class="exp-ticker">${e.ticker} ${e.action}</span>
+        <span class="exp-size">$${e.size.toFixed(2)} @ ${e.entry_price.toFixed(4)}</span>
+      </div>`
+    ).join('');
+  } else {
+    expSection.style.display = 'none';
+  }
+}
+
 async function fetchState() {
   try {
-    const r = await fetch('/api/state');
-    const d = await r.json();
+    const [stateResp, riskResp] = await Promise.all([
+      fetch('/api/state'),
+      fetch('/api/risk_status'),
+    ]);
+    const d    = await stateResp.json();
+    const risk = await riskResp.json();
+    console.log("RISK STATUS DATA:", risk);
 
     // Header
     const arbs = (d.opportunities||[]).filter(o => o.action === 'ARB').length;
     const bets = (d.opportunities||[]).filter(o => o.action && o.action.includes('BET')).length;
     const paperTrades = (d.paper_stats && d.paper_stats.total_trades) || 0;
-    
+
     document.getElementById('h-opps').textContent = (d.opportunities||[]).length;
     document.getElementById('h-arb').textContent = arbs;
     document.getElementById('h-bet').textContent = bets;
@@ -914,6 +1189,7 @@ async function fetchState() {
     renderArbs(d.opportunities || []);
     renderLog(d.scan_log || []);
     renderPaperStats(d.paper_stats || {});
+    renderRiskStatus(risk);
 
     startProgressBar();
   } catch(e) {
@@ -966,6 +1242,12 @@ def api_paper_stats():
     if paper_trader:
         return jsonify(paper_trader.get_stats())
     return jsonify({"error": "Paper trader not initialized"})
+
+
+@app.route("/api/risk_status")
+def api_risk_status():
+    """Return real-time risk status snapshot (M-18)."""
+    return jsonify(get_risk_status())
 
 
 # ─────────────────────────────────────────
