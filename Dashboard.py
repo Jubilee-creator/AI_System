@@ -808,7 +808,7 @@ body::after {
       <span class="ph-title">📊 Paper Trade Performance</span>
       <span class="ph-sub" id="paper-progress">0 / 100 trades</span>
     </div>
-    <div class="pb" style="padding:0">
+    <div class="pb" style="padding:0;min-height:0">
 
       <!-- Stats Grid -->
       <div class="stat-grid">
@@ -866,47 +866,49 @@ body::after {
         </div>
       </div>
 
-      <!-- ── RISK STATUS (M-18) ── -->
-      <div id="risk-section">
-        <div class="risk-ph">
-          <span class="risk-ph-title">🛡 Risk Status</span>
-          <span id="r-status-pill" class="status-pill sp-normal">🟢 NORMAL</span>
-        </div>
-        <div class="risk-body">
-
-          <div class="risk-row" style="padding-bottom:5px;border-bottom:1px solid var(--border);margin-bottom:2px">
-            <span class="risk-label">CAN OPEN NEW TRADES</span>
-            <span id="r-can-trade" class="can-trade-yes">—</span>
-          </div>
-
-          <div class="risk-row"><span class="risk-label">Daily P&L</span><span class="risk-val" id="r-daily-pnl">—</span></div>
-          <div class="risk-row"><span class="risk-label">Weekly P&L</span><span class="risk-val" id="r-weekly-pnl">—</span></div>
-          <div class="risk-row"><span class="risk-label">Open positions</span><span class="risk-val" id="r-open-pos">—</span></div>
-          <div class="risk-row"><span class="risk-label">Total exposure</span><span class="risk-val" id="r-exposure">—</span></div>
-          <div class="risk-row"><span class="risk-label">Eff. daily risk</span><span class="risk-val" id="r-eff-risk">—</span></div>
-          <div class="risk-row"><span class="risk-label">Loss limit</span><span class="risk-val neg" id="r-limit">—</span></div>
-          <div class="risk-row"><span class="risk-label">Risk room left</span><span class="risk-val" id="r-room">—</span></div>
-          <div class="risk-row" style="border-bottom:none"><span class="risk-label">Risk used %</span><span class="risk-val" id="r-used-pct">—</span></div>
-
-          <div style="height:1px;background:var(--border);margin:5px 0"></div>
-
-          <div class="risk-row"><span class="risk-label">Loss streak</span><span class="risk-val" id="r-streak">—</span></div>
-          <div class="risk-row"><span class="risk-label">Kill switch</span><span class="risk-val" id="r-kill">—</span></div>
-          <div class="risk-row" style="border-bottom:none"><span class="risk-label">Cooldown</span><span class="risk-val" id="r-cooldown">—</span></div>
-
-          <div style="height:1px;background:var(--border);margin:5px 0"></div>
-
-          <div class="risk-row" style="border-bottom:none"><span class="risk-label">Last trade</span><span class="risk-val" id="r-last-trade">—</span></div>
-
-          <div class="exp-section-hdr">Open Exposure</div>
-          <div id="r-exp-list">
-            <div style="color:var(--muted);font-size:9px;padding:3px 0">No open positions</div>
-          </div>
-
-        </div>
-      </div>
 
     </div>
+
+    <!-- ── RISK STATUS (M-18) — pinned below paper stats, always visible ── -->
+    <div id="risk-status-box" style="flex-shrink:0;border-top:2px solid var(--border);overflow-y:auto;max-height:48vh">
+      <div class="risk-ph">
+        <span class="risk-ph-title">🛡 Risk Status</span>
+        <span id="r-status-pill" class="status-pill sp-normal">🟢 NORMAL</span>
+      </div>
+      <div class="risk-body">
+
+        <div class="risk-row" style="padding-bottom:5px;border-bottom:1px solid var(--border);margin-bottom:2px">
+          <span class="risk-label">CAN OPEN NEW TRADES</span>
+          <span id="r-can-trade" class="can-trade-yes">—</span>
+        </div>
+
+        <div class="risk-row"><span class="risk-label">Daily P&L</span><span class="risk-val" id="r-daily-pnl">—</span></div>
+        <div class="risk-row"><span class="risk-label">Weekly P&L</span><span class="risk-val" id="r-weekly-pnl">—</span></div>
+        <div class="risk-row"><span class="risk-label">Open positions</span><span class="risk-val" id="r-open-pos">—</span></div>
+        <div class="risk-row"><span class="risk-label">Total exposure</span><span class="risk-val" id="r-exposure">—</span></div>
+        <div class="risk-row"><span class="risk-label">Eff. daily risk</span><span class="risk-val" id="r-eff-risk">—</span></div>
+        <div class="risk-row"><span class="risk-label">Loss limit</span><span class="risk-val neg" id="r-limit">—</span></div>
+        <div class="risk-row"><span class="risk-label">Risk room left</span><span class="risk-val" id="r-room">—</span></div>
+        <div class="risk-row" style="border-bottom:none"><span class="risk-label">Risk used %</span><span class="risk-val" id="r-used-pct">—</span></div>
+
+        <div style="height:1px;background:var(--border);margin:5px 0"></div>
+
+        <div class="risk-row"><span class="risk-label">Loss streak</span><span class="risk-val" id="r-streak">—</span></div>
+        <div class="risk-row"><span class="risk-label">Kill switch</span><span class="risk-val" id="r-kill">—</span></div>
+        <div class="risk-row" style="border-bottom:none"><span class="risk-label">Cooldown</span><span class="risk-val" id="r-cooldown">—</span></div>
+
+        <div style="height:1px;background:var(--border);margin:5px 0"></div>
+
+        <div class="risk-row" style="border-bottom:none"><span class="risk-label">Last trade</span><span class="risk-val" id="r-last-trade">—</span></div>
+
+        <div class="exp-section-hdr">Open Exposure</div>
+        <div id="r-exp-list">
+          <div style="color:var(--muted);font-size:9px;padding:3px 0">No open positions</div>
+        </div>
+
+      </div>
+    </div>
+
   </div>
 
 </div>
@@ -1156,14 +1158,22 @@ function renderRiskStatus(r) {
 
 async function fetchState() {
   try {
-    const r = await fetch('/api/state');
-    const d = await r.json();
+    // Fetch state and risk status concurrently; risk status has its own
+    // endpoint so it renders even before the first background scan completes.
+    const [stateResp, riskResp] = await Promise.all([
+      fetch('/api/state'),
+      fetch('/api/risk_status'),
+    ]);
+    const d    = await stateResp.json();
+    const risk = await riskResp.json();
+
+    console.log("RISK STATUS DATA:", risk);
 
     // Header
     const arbs = (d.opportunities||[]).filter(o => o.action === 'ARB').length;
     const bets = (d.opportunities||[]).filter(o => o.action && o.action.includes('BET')).length;
     const paperTrades = (d.paper_stats && d.paper_stats.total_trades) || 0;
-    
+
     document.getElementById('h-opps').textContent = (d.opportunities||[]).length;
     document.getElementById('h-arb').textContent = arbs;
     document.getElementById('h-bet').textContent = bets;
@@ -1175,7 +1185,7 @@ async function fetchState() {
     renderArbs(d.opportunities || []);
     renderLog(d.scan_log || []);
     renderPaperStats(d.paper_stats || {});
-    renderRiskStatus(d.risk_status || {});
+    renderRiskStatus(risk);
 
     startProgressBar();
   } catch(e) {
