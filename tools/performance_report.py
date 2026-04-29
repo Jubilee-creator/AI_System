@@ -17,6 +17,8 @@ exists anywhere in the log.  The report breaks raw OPEN rows into:
   stale   — matched, i.e. already resolved by a later record
 
 Excluded from win/loss stats:
+  - status="SETTLED" with a trade key that also has FORCED_CLOSE or
+    VOID_LEGACY_DUPLICATE terminal records
   - status="VOID_LEGACY_DUPLICATE"  (duplicate cleanup artifacts)
   - status="FORCED_CLOSE"           (validation reset records)
   - status="OPEN"                   (open or stale — not settled outcomes)
@@ -110,6 +112,66 @@ def classify_open_records(all_records: list) -> tuple[list, list]:
     return active, stale
 
 
+def build_terminal_key_sets(all_records: list) -> tuple[set, set, set]:
+    """
+    Build terminal-state identity sets for conflict-safe performance stats.
+
+    A clean SETTLED trade cannot share its trade key with FORCED_CLOSE or
+    VOID_LEGACY_DUPLICATE.  The report is read-only and never rewrites logs.
+    """
+    settled_keys: set = set()
+    forced_close_keys: set = set()
+    void_keys: set = set()
+
+    for rec in all_records:
+        status = rec.get("status")
+        if status not in {"SETTLED", "FORCED_CLOSE", "VOID_LEGACY_DUPLICATE"}:
+            continue
+        key = _trade_key(rec)
+        if key is None:
+            continue
+        if status == "SETTLED":
+            settled_keys.add(key)
+        elif status == "FORCED_CLOSE":
+            forced_close_keys.add(key)
+        elif status == "VOID_LEGACY_DUPLICATE":
+            void_keys.add(key)
+
+    return settled_keys, forced_close_keys, void_keys
+
+
+def classify_settled_records(
+    all_records: list,
+    settled_keys: set,
+    forced_close_keys: set,
+    void_keys: set,
+) -> tuple[list, list]:
+    """
+    Split SETTLED rows into (clean, conflicted).
+
+    Clean SETTLED rows are the only rows counted in performance metrics.
+    Conflicted SETTLED rows are terminal-state collisions and are reported
+    separately for validation visibility.
+    """
+    clean, conflicted = [], []
+
+    for rec in all_records:
+        if rec.get("status") != "SETTLED":
+            continue
+        key = _trade_key(rec)
+        if (
+            key is not None
+            and key in settled_keys
+            and key not in forced_close_keys
+            and key not in void_keys
+        ):
+            clean.append(rec)
+        else:
+            conflicted.append(rec)
+
+    return clean, conflicted
+
+
 # ─── REPORT ─────────────────────────────────────────────────────────────────
 
 def run() -> None:
@@ -126,33 +188,38 @@ def run() -> None:
     active_opens, stale_opens = classify_open_records(all_records)
     active_exposure = sum(get_size(r) for r in active_opens)
 
-    # Only SETTLED records count toward performance
-    settled = [r for r in all_records if r.get("status") == "SETTLED"]
+    settled_keys, forced_close_keys, void_keys = build_terminal_key_sets(all_records)
+    clean_settled, conflicted_settled = classify_settled_records(
+        all_records,
+        settled_keys,
+        forced_close_keys,
+        void_keys,
+    )
 
-    wins   = [r for r in settled if get_pnl(r) > 0]
-    losses = [r for r in settled if get_pnl(r) < 0]
-    pushes = [r for r in settled if get_pnl(r) == 0]
+    wins   = [r for r in clean_settled if get_pnl(r) > 0]
+    losses = [r for r in clean_settled if get_pnl(r) < 0]
+    pushes = [r for r in clean_settled if get_pnl(r) == 0]
 
-    total_pnl     = sum(get_pnl(r) for r in settled)
+    total_pnl     = sum(get_pnl(r) for r in clean_settled)
     gross_profit  = sum(get_pnl(r) for r in wins)
     gross_loss    = sum(get_pnl(r) for r in losses)
-    total_wagered = sum(get_size(r) for r in settled)
+    total_wagered = sum(get_size(r) for r in clean_settled)
 
-    win_rate      = len(wins) / len(settled) * 100 if settled else 0.0
+    win_rate      = len(wins) / len(clean_settled) * 100 if clean_settled else 0.0
     avg_win       = gross_profit / len(wins)   if wins   else 0.0
     avg_loss      = gross_loss   / len(losses) if losses else 0.0
     profit_factor = (gross_profit / abs(gross_loss)
                      if gross_loss != 0 else float("inf"))
     roi           = (total_pnl / total_wagered * 100) if total_wagered > 0 else 0.0
 
-    conf_vals = [float(r["confidence"]) for r in settled if "confidence" in r]
-    edge_vals = [float(r["edge"])       for r in settled if "edge"       in r]
+    conf_vals = [float(r["confidence"]) for r in clean_settled if "confidence" in r]
+    edge_vals = [float(r["edge"])       for r in clean_settled if "edge"       in r]
     avg_conf  = sum(conf_vals) / len(conf_vals) if conf_vals else None
     avg_edge  = sum(edge_vals) / len(edge_vals) if edge_vals else None
 
     # Per-ticker settled breakdown
     tickers: dict = {}
-    for r in settled:
+    for r in clean_settled:
         tk = r.get("ticker", "?")
         if tk not in tickers:
             tickers[tk] = {"count": 0, "pnl": 0.0, "wins": 0, "losses": 0}
@@ -169,7 +236,8 @@ def run() -> None:
     print("=" * 66)
     print(f"  Log:            {TRADES_LOG}")
     print(f"  Total records:  {total_lines}")
-    print(f"    SETTLED:      {len(settled)}")
+    print(f"    SETTLED:      {len(clean_settled)}  (clean — counted in stats)")
+    print(f"      conflicted: {len(conflicted_settled)}  (excluded — terminal-state conflict)")
     print(f"    OPEN (raw):   {raw_open}")
     print(f"      active:     {len(active_opens)}")
     print(f"      stale:      {len(stale_opens)}  (resolved by a later record)")
@@ -201,16 +269,16 @@ def run() -> None:
     else:
         print("  (none — all positions resolved)")
 
-    if not settled:
+    if not clean_settled:
         print()
-        print("  No SETTLED trades to report.")
+        print("  No clean SETTLED trades to report.")
         print("=" * 66 + "\n")
         return
 
     # ── Settled performance ──────────────────────────────────────────────────
     print()
-    print("── SETTLED PERFORMANCE ─────────────────────────────────────")
-    print(f"  Trades settled: {len(settled)}")
+    print("── CLEAN SETTLED PERFORMANCE ───────────────────────────────")
+    print(f"  Trades settled: {len(clean_settled)}")
     print(f"    Wins:         {len(wins)}")
     print(f"    Losses:       {len(losses)}")
     print(f"    Pushes:       {len(pushes)}")
