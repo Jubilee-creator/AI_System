@@ -382,8 +382,11 @@ class PaperTrader:
             return None
         
         # Calculate edge (after fees)
+        original_confidence = estimated_prob
         edge = estimated_prob - price - 0.01  # 1¢ fee estimate
         original_edge = edge
+        council_confidence = original_confidence
+        adjusted_edge = original_edge
         
         # DEBUG 3: Show calculated values
         print(f"[PAPER_DEBUG] action={action} price={price:.3f} estimated_prob={estimated_prob:.3f} edge={edge:.4f} min_edge={self.min_edge:.4f}")
@@ -434,12 +437,16 @@ class PaperTrader:
             estimated_prob = float(council_result.get("final_confidence", estimated_prob))
             estimated_prob = min(max(estimated_prob, 0.0), 1.0)
             edge = estimated_prob - price - 0.01
+            council_confidence = estimated_prob
+            adjusted_edge = edge
             net_adjustment = float(council_result.get("net_confidence_adjustment") or 0.0)
             print(f"[COUNCIL] ALLOW: {council_reason}")
             print(f"[COUNCIL] confidence {old_prob:.3f} -> {estimated_prob:.3f}")
             print(f"[COUNCIL] net_adjustment: {net_adjustment:+.4f}")
         except Exception as exc:
             print(f"[COUNCIL] ERROR: {exc}")
+            council_confidence = estimated_prob
+            adjusted_edge = edge
         
         # Calculate bet size
         is_learning_trade = False
@@ -581,14 +588,20 @@ class PaperTrader:
             "size": bet_size,
             "confidence": estimated_prob,
             "edge": edge,
+            "original_confidence": original_confidence,
+            "council_confidence": council_confidence,
+            "original_edge": original_edge,
+            "adjusted_edge": adjusted_edge,
+            "risk_edge": risk_edge,
+            "data_collection_override": force_data_collection_learning,
+            "learning_trade": is_learning_trade,
+            "raw_strategy": raw_strategy_text or strategy,
             "status": "OPEN",
             "result": None,
             "pnl": 0.0,
             "exit_price": None,
             "settled_at": None
         }
-        if raw_strategy_text and raw_strategy_text != strategy:
-            trade["raw_strategy"] = raw_strategy_text
         
         # Log to file
         self.logger.log_trade(trade)
