@@ -303,6 +303,8 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
     modern_rows = [r for r in evaluated_rows if _is_modern_full_metadata(r)]
     legacy_rows = [r for r in evaluated_rows if not _is_modern_full_metadata(r)]
     modern_count = len(modern_rows)
+    data_collection_count = sum(1 for r in modern_rows if r.get("data_collection_override"))
+    normal_trade_count = modern_count - data_collection_count
     modern_pnl = sum(get_pnl(r) for r in modern_rows)
     modern_wagered = sum(get_size(r) for r in modern_rows)
     modern_roi = round(modern_pnl / modern_wagered, 4) if modern_wagered else 0.0
@@ -343,6 +345,8 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
         "target_proof": 100,
         "data_quality": quality,
         "legacy_evaluated_rows": len(legacy_rows),
+        "data_collection_count": data_collection_count,
+        "normal_trade_count": normal_trade_count,
         "modern_roi": modern_roi,
         "modern_pnl": round(modern_pnl, 2),
         "modern_avg_risk_edge": modern_avg_risk_edge,
@@ -1908,6 +1912,10 @@ body::after {
           <span class="mini-key">Proof Source</span>
           <span id="v-data-quality" class="mini-val warn">--</span>
         </div>
+        <div class="mini-row" style="border-bottom:1px solid rgba(13,40,13,0.5);margin-bottom:6px">
+          <span class="mini-key">Council Override</span>
+          <span id="v-data-collection" class="mini-val warn">--</span>
+        </div>
         <div class="verdict-line">
           <span class="verdict-icon" id="v-profitable">—</span>
           <span id="v-profitable-text">Profitable?</span>
@@ -2287,6 +2295,22 @@ function renderProofChecklist(proof) {
     const quality = proof.data_quality || 'UNKNOWN';
     qualityEl.textContent = quality + (proof.legacy_evaluated_rows ? ` | legacy rows ${proof.legacy_evaluated_rows}` : '');
     qualityEl.className = 'mini-val ' + (quality === 'MODERN_ONLY' ? 'good' : 'warn');
+  }
+  const dcEl = document.getElementById('v-data-collection');
+  if (dcEl) {
+    const dc = proof.data_collection_count != null ? proof.data_collection_count : 0;
+    const norm = proof.normal_trade_count != null ? proof.normal_trade_count : 0;
+    const total = dc + norm;
+    if (total === 0) {
+      dcEl.textContent = 'no modern trades yet';
+      dcEl.className = 'mini-val';
+    } else if (dc === total) {
+      dcEl.textContent = `${dc}/${total} council-REJECTED data_collection — 0 normal trades`;
+      dcEl.className = 'mini-val bad';
+    } else {
+      dcEl.textContent = `${dc}/${total} data_collection | ${norm}/${total} council-approved`;
+      dcEl.className = 'mini-val ' + (norm > 0 ? 'good' : 'warn');
+    }
   }
 
   const byKey = {};

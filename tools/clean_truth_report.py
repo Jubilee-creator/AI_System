@@ -858,6 +858,25 @@ def print_modern_vs_legacy_evidence(rows: list[dict]) -> None:
     if modern_rows and len(modern_rows) < SAMPLE_WARNING_THRESHOLD:
         print("[MODERN WARNING] All modern evaluated evidence is still below 30 rows.")
 
+    if modern_full_rows:
+        dc_count = sum(1 for r in modern_full_rows if r.get("data_collection_override"))
+        normal_count = len(modern_full_rows) - dc_count
+        print()
+        print(f"DATA_COLLECTION_OVERRIDE split (MODERN_FULL_METADATA n={len(modern_full_rows)}):")
+        print(f"  council_approved (normal trades): n={normal_count}")
+        print(f"  council_rejected (data_collection_override=True): n={dc_count}")
+        if dc_count > 0 and normal_count == 0:
+            print(
+                "  [WARNING] ALL modern evidence is from council-REJECTED data_collection_override trades. "
+                "This is NOT evidence of normal operation edge. "
+                "The system has zero evaluated council-approved modern trades."
+            )
+        elif dc_count > 0:
+            print(
+                f"  [NOTE] {dc_count}/{len(modern_full_rows)} modern trades are council-rejected data_collection. "
+                f"Separate council-approved evidence: n={normal_count}."
+            )
+
 
 def print_modern_calibration_report(rows: list[dict]) -> None:
     print()
