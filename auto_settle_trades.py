@@ -19,6 +19,8 @@ Rules enforced:
 
 import sys
 import argparse
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -37,9 +39,46 @@ _RESOLVED_STATUSES: frozenset[str] = frozenset({"determined", "settled", "finali
 # Only these result values map to a paper-trade outcome.
 # "void" (market cancelled) is intentionally excluded — we never settle voids.
 _TRADEABLE_RESULTS: frozenset[str] = frozenset({"yes", "no"})
+MAX_TRADE_DURATION_SECONDS = 7200  # 2 hours
 
 
 # ── Kalshi API helper ──────────────────────────────────────────────────────────
+
+def _to_prob(value) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return round(value / 100.0, 6) if 0 <= value <= 100 else None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if 0.0 <= v <= 1.0:
+        return round(v, 6)
+    if 1.0 < v <= 100.0:
+        return round(v / 100.0, 6)
+    return None
+
+
+def fetch_market(ticker: str) -> Optional[dict]:
+    data = kalshi_get(f"/markets/{ticker}", silent=False)
+    if not data:
+        return None
+    return data.get("market") or data
+
+
+def extract_market_resolution(market: Optional[dict]) -> Tuple[bool, Optional[str]]:
+    if not market:
+        return False, None
+
+    status: str = (market.get("status") or "").strip().lower()
+    result: str = (market.get("result") or "").strip().lower()
+
+    if status in _RESOLVED_STATUSES and result in _TRADEABLE_RESULTS:
+        return True, result.upper()  # "YES" or "NO"
+
+    return False, None
+
 
 def fetch_market_resolution(ticker: str) -> Tuple[bool, Optional[str]]:
     """
@@ -52,21 +91,116 @@ def fetch_market_resolution(ticker: str) -> Tuple[bool, Optional[str]]:
 
     Will not raise — returns (False, None) on any API or parsing error.
     """
-    data = kalshi_get(f"/markets/{ticker}", silent=False)
-    if not data:
-        return False, None
+    return extract_market_resolution(fetch_market(ticker))
 
-    # Kalshi /markets/{ticker} wraps the object under "market"
-    market = data.get("market") or data
 
-    status: str = (market.get("status") or "").strip().lower()
-    result: str = (market.get("result") or "").strip().lower()
+def _parse_timestamp(ts: str) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
-    # Must have both a resolved status AND a tradeable result (yes/no)
-    if status in _RESOLVED_STATUSES and result in _TRADEABLE_RESULTS:
-        return True, result.upper()  # "YES" or "NO"
 
-    return False, None
+def _trade_age_seconds(trade: dict, now: datetime) -> Optional[float]:
+    opened_at = _parse_timestamp(str(trade.get("timestamp") or ""))
+    if opened_at is None:
+        return None
+    if opened_at.tzinfo is None:
+        opened_at = opened_at.replace(tzinfo=timezone.utc)
+    return (now - opened_at).total_seconds()
+
+
+def _current_exit_price(trade: dict, market: Optional[dict]) -> Optional[float]:
+    if not market:
+        return None
+
+    action = trade.get("action", "")
+    if action == "BET_YES":
+        for field in ("yes_bid_dollars", "yes_bid", "last_price", "last_price_dollars"):
+            price = _to_prob(market.get(field))
+            if price is not None:
+                return price
+        no_ask = _to_prob(market.get("no_ask_dollars") or market.get("no_ask"))
+        if no_ask is not None:
+            return round(1.0 - no_ask, 6)
+    elif action == "BET_NO":
+        for field in ("no_bid_dollars", "no_bid"):
+            price = _to_prob(market.get(field))
+            if price is not None:
+                return price
+        yes_ask = _to_prob(market.get("yes_ask_dollars") or market.get("yes_ask"))
+        if yes_ask is not None:
+            return round(1.0 - yes_ask, 6)
+
+    return None
+
+
+def _fallback_exit_price(trade: dict) -> float:
+    for field in ("last_price", "current_price", "mark_price", "exit_price"):
+        price = _to_prob(trade.get(field))
+        if price is not None:
+            return price
+    return float(trade.get("entry_price", 0.0))
+
+
+def _compute_time_exit_pnl(trade: dict, exit_price: float) -> float:
+    entry = float(trade.get("entry_price", 0.0))
+    size = float(trade.get("size", 0.0))
+    return round((exit_price - entry) * size, 2)
+
+
+def _compute_clv(trade: dict, exit_price: float) -> float:
+    return round(float(exit_price) - float(trade.get("entry_price", 0.0)), 4)
+
+
+def _format_clv_label(clv: float) -> str:
+    if clv > 0:
+        return "favorable"
+    if clv < 0:
+        return "unfavorable"
+    return "flat"
+
+
+def _time_exit_risk_result(pnl: float) -> str:
+    if abs(pnl) < 0.01:
+        return "NEUTRAL"
+    return "WIN" if pnl > 0 else "LOSS"
+
+
+def _append_forced_close_record(trader: PaperTrader, trade: dict, exit_price: float,
+                                pnl: float, duration_seconds: float) -> dict:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    closed = dict(trade)
+    closed["status"] = "FORCED_CLOSE"
+    closed["result"] = "TIME_EXIT"
+    closed["pnl"] = pnl
+    closed["exit_price"] = exit_price
+    closed["clv"] = _compute_clv(trade, exit_price)
+    closed["settled_at"] = now_iso
+    closed["duration_seconds"] = round(duration_seconds, 2)
+    closed["reason"] = "TIME_EXIT"
+    closed["cleanup_reason"] = "TIME_EXIT"
+
+    with open(trader.logger.log_file, "a") as fh:
+        fh.write(json.dumps(closed) + "\n")
+
+    if trade in trader.open_trades:
+        trader.open_trades.remove(trade)
+    trader.trade_history.append(closed)
+
+    trader.risk_manager.close_position(float(trade.get("size", 0.0)))
+    risk_result = _time_exit_risk_result(pnl)
+    if risk_result == "NEUTRAL":
+        print("    [TIME_EXIT] Neutral exit — not counted as loss streak")
+    trader.risk_manager.record_result(
+        pnl=pnl,
+        result=risk_result,
+        size=float(trade.get("size", 0.0)),
+        ticker=str(trade.get("ticker", "")),
+    )
+    return closed
 
 
 # ── Core logic ─────────────────────────────────────────────────────────────────
@@ -105,8 +239,10 @@ def run(dry_run: bool) -> None:
     checked   = 0
     skipped   = 0
     settled   = 0
+    forced_closed = 0
     errors    = 0
     pnl_delta = 0.0
+    now = datetime.now(timezone.utc)
 
     for trade in open_trades:
         ticker = trade.get("ticker", "?")
@@ -117,11 +253,50 @@ def run(dry_run: bool) -> None:
         print(f"  [{checked}/{total_open}] {ticker}")
         print(f"    Action : {action}  Entry : {trade.get('entry_price', '?')}  Size : ${size:.2f}")
 
-        is_resolved, outcome = fetch_market_resolution(ticker)
+        market = fetch_market(ticker)
+        is_resolved, outcome = extract_market_resolution(market)
 
         if not is_resolved:
-            print(f"    Status : UNRESOLVED — skipping")
-            skipped += 1
+            duration_seconds = _trade_age_seconds(trade, now)
+            if duration_seconds is None:
+                print(f"    Status : UNRESOLVED — skipping (unknown age)")
+                skipped += 1
+                print()
+                continue
+
+            if duration_seconds < MAX_TRADE_DURATION_SECONDS:
+                age_min = duration_seconds / 60.0
+                print(f"    Status : UNRESOLVED — skipping (age={age_min:.1f}min)")
+                skipped += 1
+                print()
+                continue
+
+            exit_price = _current_exit_price(trade, market)
+            if exit_price is None:
+                exit_price = _fallback_exit_price(trade)
+                print("    [TIME_EXIT] API failed — using fallback exit price")
+
+            time_exit_pnl = _compute_time_exit_pnl(trade, exit_price)
+            time_exit_clv = _compute_clv(trade, exit_price)
+            age_min = duration_seconds / 60.0
+            print(f"    Status : TIME-EXIT due  age={age_min:.1f}min")
+            print(f"    Exit   : price={exit_price:.4f}  P&L=${time_exit_pnl:+.2f}")
+            print(f"    [CLV] value={time_exit_clv:+.4f} ({_format_clv_label(time_exit_clv)})")
+
+            if dry_run:
+                print("    [DRY-RUN] Would append FORCED_CLOSE reason=TIME_EXIT")
+            else:
+                _append_forced_close_record(
+                    trader=trader,
+                    trade=trade,
+                    exit_price=exit_price,
+                    pnl=time_exit_pnl,
+                    duration_seconds=duration_seconds,
+                )
+                print("    Forced : FORCED_CLOSE  reason=TIME_EXIT")
+
+            forced_closed += 1
+            pnl_delta += time_exit_pnl
             print()
             continue
 
@@ -157,6 +332,7 @@ def run(dry_run: bool) -> None:
     print(f"  Trades checked     : {checked}")
     print(f"  Unresolved skipped : {skipped}")
     print(f"  Settled            : {settled}")
+    print(f"  Forced time exits  : {forced_closed}")
     if errors:
         print(f"  Errors             : {errors}")
     print(f"  P&L change         : ${pnl_delta:+.2f}")

@@ -52,29 +52,61 @@ class TradeLogger:
         Args:
             trade: Trade as dict or object with attributes
         """
+        base_fields = {
+            "timestamp",
+            "ticker",
+            "action",
+            "strategy",
+            "entry_price",
+            "size",
+            "confidence",
+            "edge",
+            "status",
+            "result",
+            "pnl",
+            "exit_price",
+            "settled_at",
+            "is_paper",
+        }
         
         def get_value(obj, key, default=None):
             if isinstance(obj, dict):
                 return obj.get(key, default)
             else:
                 return getattr(obj, key, default)
+
+        if isinstance(trade, dict):
+            trade_record = dict(trade)
+        else:
+            trade_record = {
+                key: value
+                for key, value in vars(trade).items()
+                if not key.startswith("_")
+            }
         
-        trade_record = {
-            "timestamp": get_value(trade, "timestamp", datetime.now(timezone.utc).isoformat()),
-            "ticker": get_value(trade, "ticker", "UNKNOWN"),
-            "action": get_value(trade, "action", "UNKNOWN"),
-            "strategy": get_value(trade, "strategy", "UNKNOWN"),
-            "entry_price": get_value(trade, "entry_price", 0.0),
-            "size": get_value(trade, "size", 0.0),
-            "confidence": get_value(trade, "confidence", 0.0),
-            "edge": get_value(trade, "edge", 0.0),
-            "status": get_value(trade, "status", "UNKNOWN"),
-            "result": get_value(trade, "result"),
-            "pnl": get_value(trade, "pnl", 0.0),
-            "exit_price": get_value(trade, "exit_price"),
-            "settled_at": get_value(trade, "settled_at"),
-            "is_paper": get_value(trade, "is_paper", True)
+        defaults = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "ticker": "UNKNOWN",
+            "action": "UNKNOWN",
+            "strategy": "UNKNOWN",
+            "entry_price": 0.0,
+            "size": 0.0,
+            "confidence": 0.0,
+            "edge": 0.0,
+            "status": "UNKNOWN",
+            "result": None,
+            "pnl": 0.0,
+            "exit_price": None,
+            "settled_at": None,
+            "is_paper": True,
         }
+        for key, default in defaults.items():
+            if key not in trade_record:
+                trade_record[key] = get_value(trade, key, default)
+
+        extra_fields = sorted(k for k in trade_record if k not in base_fields)
+        if extra_fields:
+            print(f"[LOGGER] preserving extra fields: {', '.join(extra_fields)}")
         
         try:
             with open(self.log_file, "a") as f:

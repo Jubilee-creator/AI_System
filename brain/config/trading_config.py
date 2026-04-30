@@ -113,7 +113,8 @@ ALLOW_AFTER_HOURS_SPORTS = True
 # ═══════════════════════════════════════════════════════════════
 
 # Minimum market volume to consider (in $)
-MIN_MARKET_VOLUME = 0  # Set to 0 to disable, or e.g. 1000 for $1k min
+MIN_VOLUME = 1000
+MIN_MARKET_VOLUME = MIN_VOLUME
 
 # Maximum spread (bid-ask) to accept
 # 0.05 = 5¢ spread maximum

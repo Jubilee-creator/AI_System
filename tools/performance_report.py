@@ -64,6 +64,14 @@ def get_size(rec: dict) -> float:
     return float(rec.get("size") or rec.get("entry_cost") or 0.0)
 
 
+def get_clv(rec: dict):
+    if rec.get("clv") is not None:
+        return float(rec["clv"])
+    if rec.get("entry_price") is None or rec.get("exit_price") is None:
+        return None
+    return round(float(rec["exit_price"]) - float(rec["entry_price"]), 4)
+
+
 def _trade_key(rec: dict):
     """
     Stable identity key for an open/resolved trade pair.
@@ -217,6 +225,23 @@ def run() -> None:
     avg_conf  = sum(conf_vals) / len(conf_vals) if conf_vals else None
     avg_edge  = sum(edge_vals) / len(edge_vals) if edge_vals else None
 
+    clv_vals = [v for v in (get_clv(r) for r in clean_settled) if v is not None]
+    avg_clv = sum(clv_vals) / len(clv_vals) if clv_vals else None
+    clv_positive = sum(1 for v in clv_vals if v > 0)
+    clv_negative = sum(1 for v in clv_vals if v < 0)
+    clv_flat = sum(1 for v in clv_vals if v == 0)
+
+    forced_clv_vals = [
+        v for v in (
+            get_clv(r) for r in all_records if r.get("status") == "FORCED_CLOSE"
+        )
+        if v is not None
+    ]
+    forced_avg_clv = (
+        sum(forced_clv_vals) / len(forced_clv_vals)
+        if forced_clv_vals else None
+    )
+
     # Per-ticker settled breakdown
     tickers: dict = {}
     for r in clean_settled:
@@ -243,6 +268,14 @@ def run() -> None:
     print(f"      stale:      {len(stale_opens)}  (resolved by a later record)")
     print(f"    VOIDED:       {void_count}  (excluded — duplicate cleanup)")
     print(f"    FORCED_CLOSE: {forced_count}  (excluded — validation reset)")
+    if forced_avg_clv is not None:
+        forced_pos = sum(1 for v in forced_clv_vals if v > 0)
+        forced_neg = sum(1 for v in forced_clv_vals if v < 0)
+        forced_flat = sum(1 for v in forced_clv_vals if v == 0)
+        print(
+            f"      CLV avg:    {forced_avg_clv:+.4f}  "
+            f"(positive={forced_pos}, negative={forced_neg}, flat={forced_flat})"
+        )
     print(f"    no-status:    {no_status}   (excluded — old format)")
 
     # ── Active open positions ────────────────────────────────────────────────
@@ -297,6 +330,12 @@ def run() -> None:
         print(f"  Avg confidence: {avg_conf:.3f}")
     if avg_edge is not None:
         print(f"  Avg edge:       {avg_edge:.4f}")
+    if avg_clv is not None:
+        print(f"  Avg CLV:        {avg_clv:+.4f}")
+        print(
+            f"  CLV dist:       positive={clv_positive}  "
+            f"negative={clv_negative}  flat={clv_flat}"
+        )
 
     if len(tickers) > 1:
         print()

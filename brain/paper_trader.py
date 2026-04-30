@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import risk manager (PHASE 4 ADDITION)
 from brain.risk_manager import RiskManager
+from brain.strategy_utils import normalize_strategy
 
 # Import dependencies
 from logs.trade_logger import TradeLogger
@@ -29,7 +30,52 @@ from config.trading_config import (
     PAPER_VALIDATION_MODE,
     PAPER_VALIDATION_MAX_BET_SIZE,
     MAX_POSITIONS_PER_TICKER,
+    MAX_SPREAD,
+    MIN_VOLUME,
 )
+
+MIN_LEARNING_BET = 5.00
+MAX_LEARNING_EXPOSURE = 20.00
+
+
+def _compute_clv(entry_price: float, exit_price: float) -> float:
+    return round(float(exit_price) - float(entry_price), 4)
+
+
+def _print_clv(clv: float) -> None:
+    if clv > 0:
+        label = "favorable"
+    elif clv < 0:
+        label = "unfavorable"
+    else:
+        label = "flat"
+    print(f"[CLV] value={clv:+.4f} ({label})")
+
+
+def _market_volume(market_data: MarketData) -> float:
+    return float(
+        getattr(market_data, "volume_24h", 0)
+        or getattr(market_data, "volume", 0)
+        or getattr(market_data, "liquidity", 0)
+        or 0
+    )
+
+
+def _market_spread(market_data: MarketData, action: str) -> float:
+    spread = getattr(market_data, "spread", None)
+    if spread is not None:
+        return float(spread)
+
+    if action == "BET_NO":
+        bid = getattr(market_data, "no_bid", None)
+        ask = getattr(market_data, "no_ask", None)
+    else:
+        bid = getattr(market_data, "yes_bid", None)
+        ask = getattr(market_data, "yes_ask", None)
+
+    if bid is None or ask is None:
+        return float("inf")
+    return max(0.0, float(ask) - float(bid))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -248,22 +294,50 @@ class PaperTrader:
         Returns:
             Trade dict if executed, None if skipped/blocked
         """
+        raw_strategy = strategy
+        strategy = normalize_strategy(strategy)
+        raw_strategy_text = str(raw_strategy or "").strip().upper()
+        market_type = ""
+        if "_" in raw_strategy_text:
+            market_type = raw_strategy_text.rsplit("_", 1)[-1]
+        print(
+            "[TRACE] entering paper_trader "
+            f"ticker={market_data.ticker} "
+            f"raw_strategy={raw_strategy_text or strategy} "
+            f"strategy={strategy} "
+            f"confidence_in={estimated_prob:.3f}"
+        )
         
         # DEBUG 1: Check if enabled
         if not self.enabled:
+            print("[TRACE] stop: trader disabled")
             print(f"[PAPER_DEBUG] blocked: trader disabled")
             return None
         
         # DEBUG 2: Check minimum confidence
         if estimated_prob < self.min_confidence and strategy != "ARB":
-            print(f"[PAPER_DEBUG] blocked: below min confidence | estimated_prob={estimated_prob:.3f} min_confidence={self.min_confidence:.3f} strategy={strategy}")
-            return None
+            if estimated_prob < 0.50:
+                print(
+                    "[TRACE] stop: pre-council confidence below learning floor "
+                    f"confidence={estimated_prob:.3f}"
+                )
+                print(f"[PAPER_DEBUG] blocked: below learning confidence floor | estimated_prob={estimated_prob:.3f} strategy={strategy}")
+                return None
+            print(
+                "[TRACE] allowed mid-confidence to pass pre-filter "
+                f"confidence={estimated_prob:.3f} "
+                f"min_confidence={self.min_confidence:.3f}"
+            )
 
         # Duplicate-ticker guard: enforce MAX_POSITIONS_PER_TICKER
         ticker_open_count = sum(
             1 for t in self.open_trades if t.get("ticker") == market_data.ticker
         )
         if ticker_open_count >= MAX_POSITIONS_PER_TICKER:
+            print(
+                "[TRACE] stop: duplicate ticker guard "
+                f"ticker={market_data.ticker} open_count={ticker_open_count}"
+            )
             print(f"[RISK_BLOCK] Duplicate ticker — skipping {market_data.ticker} "
                   f"({ticker_open_count} open position(s) already)")
             return None
@@ -282,6 +356,20 @@ class PaperTrader:
             action = "ARB"
             # For ARB, estimated_prob is near 1.0
             estimated_prob = 0.99
+
+        spread = _market_spread(market_data, action)
+        volume = _market_volume(market_data)
+        if spread > MAX_SPREAD or volume < MIN_VOLUME:
+            print(
+                "[TRACE] stop: market quality filter "
+                f"spread={spread:.4f} volume={volume:.0f}"
+            )
+            print(
+                "[FILTER] skipped: high spread or low liquidity "
+                f"(spread={spread:.4f} max={MAX_SPREAD:.4f}, "
+                f"volume={volume:.0f} min={MIN_VOLUME})"
+            )
+            return None
         
         # Calculate edge (after fees)
         edge = estimated_prob - price - 0.01  # 1¢ fee estimate
@@ -291,10 +379,49 @@ class PaperTrader:
         
         # DEBUG 4: Check minimum edge
         if edge < self.min_edge and strategy != "ARB":
+            print(
+                "[TRACE] stop: min edge block "
+                f"edge={edge:.4f} min_edge={self.min_edge:.4f}"
+            )
             print(f"[PAPER_DEBUG] blocked: below min edge | edge={edge:.4f} min_edge={self.min_edge:.4f} strategy={strategy}")
             return None
+
+        # Decision Council gate.  Fail-open by design so scanner runtime
+        # errors cannot crash or halt the paper trading loop in paper mode.
+        try:
+            from brain.decision_council import decide_signal
+
+            old_prob = estimated_prob
+            council_result = decide_signal({
+                "confidence": estimated_prob,
+                "edge": edge,
+                "ticker": market_data.ticker,
+                "strategy": strategy,
+                "market_type": market_type,
+                "action": action,
+            })
+            council_decision = council_result.get("final_decision", "ALLOW")
+            council_reason = council_result.get("reason", "")
+            if council_decision == "BLOCK":
+                print(
+                    "[TRACE] stop: council block "
+                    f"confidence_before={old_prob:.3f} reason={council_reason}"
+                )
+                print(f"[COUNCIL] BLOCKED: {council_reason}")
+                return None
+
+            estimated_prob = float(council_result.get("final_confidence", estimated_prob))
+            estimated_prob = min(max(estimated_prob, 0.0), 1.0)
+            edge = estimated_prob - price - 0.01
+            net_adjustment = float(council_result.get("net_confidence_adjustment") or 0.0)
+            print(f"[COUNCIL] ALLOW: {council_reason}")
+            print(f"[COUNCIL] confidence {old_prob:.3f} -> {estimated_prob:.3f}")
+            print(f"[COUNCIL] net_adjustment: {net_adjustment:+.4f}")
+        except Exception as exc:
+            print(f"[COUNCIL] ERROR: {exc}")
         
         # Calculate bet size
+        is_learning_trade = False
         bet_size = self._calculate_kelly_size(estimated_prob, price)
 
         # Validation-mode cap: limit trade size while collecting edge data.
@@ -305,13 +432,61 @@ class PaperTrader:
 
         # DEBUG 5: Show bet size calculation
         print(f"[PAPER_DEBUG] bet_size={bet_size:.2f} bankroll={self.bankroll:.2f} max_bet_size={self.max_bet_size:.2f}")
-        
-        # DEBUG 6: Check bet size is positive
-        if bet_size <= 0:
-            print(f"[PAPER_DEBUG] blocked: bet size <= 0")
+        print(
+            "[TRACE] after Kelly calculation "
+            f"confidence={estimated_prob:.3f} "
+            f"kelly_size=${bet_size:.2f}"
+        )
+
+        if 0.50 <= estimated_prob < self.min_confidence:
+            original_kelly_size = bet_size
+            bet_size = MIN_LEARNING_BET
+            is_learning_trade = True
+            print(
+                "[LEARNING] MID_CONFIDENCE_LEARNING_OVERRIDE "
+                f"original_confidence={estimated_prob:.3f} "
+                f"original_kelly_size=${original_kelly_size:.2f} "
+                f"final_size=${MIN_LEARNING_BET:.2f}"
+            )
+        elif estimated_prob < 0.50:
+            print(
+                "[TRACE] stop: below learning confidence floor "
+                f"confidence={estimated_prob:.3f}"
+            )
+            print(
+                "[PAPER_DEBUG] blocked: confidence below learning floor | "
+                f"confidence={estimated_prob:.3f}"
+            )
             return None
+        print(
+            "[TRACE] after learning override "
+            f"final_size=${bet_size:.2f} "
+            f"learning_trade={is_learning_trade}"
+        )
+        
+        # DEBUG 6: Check bet size is positive.  If the Council allowed but
+        # Kelly sizes to zero, keep collecting paper data with a tiny bet.
+        if bet_size <= 0:
+            if edge >= self.min_edge or strategy == "ARB":
+                bet_size = MIN_LEARNING_BET
+                is_learning_trade = True
+                print(
+                    "[LEARNING] Kelly size was 0; using minimum learning bet: "
+                    f"${MIN_LEARNING_BET:.2f}"
+                )
+            else:
+                print("[TRACE] stop: bet size <= 0 after learning checks")
+                print(f"[PAPER_DEBUG] blocked: bet size <= 0")
+                return None
         
         # DEBUG 7: About to call risk manager
+        print(
+            "[TRACE] sending to risk_manager "
+            f"confidence={estimated_prob:.3f} "
+            f"edge={edge:.4f} "
+            f"final_size=${bet_size:.2f} "
+            f"learning_trade={is_learning_trade}"
+        )
         print(f"[PAPER_DEBUG] sending to risk manager")
         
         # ═══════════════════════════════════════════════════════
@@ -324,9 +499,27 @@ class PaperTrader:
             size=bet_size,
             confidence=estimated_prob,
             edge=edge,
-            strategy=strategy
+            strategy=strategy,
+            learning_trade=is_learning_trade
+        )
+        print(
+            "[TRACE] risk decision="
+            f"{'ALLOW' if approved else 'BLOCK'} reason={block_reason}"
         )
         
+        if not approved:
+            can_override_learning_risk = (
+                is_learning_trade
+                and "Effective daily risk includes open exposure" in block_reason
+                and self.risk_manager.total_exposure < MAX_LEARNING_EXPOSURE
+            )
+            if can_override_learning_risk:
+                approved = True
+                print("[LEARNING] Risk override: allowing small learning trade")
+                print("[TRACE] risk decision=ALLOW reason=learning risk override")
+            elif is_learning_trade:
+                print(f"[LEARNING] Risk override denied: {block_reason}")
+
         if not approved:
             print(f"[PAPER] ❌ Trade blocked by risk manager: {block_reason}")
             print(f"  Ticker: {market_data.ticker}")
@@ -337,6 +530,7 @@ class PaperTrader:
         # ═══════════════════════════════════════════════════════
         # TRADE APPROVED - EXECUTE
         # ═══════════════════════════════════════════════════════
+        print("[TRACE] executing trade")
         
         # Create trade record
         trade = {
@@ -354,6 +548,8 @@ class PaperTrader:
             "exit_price": None,
             "settled_at": None
         }
+        if raw_strategy_text and raw_strategy_text != strategy:
+            trade["raw_strategy"] = raw_strategy_text
         
         # Log to file
         self.logger.log_trade(trade)
@@ -428,6 +624,7 @@ class PaperTrader:
         trade["result"] = result
         trade["pnl"] = round(pnl, 2)
         trade["exit_price"] = 1.0 if won else 0.0
+        trade["clv"] = _compute_clv(trade["entry_price"], trade["exit_price"])
         trade["settled_at"] = datetime.now(timezone.utc).isoformat()
         
         # Update totals
@@ -454,6 +651,7 @@ class PaperTrader:
         self.logger.log_trade(trade)
         
         print(f"[PAPER] 💰 Trade settled: {ticker} → {result} (${pnl:+.2f})")
+        _print_clv(trade["clv"])
         
         return trade
     

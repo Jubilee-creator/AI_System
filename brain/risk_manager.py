@@ -61,6 +61,7 @@ from config.trading_config import (
 )
 
 from logs.risk_logger import RiskLogger
+from brain.strategy_utils import normalize_strategy
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -342,7 +343,8 @@ class RiskManager:
         size: float,
         confidence: float,
         edge: float,
-        strategy: str = "SIGNAL"
+        strategy: str = "SIGNAL",
+        learning_trade: bool = False
     ) -> Tuple[bool, str]:
         """
         Check if trade is allowed.
@@ -356,6 +358,7 @@ class RiskManager:
             confidence: Model probability
             edge: Net edge after fees
             strategy: "ARB", "SIGNAL", "TREND"
+            learning_trade: True only for minimum-size learning trades
         
         Returns:
             (approved: bool, reason: str)
@@ -365,6 +368,7 @@ class RiskManager:
         
         # Auto-reset if new day
         self._check_daily_reset()
+        strategy = normalize_strategy(strategy)
         
         # ── CHECK 1: Kill switch ──
         if self.kill_switch_active:
@@ -523,6 +527,11 @@ class RiskManager:
         # ── CHECK 10: Confidence threshold ──
         if action != "ARB":  # ARB doesn't need confidence check
             min_conf_required = strategy_config.get("min_confidence", MIN_CONFIDENCE)
+            if learning_trade:
+                learning_min_confidence = 0.50
+                if min_conf_required > learning_min_confidence:
+                    print("[RISK] adjusted confidence threshold for learning trade")
+                    min_conf_required = learning_min_confidence
             
             if confidence < min_conf_required:
                 reason = f"Confidence {confidence:.2%} below minimum {min_conf_required:.2%}"
@@ -560,7 +569,7 @@ class RiskManager:
     def record_result(
         self,
         pnl: float,
-        result: str,  # "WIN" or "LOSS"
+        result: str,  # "WIN", "LOSS", "NEUTRAL", or "PUSH"
         size: float,
         ticker: str = ""
     ) -> None:
@@ -569,10 +578,11 @@ class RiskManager:
         
         Args:
             pnl: Profit/loss from trade
-            result: "WIN" or "LOSS"
+            result: "WIN", "LOSS", "NEUTRAL", or "PUSH"
             size: Trade size
             ticker: Market ticker (optional)
         """
+        result = (result or "").upper()
         
         # Update P&L (trades_today incremented at open in add_position, not here)
         self.daily_pnl += pnl
@@ -591,6 +601,11 @@ class RiskManager:
         
         elif result == "WIN":
             self.loss_streak = 0
+        
+        elif result in ("NEUTRAL", "PUSH"):
+            # Neutral exits still update P&L, but they do not affect streaks
+            # or trigger cooldowns.
+            pass
         
         self.last_trade_result = result
         
