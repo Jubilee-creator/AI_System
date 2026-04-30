@@ -395,17 +395,6 @@ class PaperTrader:
             print(f"[PAPER_DEBUG] blocked: below min edge | edge={edge:.4f} min_edge={self.min_edge:.4f} strategy={strategy}")
             return None
 
-        # Selective edge filtering (temporary flow control)
-        if strategy == "TREND":
-            print("[EDGE_FILTER] blocked_trend")
-            return None
-        if edge >= 0.08:
-            print("[EDGE_FILTER] blocked_suspicious_high_edge")
-            return None
-        if strategy == "SIGNAL" and not (0.05 <= edge <= 0.079):
-            print("[EDGE_FILTER] blocked_outside_signal_edge_band")
-            return None
-
         # Decision Council gate.  Fail-open by design so scanner runtime
         # errors cannot crash or halt the paper trading loop in paper mode.
         try:
