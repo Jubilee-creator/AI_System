@@ -86,6 +86,8 @@ AUTO_BET_THRESHOLD = 0.70  # confidence needed for auto-bet (not enabled yet)
 RECENT_RISK_EVENT_LIMIT = 250
 MAX_DISPLAY_OPPORTUNITIES = 300
 LIVE_EVENT_LIMIT = 80
+MARKET_HISTORY_LIMIT = 36
+TRACKED_MARKET_SYMBOLS = ["BTC", "ETH", "DOGE", "SOL"]
 
 app = Flask(__name__)
 CORS(app)
@@ -187,6 +189,39 @@ def _quote_price_for_action(quote, action: str):
         return None
 
 
+def _asset_symbol(rec: dict) -> str:
+    text = f"{rec.get('ticker', '')} {rec.get('title', '')} {rec.get('question', '')}".upper()
+    for symbol in TRACKED_MARKET_SYMBOLS:
+        if symbol in text:
+            return symbol
+    return "OTHER"
+
+
+def _quote_mid(rec: dict):
+    for key in ("market_mid", "yes_mid"):
+        value = _safe_float(rec.get(key), None)
+        if value is not None:
+            return value
+
+    yes_bid = _safe_float(rec.get("yes_bid"), None)
+    yes_ask = _safe_float(rec.get("yes_ask"), None)
+    if yes_bid is not None and yes_ask is not None:
+        return round((yes_bid + yes_ask) / 2, 4)
+
+    return _safe_float(rec.get("price_yes", rec.get("yes_price")), None)
+
+
+def _quote_spread(rec: dict):
+    spread = _safe_float(rec.get("spread"), None)
+    if spread is not None:
+        return spread
+    yes_bid = _safe_float(rec.get("yes_bid"), None)
+    yes_ask = _safe_float(rec.get("yes_ask"), None)
+    if yes_bid is not None and yes_ask is not None:
+        return round(yes_ask - yes_bid, 4)
+    return None
+
+
 def _current_quote_index() -> dict:
     return {
         opp.get("ticker"): opp
@@ -209,6 +244,231 @@ def _mark_open_trade(rec: dict, quote_index: dict) -> dict:
     return {
         "mark_price": mark_price,
         "unrealized_pnl": unrealized_pnl,
+    }
+
+
+def _is_time_exit_record(rec: dict) -> bool:
+    return (
+        rec.get("status") == "FORCED_CLOSE"
+        and (
+            rec.get("result") == "TIME_EXIT"
+            or rec.get("reason") == "TIME_EXIT"
+            or rec.get("cleanup_reason") == "TIME_EXIT"
+        )
+    )
+
+
+def _has_quote_metadata(rec: dict) -> bool:
+    if rec.get("price_yes") is not None or rec.get("price_no") is not None:
+        return True
+    return any(rec.get(k) is not None for k in ("yes_bid", "yes_ask", "no_bid", "no_ask"))
+
+
+def _is_modern_full_metadata(rec: dict) -> bool:
+    return (
+        rec.get("risk_edge") is not None
+        and rec.get("model_probability") is not None
+        and _has_quote_metadata(rec)
+    )
+
+
+def _avg_numeric(rows: list[dict], key: str):
+    values = [_safe_float(r.get(key), None) for r in rows if r.get(key) is not None]
+    return round(sum(values) / len(values), 4) if values else None
+
+
+def _proof_state(condition_pass: bool, condition_fail: bool, watch_reason: str) -> str:
+    if watch_reason:
+        return "WATCH"
+    if condition_pass:
+        return "PASS"
+    if condition_fail:
+        return "FAIL"
+    return "WATCH"
+
+
+def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
+    modern_rows = [r for r in evaluated_rows if _is_modern_full_metadata(r)]
+    legacy_rows = [r for r in evaluated_rows if not _is_modern_full_metadata(r)]
+    modern_count = len(modern_rows)
+    modern_pnl = sum(get_pnl(r) for r in modern_rows)
+    modern_wagered = sum(get_size(r) for r in modern_rows)
+    modern_roi = round(modern_pnl / modern_wagered, 4) if modern_wagered else 0.0
+    modern_avg_risk_edge = _avg_numeric(modern_rows, "risk_edge")
+    modern_clv_vals = [v for v in (get_clv(r) for r in modern_rows) if v is not None]
+    modern_avg_clv = round(sum(modern_clv_vals) / len(modern_clv_vals), 4) if modern_clv_vals else None
+    sample_watch = modern_count < 30
+
+    if modern_count == 0 and legacy_rows:
+        quality = "LEGACY_CONTAMINATED"
+    elif modern_rows and legacy_rows:
+        quality = "MIXED"
+    elif modern_rows:
+        quality = "MODERN_ONLY"
+    else:
+        quality = "NO_EVALUATED_ROWS"
+
+    watch_reason = "Modern sample below 30 rows" if sample_watch else ""
+    profitability_state = _proof_state(
+        modern_count >= 30 and modern_roi > 0,
+        modern_count >= 30 and modern_roi <= 0,
+        watch_reason,
+    )
+    edge_state = _proof_state(
+        modern_count >= 30 and modern_avg_risk_edge is not None and modern_avg_risk_edge > 0 and modern_roi > 0,
+        modern_count >= 30 and modern_avg_risk_edge is not None and modern_avg_risk_edge > 0 and modern_roi <= 0,
+        watch_reason,
+    )
+    clv_state = _proof_state(
+        modern_count >= 30 and modern_avg_clv is not None and modern_avg_clv > 0,
+        modern_count >= 30 and (modern_avg_clv is None or modern_avg_clv <= 0),
+        watch_reason,
+    )
+
+    return {
+        "modern_evaluated_rows": modern_count,
+        "target_minimum": 30,
+        "target_proof": 100,
+        "data_quality": quality,
+        "legacy_evaluated_rows": len(legacy_rows),
+        "modern_roi": modern_roi,
+        "modern_pnl": round(modern_pnl, 2),
+        "modern_avg_risk_edge": modern_avg_risk_edge,
+        "modern_avg_clv": modern_avg_clv,
+        "items": [
+            {
+                "key": "profitability",
+                "state": profitability_state,
+                "label": "Profitability",
+                "value": f"Modern ROI {modern_roi * 100:+.1f}% | {modern_count}/30 rows",
+                "explanation": watch_reason or ("Modern ROI is positive" if profitability_state == "PASS" else "Modern ROI is not positive"),
+            },
+            {
+                "key": "edge_validity",
+                "state": edge_state,
+                "label": "Model edge vs realized outcome",
+                "value": (
+                    f"avg risk_edge {modern_avg_risk_edge:+.4f} | ROI {modern_roi * 100:+.1f}%"
+                    if modern_avg_risk_edge is not None else f"risk_edge unavailable | {modern_count}/30 rows"
+                ),
+                "explanation": watch_reason or ("Risk edge and realized ROI agree" if edge_state == "PASS" else "Claimed risk edge is not translating to realized ROI"),
+            },
+            {
+                "key": "clv",
+                "state": clv_state,
+                "label": "Closing line / CLV",
+                "value": (
+                    f"avg CLV {modern_avg_clv:+.4f} | {modern_count}/30 rows"
+                    if modern_avg_clv is not None else f"avg CLV unavailable | {modern_count}/30 rows"
+                ),
+                "explanation": watch_reason or ("Modern trades beat closing line" if clv_state == "PASS" else "Modern trades are not beating closing line"),
+            },
+        ],
+    }
+
+
+def update_market_history(opportunities: list, timestamp: str) -> None:
+    history = state.setdefault("market_history", {})
+    for opp in opportunities:
+        ticker = opp.get("ticker")
+        mid = _quote_mid(opp)
+        if not ticker or mid is None:
+            continue
+        series = history.setdefault(ticker, [])
+        if series and series[-1].get("timestamp") == timestamp:
+            series[-1] = {"timestamp": timestamp, "mid": mid}
+        else:
+            series.append({"timestamp": timestamp, "mid": mid})
+        del series[:-MARKET_HISTORY_LIMIT]
+
+
+def build_market_visuals(active_trades: list[dict]) -> dict:
+    opportunities = state.get("opportunities", [])
+    quote_index = _current_quote_index()
+    history = state.get("market_history", {})
+    by_symbol = {}
+    for opp in opportunities:
+        symbol = _asset_symbol(opp)
+        if symbol not in TRACKED_MARKET_SYMBOLS:
+            continue
+        current = by_symbol.get(symbol)
+        if current is None or _safe_float(opp.get("volume")) > _safe_float(current.get("volume")):
+            by_symbol[symbol] = opp
+
+    market_strip = []
+    for symbol in TRACKED_MARKET_SYMBOLS:
+        opp = by_symbol.get(symbol)
+        if not opp:
+            continue
+        ticker = opp.get("ticker")
+        series = history.get(ticker, [])
+        current_mid = _quote_mid(opp)
+        previous_mid = series[-2]["mid"] if len(series) >= 2 else None
+        change = (
+            round(current_mid - previous_mid, 4)
+            if current_mid is not None and previous_mid is not None else None
+        )
+        market_strip.append({
+            "symbol": symbol,
+            "ticker": ticker,
+            "market_mid": current_mid,
+            "change": change,
+            "sparkline": [point["mid"] for point in series[-18:]],
+            "action": opp.get("action"),
+            "volume": opp.get("volume"),
+        })
+
+    selected_trade = active_trades[0] if active_trades else None
+    selected_quote = quote_index.get(selected_trade.get("ticker")) if selected_trade else None
+    selected_ticker = selected_trade.get("ticker") if selected_trade else (market_strip[0]["ticker"] if market_strip else None)
+    if not selected_quote and selected_ticker:
+        selected_quote = quote_index.get(selected_ticker)
+    selected_history = history.get(selected_ticker, []) if selected_ticker else []
+
+    selected_panel = None
+    if selected_ticker:
+        selected_panel = {
+            "ticker": selected_ticker,
+            "entry_price": selected_trade.get("entry_price") if selected_trade else None,
+            "action": selected_trade.get("action") if selected_trade else selected_quote.get("action") if selected_quote else None,
+            "market_mid": _quote_mid(selected_quote or {}),
+            "yes_bid": (selected_quote or {}).get("yes_bid"),
+            "yes_ask": (selected_quote or {}).get("yes_ask"),
+            "no_bid": (selected_quote or {}).get("no_bid"),
+            "no_ask": (selected_quote or {}).get("no_ask"),
+            "spread": _quote_spread(selected_quote or {}),
+            "close_time": (selected_trade or {}).get("close_time") or (selected_quote or {}).get("close_time"),
+            "result_time": (selected_trade or {}).get("result_time") or (selected_quote or {}).get("result_time"),
+            "history": [point["mid"] for point in selected_history[-36:]],
+        }
+
+    quote_pressure = []
+    for rec in active_trades:
+        quote = quote_index.get(rec.get("ticker"), {})
+        yes_bid = _safe_float(quote.get("yes_bid"), None)
+        yes_ask = _safe_float(quote.get("yes_ask"), None)
+        no_bid = _safe_float(quote.get("no_bid"), None)
+        no_ask = _safe_float(quote.get("no_ask"), None)
+        yes_mid = (yes_bid + yes_ask) / 2 if yes_bid is not None and yes_ask is not None else None
+        no_mid = (no_bid + no_ask) / 2 if no_bid is not None and no_ask is not None else None
+        imbalance = (
+            round(yes_mid - no_mid, 4)
+            if yes_mid is not None and no_mid is not None else None
+        )
+        quote_pressure.append({
+            "ticker": rec.get("ticker"),
+            "yes_bid": yes_bid,
+            "yes_ask": yes_ask,
+            "no_bid": no_bid,
+            "no_ask": no_ask,
+            "spread": _quote_spread(quote),
+            "imbalance": imbalance,
+        })
+
+    return {
+        "market_strip": market_strip,
+        "selected_market": selected_panel,
+        "quote_pressure": quote_pressure,
     }
 
 
@@ -235,6 +495,8 @@ def summarize_performance() -> dict:
         forced_close_keys,
         void_keys,
     )
+    time_exits = [r for r in all_records if _is_time_exit_record(r)]
+    evaluated_rows = clean_settled + time_exits
 
     wins = [r for r in clean_settled if get_pnl(r) > 0]
     losses = [r for r in clean_settled if get_pnl(r) < 0]
@@ -267,10 +529,11 @@ def summarize_performance() -> dict:
     active_trade_cards = []
     for rec in sorted(active_opens, key=lambda x: x.get("timestamp", "")):
         mark = _mark_open_trade(rec, quote_index)
+        quote = quote_index.get(rec.get("ticker"), {})
         if mark["unrealized_pnl"] is not None:
             unrealized_vals.append(mark["unrealized_pnl"])
         active_trade_cards.append({
-            "timestamp": str(rec.get("timestamp", ""))[:19],
+            "timestamp": rec.get("timestamp"),
             "ticker": rec.get("ticker"),
             "action": rec.get("action"),
             "size": get_size(rec),
@@ -284,6 +547,14 @@ def summarize_performance() -> dict:
             "risk_edge": rec.get("risk_edge"),
             "open_trade_mark_price": mark["mark_price"],
             "open_trade_unrealized_pnl": mark["unrealized_pnl"],
+            "current_market_mid": _quote_mid(quote),
+            "yes_bid": quote.get("yes_bid"),
+            "yes_ask": quote.get("yes_ask"),
+            "no_bid": quote.get("no_bid"),
+            "no_ask": quote.get("no_ask"),
+            "spread": _quote_spread(quote),
+            "close_time": rec.get("close_time"),
+            "result_time": rec.get("result_time"),
         })
 
     clv_strategy_rows = []
@@ -339,6 +610,8 @@ def summarize_performance() -> dict:
         },
         "active_trades": active_trade_cards,
         "clv_by_strategy": clv_strategy_rows,
+        "proof_checklist": build_proof_checklist(evaluated_rows),
+        "market_visuals": build_market_visuals(active_trade_cards),
     }
 
 
@@ -649,6 +922,8 @@ state = {
     "paper_stats": {},      # Paper trading stats
     "risk_status": {},      # Risk manager snapshot (M-18)
     "performance_report": {},
+    "market_history": {},
+    "market_visuals": {},
     "execution_funnel": {
         "scanned": 0,
         "actionable": 0,
@@ -737,6 +1012,7 @@ def background_scan():
                 state["market_count"] = len(opportunities)
                 state["last_scan"] = now
                 state["total_scans"] += 1
+                update_market_history(opportunities, now)
 
                 # Update alert counts
                 arbs = [o for o in opportunities if o["action"] == "ARB"]
@@ -891,6 +1167,7 @@ def background_scan():
                 state["market_count"] = len(state["opportunities"])
                 state["last_scan"] = now
                 state["total_scans"] += 1
+                update_market_history(state["opportunities"], now)
                 log_msg = f"Scan #{state['total_scans']} (legacy) — {len(crypto_markets)} crypto markets"
 
             else:
@@ -1221,6 +1498,8 @@ body::after {
 }
 .verdict-icon.pass { color: var(--green2); }
 .verdict-icon.fail { color: var(--red); }
+.verdict-icon.watch { color: var(--yellow); }
+.verdict-value { color: var(--muted); font-size: 9px; margin-left: auto; text-align: right; }
 
 .empty { padding: 20px 10px; color: var(--muted); font-size: 10px; text-align: center; }
 
@@ -1342,6 +1621,73 @@ body::after {
   text-overflow: ellipsis;
 }
 .bar-count { color: var(--green2); text-align: right; }
+.market-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
+}
+.market-tile {
+  background: var(--panel);
+  padding: 7px 8px;
+  min-width: 0;
+}
+.market-tile-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  align-items: center;
+}
+.market-symbol { color: var(--cyan); font-weight: 700; font-size: 10px; }
+.market-price { color: var(--green2); font-size: 10px; }
+.market-change.good { color: var(--green2); }
+.market-change.bad { color: var(--red); }
+.sparkline {
+  height: 26px;
+  display: flex;
+  align-items: end;
+  gap: 2px;
+  margin-top: 5px;
+  border-top: 1px solid rgba(13,40,13,0.6);
+}
+.sparkbar {
+  flex: 1;
+  min-width: 2px;
+  background: var(--green-dim);
+  box-shadow: 0 0 4px rgba(0,255,65,0.18);
+}
+.line-chart {
+  height: 88px;
+  display: flex;
+  align-items: end;
+  gap: 3px;
+  padding: 8px 0 4px;
+  border-bottom: 1px solid rgba(13,40,13,0.55);
+}
+.chartbar {
+  flex: 1;
+  min-width: 3px;
+  background: var(--cyan);
+  opacity: 0.78;
+  box-shadow: 0 0 5px rgba(0,229,255,0.25);
+}
+.entry-line-note {
+  color: var(--yellow);
+  font-size: 8px;
+  letter-spacing: 1px;
+  margin-top: 4px;
+}
+.pressure-bar-wrap {
+  height: 5px;
+  background: var(--dim);
+  margin-top: 4px;
+  overflow: hidden;
+}
+.pressure-bar {
+  height: 100%;
+  background: var(--green2);
+}
+.pressure-bar.bad { background: var(--red); }
 </style>
 </head>
 <body>
@@ -1404,7 +1750,7 @@ body::after {
   </div>
 
   <!-- COL 2: ALERTS + LOG -->
-  <div class="col" style="display:grid;grid-template-rows:auto 1fr auto 1fr auto 1.2fr">
+  <div class="col" style="display:grid;grid-template-rows:auto 0.7fr auto auto auto auto auto 0.9fr auto 1.1fr">
 
     <!-- ARB OPPORTUNITIES -->
     <div class="ph">
@@ -1413,6 +1759,24 @@ body::after {
     </div>
     <div class="pb" id="arb-feed">
       <div class="empty">No arb found yet. Scanning...</div>
+    </div>
+
+    <!-- LIVE MARKET STRIP -->
+    <div class="ph" style="margin-top:1px">
+      <span class="ph-title">Live Market Strip</span>
+      <span class="ph-sub" id="market-strip-label">real scanner quotes</span>
+    </div>
+    <div id="market-strip" class="market-strip">
+      <div class="empty">Waiting for scanner quotes...</div>
+    </div>
+
+    <!-- SELECTED MARKET CHART -->
+    <div class="ph" style="margin-top:1px">
+      <span class="ph-title">Selected Market / Open Position</span>
+      <span class="ph-sub" id="selected-market-label">--</span>
+    </div>
+    <div class="mini-section" id="selected-market-panel">
+      <div class="empty">No selected market yet.</div>
     </div>
 
     <!-- SCAN LOG -->
@@ -1515,23 +1879,39 @@ body::after {
         <div id="active-trades-box"></div>
       </div>
 
+      <div class="mini-section">
+        <div class="mini-title">Quote / Pressure Panel</div>
+        <div id="quote-pressure-box"></div>
+      </div>
+
       <!-- Verdict -->
       <div class="verdict-box">
-        <div style="font-size:8px;color:var(--muted);letter-spacing:2px;margin-bottom:8px">PROOF CHECKLIST (100 TRADES)</div>
+        <div style="font-size:8px;color:var(--muted);letter-spacing:2px;margin-bottom:8px">PROOF CHECKLIST — MODERN EVIDENCE</div>
+        <div class="mini-row" style="border-bottom:1px solid rgba(13,40,13,0.5);margin-bottom:6px">
+          <span class="mini-key">Sample Progress</span>
+          <span id="v-sample-progress" class="mini-val warn">--</span>
+        </div>
+        <div class="mini-row" style="border-bottom:1px solid rgba(13,40,13,0.5);margin-bottom:6px">
+          <span class="mini-key">Proof Source</span>
+          <span id="v-data-quality" class="mini-val warn">--</span>
+        </div>
         <div class="verdict-line">
           <span class="verdict-icon" id="v-profitable">—</span>
           <span id="v-profitable-text">Profitable?</span>
+          <span class="verdict-value" id="v-profitable-value">--</span>
         </div>
         <div class="verdict-line">
           <span class="verdict-icon" id="v-edge">—</span>
-          <span id="v-edge-text">Positive edge?</span>
+          <span id="v-edge-text">Model edge vs realized outcome</span>
+          <span class="verdict-value" id="v-edge-value">--</span>
         </div>
         <div class="verdict-line">
           <span class="verdict-icon" id="v-clv">—</span>
           <span id="v-clv-text">Beat closing line?</span>
+          <span class="verdict-value" id="v-clv-value">--</span>
         </div>
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:9px;color:var(--text)" id="verdict-msg">
-          Paper trading in progress...<br>Need 100 trades to prove edge.
+          Waiting for modern full-metadata evaluated rows.
         </div>
       </div>
 
@@ -1748,6 +2128,115 @@ function renderLiveEvents(events) {
   }).join('');
 }
 
+function fmtNum(v, digits=4) {
+  if (v == null || Number.isNaN(Number(v))) return '--';
+  return Number(v).toFixed(digits);
+}
+
+function fmtPct(v) {
+  if (v == null || Number.isNaN(Number(v))) return '--';
+  return (Number(v) * 100).toFixed(1) + '%';
+}
+
+function fmtAge(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '--';
+  const seconds = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+  if (seconds < 90) return seconds + 's';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 90) return minutes + 'm';
+  return Math.floor(minutes / 60) + 'h ' + (minutes % 60) + 'm';
+}
+
+function fmtCountdown(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '--';
+  const seconds = Math.floor((d.getTime() - Date.now()) / 1000);
+  const sign = seconds < 0 ? '-' : '';
+  const abs = Math.abs(seconds);
+  if (abs < 90) return sign + abs + 's';
+  const minutes = Math.floor(abs / 60);
+  if (minutes < 90) return sign + minutes + 'm';
+  return sign + Math.floor(minutes / 60) + 'h ' + (minutes % 60) + 'm';
+}
+
+function renderSparkline(values, cls='sparkbar') {
+  const nums = (values || []).map(Number).filter(v => !Number.isNaN(v));
+  if (!nums.length) return '<div class="mini-val">no history</div>';
+  const min = Math.min(...nums);
+  const max = Math.max(...nums);
+  const span = Math.max(0.0001, max - min);
+  return nums.map(v => {
+    const pct = 18 + ((v - min) / span) * 78;
+    return `<span class="${cls}" style="height:${pct}%"></span>`;
+  }).join('');
+}
+
+function renderMarketVisuals(visuals) {
+  visuals = visuals || {};
+  const strip = visuals.market_strip || [];
+  const stripEl = document.getElementById('market-strip');
+  const stripLabel = document.getElementById('market-strip-label');
+  if (stripLabel) stripLabel.textContent = strip.length ? strip.length + ' tracked markets' : 'real scanner quotes';
+  if (stripEl) {
+    stripEl.innerHTML = strip.length ? strip.map(m => {
+      const change = m.change;
+      const changeCls = change > 0 ? 'good' : change < 0 ? 'bad' : '';
+      const changeText = change == null ? '--' : (change > 0 ? '+' : '') + Number(change).toFixed(4);
+      return `<div class="market-tile" title="${escapeHtml(m.ticker || '')}">
+        <div class="market-tile-top">
+          <span class="market-symbol">${escapeHtml(m.symbol || '--')}</span>
+          <span class="market-price">${fmtNum(m.market_mid)}</span>
+        </div>
+        <div class="market-tile-top" style="margin-top:3px">
+          <span class="mini-key">${escapeHtml(m.action || '--')}</span>
+          <span class="market-change ${changeCls}">${changeText}</span>
+        </div>
+        <div class="sparkline">${renderSparkline(m.sparkline || [])}</div>
+      </div>`;
+    }).join('') : '<div class="empty">Waiting for scanner quote history.</div>';
+  }
+
+  const selected = visuals.selected_market || null;
+  const selectedEl = document.getElementById('selected-market-panel');
+  const selectedLabel = document.getElementById('selected-market-label');
+  if (selectedLabel) selectedLabel.textContent = selected ? selected.ticker : '--';
+  if (selectedEl) {
+    if (!selected) {
+      selectedEl.innerHTML = '<div class="empty">No selected market yet.</div>';
+    } else {
+      selectedEl.innerHTML = `
+        <div class="mini-row"><span class="mini-key">Ticker / Side</span><span class="mini-val">${escapeHtml(selected.ticker || '--')} ${escapeHtml(selected.action || '')}</span></div>
+        <div class="mini-row"><span class="mini-key">Entry / Mid</span><span class="mini-val">${fmtNum(selected.entry_price)} / ${fmtNum(selected.market_mid)}</span></div>
+        <div class="mini-row"><span class="mini-key">YES bid/ask</span><span class="mini-val">${fmtNum(selected.yes_bid)} / ${fmtNum(selected.yes_ask)}</span></div>
+        <div class="mini-row"><span class="mini-key">NO bid/ask</span><span class="mini-val">${fmtNum(selected.no_bid)} / ${fmtNum(selected.no_ask)}</span></div>
+        <div class="mini-row"><span class="mini-key">Spread</span><span class="mini-val">${fmtNum(selected.spread)}</span></div>
+        <div class="line-chart">${renderSparkline(selected.history || [], 'chartbar')}</div>
+        <div class="entry-line-note">entry=${fmtNum(selected.entry_price)} | close=${fmtCountdown(selected.close_time)} | result=${fmtCountdown(selected.result_time)}</div>
+      `;
+    }
+  }
+
+  const pressureBox = document.getElementById('quote-pressure-box');
+  const pressure = visuals.quote_pressure || [];
+  if (pressureBox) {
+    pressureBox.innerHTML = pressure.length ? pressure.map(q => {
+      const imbalance = q.imbalance;
+      const width = imbalance == null ? 50 : Math.max(4, Math.min(96, 50 + imbalance * 100));
+      const cls = imbalance != null && imbalance < 0 ? 'bad' : '';
+      return `<div class="active-card">
+        <div class="active-card-top"><span>${escapeHtml(q.ticker || 'UNKNOWN')}</span><span>spread=${fmtNum(q.spread)}</span></div>
+        <div class="active-card-meta">
+          YES ${fmtNum(q.yes_bid)} / ${fmtNum(q.yes_ask)} | NO ${fmtNum(q.no_bid)} / ${fmtNum(q.no_ask)} | imbalance=${fmtNum(imbalance)}
+          <div class="pressure-bar-wrap"><div class="pressure-bar ${cls}" style="width:${width}%"></div></div>
+        </div>
+      </div>`;
+    }).join('') : '<div class="mini-row"><span class="mini-key">No active quote pressure</span><span class="mini-val">--</span></div>';
+  }
+}
+
 function fmtMoney(v) {
   if (v == null) return '--';
   return (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
@@ -1755,6 +2244,64 @@ function fmtMoney(v) {
 
 function moneyClass(v) {
   return 'mini-val ' + (v > 0 ? 'good' : v < 0 ? 'bad' : '');
+}
+
+function proofIcon(state) {
+  if (state === 'PASS') return ['✓', 'pass'];
+  if (state === 'FAIL') return ['✗', 'fail'];
+  return ['…', 'watch'];
+}
+
+function renderProofChecklist(proof) {
+  proof = proof || {};
+  const sampleEl = document.getElementById('v-sample-progress');
+  const qualityEl = document.getElementById('v-data-quality');
+  const modernRows = proof.modern_evaluated_rows || 0;
+  const targetMin = proof.target_minimum || 30;
+  const targetProof = proof.target_proof || 100;
+  if (sampleEl) {
+    sampleEl.textContent = `Modern sample: ${modernRows} / ${targetMin} minimum | ${modernRows} / ${targetProof} proof`;
+    sampleEl.className = 'mini-val ' + (modernRows >= targetMin ? 'good' : 'warn');
+  }
+  if (qualityEl) {
+    const quality = proof.data_quality || 'UNKNOWN';
+    qualityEl.textContent = quality + (proof.legacy_evaluated_rows ? ` | legacy rows ${proof.legacy_evaluated_rows}` : '');
+    qualityEl.className = 'mini-val ' + (quality === 'MODERN_ONLY' ? 'good' : 'warn');
+  }
+
+  const byKey = {};
+  (proof.items || []).forEach(item => { byKey[item.key] = item; });
+  const bindings = [
+    ['profitability', 'v-profitable', 'v-profitable-text', 'v-profitable-value'],
+    ['edge_validity', 'v-edge', 'v-edge-text', 'v-edge-value'],
+    ['clv', 'v-clv', 'v-clv-text', 'v-clv-value'],
+  ];
+  bindings.forEach(([key, iconId, textId, valueId]) => {
+    const item = byKey[key] || {state:'WATCH', label:key, value:'--', explanation:'Insufficient data'};
+    const [symbol, cls] = proofIcon(item.state);
+    const icon = document.getElementById(iconId);
+    if (icon) {
+      icon.textContent = symbol;
+      icon.className = 'verdict-icon ' + cls;
+    }
+    const text = document.getElementById(textId);
+    if (text) text.textContent = `${item.state}: ${item.label}`;
+    const val = document.getElementById(valueId);
+    if (val) val.textContent = item.value || '--';
+  });
+
+  const msg = document.getElementById('verdict-msg');
+  if (msg) {
+    if (modernRows < targetMin) {
+      msg.innerHTML = `<span style="color:var(--yellow);font-weight:700">WATCH / INSUFFICIENT DATA</span><br>Modern full-metadata rows are the proof source. Legacy rows are not proof.`;
+    } else if ((proof.items || []).some(i => i.state === 'FAIL')) {
+      msg.innerHTML = '<span style="color:var(--red);font-weight:700">FAIL</span><br>Modern evidence does not justify scaling.';
+    } else if ((proof.items || []).every(i => i.state === 'PASS')) {
+      msg.innerHTML = '<span style="color:var(--green2);font-weight:700">PASS</span><br>Modern evidence passes the minimum proof checklist.';
+    } else {
+      msg.innerHTML = '<span style="color:var(--yellow);font-weight:700">WATCH</span><br>Modern evidence is mixed or incomplete.';
+    }
+  }
 }
 
 function renderPaperStats(stats) {
@@ -1772,6 +2319,8 @@ function renderPaperStats(stats) {
     document.getElementById('live-unrealized-pnl').textContent = '--';
     document.getElementById('live-total-pnl').textContent = '--';
     document.getElementById('live-mark-count').textContent = '--';
+    renderProofChecklist({});
+    renderMarketVisuals({});
     return;
   }
 
@@ -1848,39 +2397,17 @@ function renderPaperStats(stats) {
         adjusted=${t.adjusted_edge != null ? Number(t.adjusted_edge).toFixed(4) : '--'}
         risk=${t.risk_edge != null ? Number(t.risk_edge).toFixed(4) : '--'}<br>
         mark=${t.open_trade_mark_price != null ? Number(t.open_trade_mark_price).toFixed(4) : '--'}
-        unrealized=${t.open_trade_unrealized_pnl != null ? fmtMoney(Number(t.open_trade_unrealized_pnl)) : '--'}
+        unrealized=${t.open_trade_unrealized_pnl != null ? fmtMoney(Number(t.open_trade_unrealized_pnl)) : '--'}<br>
+        mid=${t.current_market_mid != null ? Number(t.current_market_mid).toFixed(4) : '--'}
+        spread=${t.spread != null ? Number(t.spread).toFixed(4) : '--'}
+        age=${fmtAge(t.timestamp)}
+        close=${fmtCountdown(t.close_time)}
+        result=${fmtCountdown(t.result_time)}
       </div>
     </div>`).join('') : '<div class="empty">No active trades.</div>';
 
-  // Verdicts
-  const profitable = pnl > 0;
-  const hasEdge = edge > 0;
-  const beatsClosing = clv != null && clv > 0;
-
-  document.getElementById('v-profitable').textContent = profitable ? '✓' : '✗';
-  document.getElementById('v-profitable').className = 'verdict-icon ' + (profitable ? 'pass' : 'fail');
-  document.getElementById('v-profitable-text').textContent = profitable ? 'Profitable ✓' : 'Not profitable yet';
-
-  document.getElementById('v-edge').textContent = hasEdge ? '✓' : '✗';
-  document.getElementById('v-edge').className = 'verdict-icon ' + (hasEdge ? 'pass' : 'fail');
-  document.getElementById('v-edge-text').textContent = hasEdge ? 'Positive edge ✓' : 'Negative edge';
-
-  document.getElementById('v-clv').textContent = beatsClosing ? '✓' : '✗';
-  document.getElementById('v-clv').className = 'verdict-icon ' + (beatsClosing ? 'pass' : 'fail');
-  document.getElementById('v-clv-text').textContent = beatsClosing ? 'Beat closing line ✓' : 'Losing to closing line';
-
-  // Final verdict message
-  let msg = '';
-  if (settled < 100) {
-    msg = `Paper trading in progress...<br>Need ${100 - total} more trades to prove edge.`;
-  } else if (profitable && hasEdge && beatsClosing) {
-    msg = '<span style="color:var(--green2);font-weight:700">✓ EDGE PROVEN</span><br>Ready for small live bets ($5-10)';
-  } else if (profitable && hasEdge) {
-    msg = '<span style="color:var(--yellow)">⚠ PROFITABLE BUT</span><br>Not beating closing line consistently';
-  } else {
-    msg = '<span style="color:var(--red)">✗ NO EDGE DETECTED</span><br>Do NOT go live. Fix model first.';
-  }
-  document.getElementById('verdict-msg').innerHTML = msg;
+  renderProofChecklist(stats.proof_checklist || {});
+  renderMarketVisuals(stats.market_visuals || {});
 }
 
 function renderExecutionFunnel(funnel) {
@@ -2101,6 +2628,7 @@ def api_state():
             "last_updated": state.get("last_scan"),
         }
     state["performance_report"] = summarize_performance()
+    state["market_visuals"] = state["performance_report"].get("market_visuals", {})
     state["recent_blocked_reasons"] = summarize_recent_blocked_reasons()
     if paper_trader:
         state["risk_status"] = get_risk_status()
