@@ -13,3 +13,5 @@ logs/*.log
 # Runtime data / state files — never commit these
 data/*.json
 data/risk_state.json
+.env.monitor
+*.pem
