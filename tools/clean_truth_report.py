@@ -48,6 +48,31 @@ ENTRY_PRICE_ORDER = [
     ">=0.80",
     "unknown",
 ]
+EDGE_ORDER = [
+    "<0.00",
+    "0.00-0.009",
+    "0.01-0.019",
+    "0.02-0.029",
+    "0.03-0.049",
+    "0.05-0.079",
+    ">=0.08",
+    "unknown",
+]
+CALIBRATION_BUCKET_ORDER = [
+    "<0.50",
+    "0.50-0.59",
+    "0.60-0.69",
+    "0.70-0.79",
+    "0.80-0.89",
+    ">=0.90",
+    "unknown",
+]
+ROW_QUALITY_ORDER = [
+    "MODERN_FULL_METADATA",
+    "MODERN_EDGE_ONLY",
+    "LEGACY_EDGE_ONLY",
+    "MISSING_EDGE",
+]
 
 
 def _as_float(value: Any):
@@ -75,6 +100,20 @@ def _fmt_num(value: float | None, digits: int = 4) -> str:
     if value is None:
         return "n/a"
     return f"{value:+.{digits}f}"
+
+
+def _fmt_ratio(value: float | None, digits: int = 2) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.{digits}f}"
+
+
+def _fmt_field(value: Any) -> str:
+    if value is None or value == "":
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)
 
 
 def parse_ts(value: Any):
@@ -137,6 +176,137 @@ def edge_value(rec: dict):
     if value is not None:
         return value
     return _as_float(rec.get("edge"))
+
+
+def edge_source(rec: dict) -> str:
+    if _as_float(rec.get("risk_edge")) is not None:
+        return "risk_edge"
+    if _as_float(rec.get("edge")) is not None:
+        return "edge"
+    return "missing"
+
+
+def edge_source_quality(rec: dict) -> str:
+    if _as_float(rec.get("risk_edge")) is not None:
+        return "RISK_EDGE_AVAILABLE"
+    if _as_float(rec.get("edge")) is not None:
+        return "LEGACY_EDGE_ONLY"
+    return "MISSING_EDGE"
+
+
+def has_quote_metadata(rec: dict) -> bool:
+    if rec.get("price_yes") is not None or rec.get("price_no") is not None:
+        return True
+    quote_fields = ("yes_bid", "yes_ask", "no_bid", "no_ask")
+    return any(rec.get(field) is not None for field in quote_fields)
+
+
+def row_quality_group(rec: dict) -> str:
+    has_risk_edge = _as_float(rec.get("risk_edge")) is not None
+    has_model_prob = _as_float(rec.get("model_probability")) is not None
+    has_edge = _as_float(rec.get("edge")) is not None
+    has_quotes = has_quote_metadata(rec)
+
+    if has_risk_edge and has_model_prob and has_quotes:
+        return "MODERN_FULL_METADATA"
+    if has_risk_edge:
+        return "MODERN_EDGE_ONLY"
+    if has_edge:
+        return "LEGACY_EDGE_ONLY"
+    return "MISSING_EDGE"
+
+
+def calibration_probability(rec: dict):
+    value = _as_float(rec.get("model_probability"))
+    if value is not None:
+        return value
+    return _as_float(rec.get("confidence"))
+
+
+def calibration_bucket(rec: dict) -> str:
+    probability = calibration_probability(rec)
+    if probability is None:
+        return "unknown"
+    if probability < 0.50:
+        return "<0.50"
+    if probability < 0.60:
+        return "0.50-0.59"
+    if probability < 0.70:
+        return "0.60-0.69"
+    if probability < 0.80:
+        return "0.70-0.79"
+    if probability < 0.90:
+        return "0.80-0.89"
+    return ">=0.90"
+
+
+def realized_outcome(rec: dict):
+    pnl = get_pnl(rec)
+    if pnl > 0:
+        return 1.0
+    if pnl < 0:
+        return 0.0
+    return None
+
+
+def edge_source_quality_flags(source: str, rows: list[dict], metrics: dict,
+                              high_edge_losers: int, overall_metrics: dict) -> list[str]:
+    flags = []
+    missing_quote_rows = [
+        r for r in rows
+        if not any(r.get(k) is not None for k in ("price_yes", "price_no", "yes_ask", "no_ask", "yes_bid", "no_bid"))
+    ]
+    if source == "LEGACY_EDGE_ONLY" and (metrics["total_pnl"] < 0 or high_edge_losers > 0):
+        flags.append("LEGACY_EDGE_DRIVING_LOSSES")
+    if source == "RISK_EDGE_AVAILABLE" and metrics["count"] < SAMPLE_WARNING_THRESHOLD:
+        flags.append("RISK_EDGE_NOT_PROVEN")
+    if source == "MISSING_EDGE" or missing_quote_rows:
+        flags.append("MISSING_METADATA")
+    if overall_metrics["flag"] == "NEGATIVE_EXPECTANCY":
+        flags.append("DO_NOT_SCALE")
+    return flags
+
+
+def modern_legacy_flags(group: str, rows: list[dict], metrics: dict,
+                        high_edge_losers: int, overall_metrics: dict) -> list[str]:
+    flags = []
+    if group == "LEGACY_EDGE_ONLY":
+        flags.append("LEGACY_CONTAMINATION")
+    if group.startswith("MODERN") and metrics["count"] < SAMPLE_WARNING_THRESHOLD:
+        flags.append("MODERN_SAMPLE_TOO_SMALL")
+    if group in {"MODERN_EDGE_ONLY", "MISSING_EDGE"}:
+        flags.append("MISSING_METADATA")
+    if group == "MODERN_FULL_METADATA" and any(not has_quote_metadata(r) for r in rows):
+        flags.append("MISSING_METADATA")
+    if metrics["total_pnl"] < 0 or metrics["flag"] == "NEGATIVE_EXPECTANCY":
+        flags.append("NEGATIVE_EXPECTANCY")
+    if overall_metrics["total_pnl"] < 0 or overall_metrics["flag"] == "NEGATIVE_EXPECTANCY":
+        flags.append("DO_NOT_SCALE")
+    if high_edge_losers and group == "LEGACY_EDGE_ONLY":
+        flags.append("LEGACY_CONTAMINATION")
+    return list(dict.fromkeys(flags))
+
+
+def calibration_flags(metrics: dict, avg_clv: float | None, sample_count: int) -> list[str]:
+    flags = []
+    if sample_count < SAMPLE_WARNING_THRESHOLD:
+        flags.append("SAMPLE_TOO_SMALL")
+
+    avg_pred = metrics.get("avg_predicted_probability")
+    win_rate = metrics.get("realized_win_rate")
+    gap = metrics.get("calibration_gap")
+    if avg_pred is not None and win_rate is not None and gap is not None:
+        if gap < -0.10:
+            flags.append("OVERCONFIDENT")
+        elif gap > 0.10:
+            flags.append("UNDERCONFIDENT")
+
+    if metrics.get("roi", 0.0) < 0:
+        flags.append("NEGATIVE_ROI")
+    if avg_clv is not None and avg_clv < 0:
+        flags.append("NEGATIVE_CLV")
+    flags.append("DO_NOT_SCALE")
+    return flags
 
 
 def edge_bucket(rec: dict) -> str:
@@ -264,6 +434,206 @@ def calc_metrics(rows: list[dict]) -> dict:
     }
 
 
+def calc_asymmetry(rows: list[dict]) -> dict:
+    wins = [get_pnl(r) for r in rows if get_pnl(r) > 0]
+    losses = [get_pnl(r) for r in rows if get_pnl(r) < 0]
+    pushes = [get_pnl(r) for r in rows if get_pnl(r) == 0]
+    gross_wins = sum(wins)
+    gross_losses = sum(losses)
+    total_pnl = gross_wins + gross_losses
+    wagered = sum(get_size(r) for r in rows)
+    avg_win = gross_wins / len(wins) if wins else None
+    avg_loss = gross_losses / len(losses) if losses else None
+
+    payoff_ratio = None
+    breakeven_win_rate = None
+    actual_minus_breakeven = None
+    profit_factor = None
+    if avg_win is not None and avg_loss is not None and avg_loss != 0:
+        abs_avg_loss = abs(avg_loss)
+        payoff_ratio = avg_win / abs_avg_loss if abs_avg_loss else None
+        breakeven_win_rate = abs_avg_loss / (avg_win + abs_avg_loss)
+    if gross_wins > 0 and gross_losses < 0:
+        profit_factor = gross_wins / abs(gross_losses)
+
+    win_loss_count = len(wins) + len(losses)
+    win_rate = len(wins) / win_loss_count if win_loss_count else 0.0
+    if breakeven_win_rate is not None:
+        actual_minus_breakeven = win_rate - breakeven_win_rate
+
+    flag = ""
+    if actual_minus_breakeven is not None:
+        if actual_minus_breakeven < 0:
+            flag = "NEGATIVE_EXPECTANCY"
+        elif len(rows) < SAMPLE_WARNING_THRESHOLD:
+            flag = "WATCHLIST_NOT_PROVEN"
+        else:
+            flag = "POSITIVE_EXPECTANCY_SAMPLE_GE_30"
+
+    return {
+        "count": len(rows),
+        "wins": len(wins),
+        "losses": len(losses),
+        "pushes": len(pushes),
+        "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": payoff_ratio,
+        "profit_factor": profit_factor,
+        "breakeven_win_rate": breakeven_win_rate,
+        "actual_minus_breakeven": actual_minus_breakeven,
+        "total_pnl": total_pnl,
+        "roi": total_pnl / wagered if wagered else 0.0,
+        "flag": flag,
+    }
+
+
+def calc_calibration(rows: list[dict]) -> dict:
+    scored = []
+    for rec in rows:
+        probability = calibration_probability(rec)
+        outcome = realized_outcome(rec)
+        if probability is None or outcome is None:
+            continue
+        scored.append((probability, outcome))
+
+    expected_wins = sum(prob for prob, _ in scored)
+    actual_wins = sum(outcome for _, outcome in scored)
+    brier = (
+        sum((prob - outcome) ** 2 for prob, outcome in scored) / len(scored)
+        if scored else None
+    )
+    gap = actual_wins - expected_wins
+    return {
+        "scored_count": len(scored),
+        "expected_wins": expected_wins,
+        "actual_wins": actual_wins,
+        "expected_minus_actual": expected_wins - actual_wins,
+        "actual_minus_expected": gap,
+        "brier_score": brier,
+    }
+
+
+def calc_bucket_calibration(rows: list[dict]) -> dict:
+    metrics = calc_metrics(rows)
+    probabilities = [
+        p for p in (calibration_probability(r) for r in rows)
+        if p is not None
+    ]
+    outcomes = [
+        o for o in (realized_outcome(r) for r in rows)
+        if o is not None
+    ]
+    avg_pred = _avg(probabilities)
+    realized_win_rate = sum(outcomes) / len(outcomes) if outcomes else None
+    calibration_gap = (
+        realized_win_rate - avg_pred
+        if realized_win_rate is not None and avg_pred is not None
+        else None
+    )
+    return {
+        **metrics,
+        "avg_predicted_probability": avg_pred,
+        "realized_win_rate": realized_win_rate,
+        "calibration_gap": calibration_gap,
+    }
+
+
+def row_true_ev(rec: dict) -> dict | None:
+    probability = calibration_probability(rec)
+    entry_price = _as_float(rec.get("entry_price"))
+    if probability is None or entry_price is None or entry_price <= 0:
+        return None
+
+    win_profit_per_contract = 1.0 - entry_price
+    loss_per_contract = entry_price
+    payout_ratio = (
+        win_profit_per_contract / loss_per_contract
+        if loss_per_contract > 0 else None
+    )
+    predicted_ev_per_contract = (
+        probability * win_profit_per_contract
+        - (1.0 - probability) * loss_per_contract
+    )
+    predicted_ev_roi = predicted_ev_per_contract / entry_price
+    realized_roi = get_pnl(rec) / get_size(rec) if get_size(rec) else None
+    ev_gap = (
+        realized_roi - predicted_ev_roi
+        if realized_roi is not None else None
+    )
+
+    return {
+        "predicted_probability": probability,
+        "entry_price": entry_price,
+        "win_profit_per_contract": win_profit_per_contract,
+        "loss_per_contract": loss_per_contract,
+        "payout_ratio": payout_ratio,
+        "predicted_ev_per_contract": predicted_ev_per_contract,
+        "predicted_ev_roi": predicted_ev_roi,
+        "realized_roi": realized_roi,
+        "ev_gap": ev_gap,
+    }
+
+
+def calc_true_ev(rows: list[dict]) -> dict:
+    asymmetry = calc_asymmetry(rows)
+    ev_rows = [ev for ev in (row_true_ev(r) for r in rows) if ev is not None]
+    clv_vals = [v for v in (get_clv(r) for r in rows) if v is not None]
+    edge_vals = [edge_value(r) for r in rows if edge_value(r) is not None]
+
+    return {
+        **asymmetry,
+        "ev_count": len(ev_rows),
+        "avg_predicted_probability": _avg([
+            ev["predicted_probability"] for ev in ev_rows
+        ]),
+        "avg_entry_price": _avg([ev["entry_price"] for ev in ev_rows]),
+        "avg_payout_ratio": _avg([
+            ev["payout_ratio"] for ev in ev_rows
+            if ev["payout_ratio"] is not None
+        ]),
+        "avg_predicted_ev_roi": _avg([
+            ev["predicted_ev_roi"] for ev in ev_rows
+        ]),
+        "avg_realized_roi": _avg([
+            ev["realized_roi"] for ev in ev_rows
+            if ev["realized_roi"] is not None
+        ]),
+        "avg_ev_gap": _avg([
+            ev["ev_gap"] for ev in ev_rows
+            if ev["ev_gap"] is not None
+        ]),
+        "avg_clv": _avg(clv_vals),
+        "avg_edge": _avg(edge_vals),
+    }
+
+
+def true_ev_flags(name: str, rows: list[dict], metrics: dict) -> list[str]:
+    flags = []
+    if metrics["count"] < SAMPLE_WARNING_THRESHOLD:
+        flags.append("SAMPLE_TOO_SMALL")
+    if metrics["avg_predicted_ev_roi"] is not None and metrics["avg_predicted_ev_roi"] < 0:
+        flags.append("NEGATIVE_PREDICTED_EV")
+    if metrics["roi"] < 0:
+        flags.append("NEGATIVE_REALIZED_ROI")
+    if (
+        metrics["avg_payout_ratio"] is not None
+        and metrics["avg_payout_ratio"] < 1.0
+    ) or (
+        metrics["payoff_ratio"] is not None
+        and metrics["payoff_ratio"] < 1.0
+    ):
+        flags.append("BAD_PAYOUT_ASYMMETRY")
+    if metrics["avg_ev_gap"] is not None and metrics["avg_ev_gap"] < -0.10:
+        flags.append("OVERPREDICTED_EV")
+    if metrics["avg_clv"] is not None and metrics["avg_clv"] < 0:
+        flags.append("NEGATIVE_CLV")
+    if name == "LEGACY_EDGE_ONLY" or any(row_quality_group(r) == "LEGACY_EDGE_ONLY" for r in rows):
+        flags.append("LEGACY_CONTAMINATION")
+    flags.append("DO_NOT_SCALE")
+    return list(dict.fromkeys(flags))
+
+
 def group_by(rows: list[dict], key_func) -> dict[str, list[dict]]:
     groups: dict[str, list[dict]] = defaultdict(list)
     for rec in rows:
@@ -311,6 +681,552 @@ def print_group_table(title: str, rows: list[dict], key_func, order: list[str] |
         print("  (no rows)")
 
 
+def print_asymmetry_row(name: str, rows: list[dict]) -> None:
+    m = calc_asymmetry(rows)
+    sample_note = "tiny sample" if 0 < m["count"] < 5 else ""
+    flag = m["flag"] or ""
+    print(
+        f"{name:<34} n={m['count']:>3} W={m['wins']:>3} L={m['losses']:>3} P={m['pushes']:>3} "
+        f"WR={_fmt_pct(m['win_rate']):>6} "
+        f"avgW={_fmt_money(m['avg_win']) if m['avg_win'] is not None else 'n/a':>9} "
+        f"avgL={_fmt_money(m['avg_loss']) if m['avg_loss'] is not None else 'n/a':>9} "
+        f"W/L={_fmt_ratio(m['payoff_ratio']):>4} "
+        f"PF={_fmt_ratio(m['profit_factor']):>4} "
+        f"BE_WR={_fmt_pct(m['breakeven_win_rate']) if m['breakeven_win_rate'] is not None else 'n/a':>6} "
+        f"WR-BE={_fmt_pct(m['actual_minus_breakeven']) if m['actual_minus_breakeven'] is not None else 'n/a':>7} "
+        f"PnL={_fmt_money(m['total_pnl']):>9} ROI={_fmt_pct(m['roi']):>8} "
+        f"{flag}{' | ' + sample_note if sample_note else ''}"
+    )
+
+
+def print_asymmetry_group(title: str, rows: list[dict], key_func, order: list[str] | None = None) -> None:
+    print()
+    print(title)
+    print("-" * len(title))
+    groups = group_by(rows, key_func)
+    keys = order or sorted(groups)
+    printed = False
+    for key in keys:
+        bucket_rows = groups.get(key, [])
+        if not bucket_rows:
+            continue
+        print_asymmetry_row(str(key), bucket_rows)
+        printed = True
+    if not printed:
+        print("  (no rows)")
+
+
+def edge_bucket_floor(bucket: str) -> float | None:
+    if bucket == "<0.00":
+        return -1.0
+    if bucket == "0.00-0.009":
+        return 0.0
+    if bucket == "0.01-0.019":
+        return 0.01
+    if bucket == "0.02-0.029":
+        return 0.02
+    if bucket == "0.03-0.049":
+        return 0.03
+    if bucket == "0.05-0.079":
+        return 0.05
+    if bucket == ">=0.08":
+        return 0.08
+    return None
+
+
+def edge_truth_flags(bucket: str, rows: list[dict], metrics: dict, overall_metrics: dict,
+                     inverted: bool) -> list[str]:
+    flags = []
+    if metrics["count"] < SAMPLE_WARNING_THRESHOLD:
+        flags.append("EDGE_NOT_PROVEN")
+    if metrics["count"] >= 5 and metrics["roi"] < 0:
+        flags.append("EDGE_FAILED")
+    if bucket == ">=0.08" and metrics["roi"] < 0:
+        flags.append("HIGH_EDGE_DANGER")
+    if inverted:
+        flags.append("EDGE_INVERTED")
+    if overall_metrics["flag"] == "NEGATIVE_EXPECTANCY":
+        flags.append("DO_NOT_SCALE")
+    return flags
+
+
+def print_edge_source_quality(rows: list[dict]) -> None:
+    print()
+    print("EDGE SOURCE QUALITY")
+    print("-------------------")
+    print("RISK_EDGE_AVAILABLE uses explicit risk_edge. LEGACY_EDGE_ONLY falls back to old edge.")
+
+    groups = group_by(rows, edge_source_quality)
+    overall = calc_asymmetry(rows)
+    high_edge_failures_by_source = defaultdict(int)
+    for rec in rows:
+        edge = edge_value(rec)
+        if edge is not None and edge >= 0.08 and get_pnl(rec) < 0:
+            high_edge_failures_by_source[edge_source_quality(rec)] += 1
+
+    for source in ["RISK_EDGE_AVAILABLE", "LEGACY_EDGE_ONLY", "MISSING_EDGE"]:
+        source_rows = groups.get(source, [])
+        if not source_rows:
+            continue
+        metrics = calc_asymmetry(source_rows)
+        edge_vals = [edge_value(r) for r in source_rows if edge_value(r) is not None]
+        high_edge_losers = high_edge_failures_by_source.get(source, 0)
+        flags = edge_source_quality_flags(source, source_rows, metrics, high_edge_losers, overall)
+        print(
+            f"{source:<20} n={metrics['count']:>3} "
+            f"W={metrics['wins']:>3} L={metrics['losses']:>3} P={metrics['pushes']:>3} "
+            f"WR={_fmt_pct(metrics['win_rate']):>6} "
+            f"PnL={_fmt_money(metrics['total_pnl']):>9} "
+            f"ROI={_fmt_pct(metrics['roi']):>8} "
+            f"avg_edge={_fmt_num(_avg(edge_vals)):>8} "
+            f"avgW={_fmt_money(metrics['avg_win']) if metrics['avg_win'] is not None else 'n/a':>9} "
+            f"avgL={_fmt_money(metrics['avg_loss']) if metrics['avg_loss'] is not None else 'n/a':>9} "
+            f"PF={_fmt_ratio(metrics['profit_factor']):>4} "
+            f"high_edge_losers={high_edge_losers} "
+            f"{' | '.join(flags) if flags else 'OK_TO_WATCH'}"
+        )
+
+    if high_edge_failures_by_source.get("LEGACY_EDGE_ONLY", 0) > 0:
+        print(
+            "[EDGE SOURCE WARNING] Legacy edge-only rows are driving high-edge "
+            "failures. Treat old high-edge buckets separately from modern risk_edge rows."
+        )
+
+
+def print_modern_vs_legacy_evidence(rows: list[dict]) -> None:
+    print()
+    print("MODERN VS LEGACY EVIDENCE")
+    print("-------------------------")
+    print("MODERN_FULL_METADATA requires risk_edge + model_probability + quote metadata.")
+    print("MODERN_EDGE_ONLY has risk_edge but lacks complete quote/model context.")
+    print("LEGACY_EDGE_ONLY has only old edge fallback. MISSING_EDGE has no usable edge.")
+
+    groups = group_by(rows, row_quality_group)
+    overall = calc_asymmetry(rows)
+    high_edge_failures_by_group = defaultdict(int)
+    modern_full_rows = groups.get("MODERN_FULL_METADATA", [])
+    modern_rows = modern_full_rows + groups.get("MODERN_EDGE_ONLY", [])
+
+    for rec in rows:
+        edge = edge_value(rec)
+        if edge is not None and edge >= 0.08 and get_pnl(rec) < 0:
+            high_edge_failures_by_group[row_quality_group(rec)] += 1
+
+    for group in [
+        "MODERN_FULL_METADATA",
+        "MODERN_EDGE_ONLY",
+        "LEGACY_EDGE_ONLY",
+        "MISSING_EDGE",
+    ]:
+        group_rows = groups.get(group, [])
+        if not group_rows:
+            continue
+        metrics = calc_asymmetry(group_rows)
+        edge_vals = [edge_value(r) for r in group_rows if edge_value(r) is not None]
+        clv_vals = [v for v in (get_clv(r) for r in group_rows) if v is not None]
+        high_edge_losers = high_edge_failures_by_group.get(group, 0)
+        flags = modern_legacy_flags(group, group_rows, metrics, high_edge_losers, overall)
+        print(
+            f"{group:<22} n={metrics['count']:>3} "
+            f"W={metrics['wins']:>3} L={metrics['losses']:>3} P={metrics['pushes']:>3} "
+            f"WR={_fmt_pct(metrics['win_rate']):>6} "
+            f"PnL={_fmt_money(metrics['total_pnl']):>9} "
+            f"ROI={_fmt_pct(metrics['roi']):>8} "
+            f"avg_edge={_fmt_num(_avg(edge_vals)):>8} "
+            f"avgW={_fmt_money(metrics['avg_win']) if metrics['avg_win'] is not None else 'n/a':>9} "
+            f"avgL={_fmt_money(metrics['avg_loss']) if metrics['avg_loss'] is not None else 'n/a':>9} "
+            f"PF={_fmt_ratio(metrics['profit_factor']):>4} "
+            f"avgCLV={_fmt_num(_avg(clv_vals)):>8} "
+            f"high_edge_losers={high_edge_losers} "
+            f"{' | '.join(flags) if flags else 'OK_TO_WATCH'}"
+        )
+
+    if not modern_full_rows:
+        print(
+            "[MODERN VERDICT] No modern full-metadata evaluated rows yet. "
+            "Do not judge current model quality from legacy rows."
+        )
+    elif len(modern_full_rows) < SAMPLE_WARNING_THRESHOLD:
+        print("[MODERN VERDICT] Modern sample is too small. Watch only.")
+    else:
+        modern_full_metrics = calc_asymmetry(modern_full_rows)
+        if modern_full_metrics["roi"] < 0:
+            print("[MODERN VERDICT] Modern sample negative. Do not scale.")
+        else:
+            print("[MODERN VERDICT] Modern sample is non-negative, but still requires calibration review before scaling.")
+
+    if modern_rows and len(modern_rows) < SAMPLE_WARNING_THRESHOLD:
+        print("[MODERN WARNING] All modern evaluated evidence is still below 30 rows.")
+
+
+def print_modern_calibration_report(rows: list[dict]) -> None:
+    print()
+    print("MODERN CALIBRATION REPORT")
+    print("-------------------------")
+    print("Primary sample: evaluated MODERN_FULL_METADATA rows only.")
+    print("Predicted probability uses model_probability first, then confidence fallback.")
+    print("Outcome is 1 for positive PnL, 0 for negative PnL; pushes are excluded from calibration scoring.")
+
+    modern_rows = [r for r in rows if row_quality_group(r) == "MODERN_FULL_METADATA"]
+    if len(modern_rows) < 5:
+        print(
+            "[CALIBRATION WARNING] Modern calibration sample too small. "
+            "This is plumbing verification, not statistical evidence."
+        )
+
+    overall = calc_calibration(modern_rows)
+    print(
+        f"Modern rows: n={len(modern_rows)} scored={overall['scored_count']} "
+        f"Brier={_fmt_ratio(overall['brier_score'], 4)} "
+        f"ExpectedWins={_fmt_ratio(overall['expected_wins'], 2)} "
+        f"ActualWins={_fmt_ratio(overall['actual_wins'], 2)} "
+        f"ExpectedMinusActual={_fmt_ratio(overall['expected_minus_actual'], 2)}"
+    )
+
+    if overall["scored_count"] == 0:
+        print("[CALIBRATION VERDICT] No scored modern rows yet. Confidence is unproven.")
+    elif overall["expected_minus_actual"] > max(1.0, overall["scored_count"] * 0.10):
+        print("[CALIBRATION WARNING] OVERCONFIDENT: expected wins meaningfully exceed actual wins.")
+    elif overall["scored_count"] < SAMPLE_WARNING_THRESHOLD:
+        print("[CALIBRATION VERDICT] Confidence is unproven; modern sample is below 30 rows.")
+
+    groups = group_by(modern_rows, calibration_bucket)
+    printed = False
+    for bucket in CALIBRATION_BUCKET_ORDER:
+        bucket_rows = groups.get(bucket, [])
+        if not bucket_rows:
+            continue
+        m = calc_bucket_calibration(bucket_rows)
+        clv_vals = [v for v in (get_clv(r) for r in bucket_rows) if v is not None]
+        avg_clv = _avg(clv_vals)
+        flags = calibration_flags(m, avg_clv, m["count"])
+        print(
+            f"{bucket:<10} n={m['count']:>3} "
+            f"W={m['wins']:>3} L={m['losses']:>3} P={m['pushes']:>3} "
+            f"avg_pred={_fmt_pct(m['avg_predicted_probability']) if m['avg_predicted_probability'] is not None else 'n/a':>6} "
+            f"realized={_fmt_pct(m['realized_win_rate']) if m['realized_win_rate'] is not None else 'n/a':>6} "
+            f"gap={_fmt_pct(m['calibration_gap']) if m['calibration_gap'] is not None else 'n/a':>7} "
+            f"PnL={_fmt_money(m['total_pnl']):>9} "
+            f"ROI={_fmt_pct(m['roi']):>8} "
+            f"avgCLV={_fmt_num(avg_clv):>8} "
+            f"avgEdge={_fmt_num(m['avg_risk_edge']):>8} "
+            f"{' | '.join(flags)}"
+        )
+        printed = True
+
+    if not printed:
+        print("  (no modern full-metadata calibration buckets)")
+
+
+def print_true_ev_row(name: str, rows: list[dict]) -> None:
+    m = calc_true_ev(rows)
+    flags = true_ev_flags(name, rows, m)
+    print(
+        f"{name:<36} n={m['count']:>3} ev_n={m['ev_count']:>3} "
+        f"W={m['wins']:>3} L={m['losses']:>3} P={m['pushes']:>3} "
+        f"WR={_fmt_pct(m['win_rate']):>6} "
+        f"avgProb={_fmt_pct(m['avg_predicted_probability']) if m['avg_predicted_probability'] is not None else 'n/a':>6} "
+        f"entry={_fmt_num(m['avg_entry_price']):>8} "
+        f"payRatio={_fmt_ratio(m['avg_payout_ratio']):>5} "
+        f"predEVROI={_fmt_pct(m['avg_predicted_ev_roi']) if m['avg_predicted_ev_roi'] is not None else 'n/a':>8} "
+        f"realROI={_fmt_pct(m['roi']):>8} "
+        f"EVgap={_fmt_pct(m['avg_ev_gap']) if m['avg_ev_gap'] is not None else 'n/a':>8} "
+        f"CLV={_fmt_num(m['avg_clv']):>8} "
+        f"PF={_fmt_ratio(m['profit_factor']):>4} "
+        f"{' | '.join(flags)}"
+    )
+
+
+def print_true_ev_group(title: str, rows: list[dict], key_func,
+                        order: list[str] | None = None) -> None:
+    print()
+    print(title)
+    print("-" * len(title))
+    groups = group_by(rows, key_func)
+    keys = order or sorted(groups)
+    printed = False
+    for key in keys:
+        group_rows = groups.get(key, [])
+        if not group_rows:
+            continue
+        print_true_ev_row(str(key), group_rows)
+        printed = True
+    if not printed:
+        print("  (no rows)")
+
+
+def print_true_ev_report(rows: list[dict]) -> None:
+    print()
+    print("TRUE EV + PAYOUT ASYMMETRY REPORT")
+    print("---------------------------------")
+    print("Predicted probability uses model_probability first, then confidence fallback.")
+    print("Formulas: win_profit=1-entry_price; loss=entry_price;")
+    print("predEV/contract=p*(1-entry)-(1-p)*entry; predEVROI=predEV/entry.")
+    print("realROI is realized PnL divided by trade size. EVgap=realROI-predEVROI.")
+
+    print_true_ev_row("OVERALL", rows)
+    print_true_ev_group(
+        "TRUE EV BY EVIDENCE QUALITY",
+        rows,
+        row_quality_group,
+        ROW_QUALITY_ORDER,
+    )
+    print_true_ev_group(
+        "TRUE EV BY ENTRY PRICE BUCKET",
+        rows,
+        entry_price_bucket,
+        ENTRY_PRICE_ORDER,
+    )
+    print_true_ev_group(
+        "TRUE EV BY EDGE BUCKET",
+        rows,
+        edge_bucket,
+        EDGE_ORDER,
+    )
+    print_true_ev_group(
+        "TRUE EV BY CONFIDENCE / PROBABILITY BUCKET",
+        rows,
+        calibration_bucket,
+        CALIBRATION_BUCKET_ORDER,
+    )
+    print_true_ev_group("TRUE EV BY STRATEGY", rows, strategy_key)
+    print_true_ev_group(
+        "TRUE EV BY MARKET HORIZON",
+        rows,
+        market_horizon,
+        HORIZON_ORDER,
+    )
+
+    modern_full = [r for r in rows if row_quality_group(r) == "MODERN_FULL_METADATA"]
+    if len(modern_full) < SAMPLE_WARNING_THRESHOLD:
+        print(
+            "[TRUE EV VERDICT] Modern full-metadata sample is too small. "
+            "This report is evidence plumbing, not proof of edge."
+        )
+    modern_metrics = calc_true_ev(modern_full)
+    if modern_full and modern_metrics["roi"] < 0:
+        print("[TRUE EV VERDICT] Modern realized ROI is negative. Do not scale.")
+    elif modern_full:
+        print("[TRUE EV VERDICT] Modern realized ROI is non-negative, but not statistically proven.")
+
+
+def print_edge_truth_audit(rows: list[dict]) -> None:
+    print()
+    print("EDGE TRUTH AUDIT (clean settled + time exits)")
+    print("---------------------------------------------")
+    print("Edge label here means risk_edge if present, else logged edge.")
+    print("Logged edge is model probability minus entry price minus fee estimate;")
+    print("this audit checks whether that label maps to realized ROI.")
+
+    groups = group_by(rows, edge_bucket)
+    overall = calc_asymmetry(rows)
+    roi_by_bucket = {}
+    avg_edge_by_bucket = {}
+    for bucket in EDGE_ORDER:
+        bucket_rows = groups.get(bucket, [])
+        if not bucket_rows:
+            continue
+        metrics = calc_asymmetry(bucket_rows)
+        edge_vals = [edge_value(r) for r in bucket_rows if edge_value(r) is not None]
+        roi_by_bucket[bucket] = metrics["roi"]
+        avg_edge_by_bucket[bucket] = _avg(edge_vals)
+
+    best_prior_roi = None
+    inversion_flags = set()
+    for bucket in EDGE_ORDER:
+        if bucket not in roi_by_bucket:
+            continue
+        floor = edge_bucket_floor(bucket)
+        if floor is None:
+            continue
+        roi = roi_by_bucket[bucket]
+        if best_prior_roi is not None and roi < best_prior_roi:
+            inversion_flags.add(bucket)
+        best_prior_roi = roi if best_prior_roi is None else max(best_prior_roi, roi)
+
+    printed = False
+    for bucket in EDGE_ORDER:
+        bucket_rows = groups.get(bucket, [])
+        if not bucket_rows:
+            continue
+        metrics = calc_asymmetry(bucket_rows)
+        avg_pred_edge = avg_edge_by_bucket.get(bucket)
+        flags = edge_truth_flags(
+            bucket,
+            bucket_rows,
+            metrics,
+            overall,
+            bucket in inversion_flags,
+        )
+        print(
+            f"{bucket:<12} n={metrics['count']:>3} W={metrics['wins']:>3} "
+            f"L={metrics['losses']:>3} P={metrics['pushes']:>3} "
+            f"WR={_fmt_pct(metrics['win_rate']):>6} "
+            f"avg_edge={_fmt_num(avg_pred_edge):>8} "
+            f"PnL={_fmt_money(metrics['total_pnl']):>9} "
+            f"ROI={_fmt_pct(metrics['roi']):>8} "
+            f"avgW={_fmt_money(metrics['avg_win']) if metrics['avg_win'] is not None else 'n/a':>9} "
+            f"avgL={_fmt_money(metrics['avg_loss']) if metrics['avg_loss'] is not None else 'n/a':>9} "
+            f"PF={_fmt_ratio(metrics['profit_factor']):>4} "
+            f"{' | '.join(flags) if flags else 'OK_TO_WATCH'}"
+        )
+        printed = True
+
+    if not printed:
+        print("  (no edge buckets)")
+
+    high_edge = groups.get(">=0.08", [])
+    if high_edge:
+        high_metrics = calc_asymmetry(high_edge)
+        if high_metrics["roi"] < 0:
+            print(
+                "[EDGE WARNING] High-edge bucket is negative. Treat current "
+                "high-edge labels as dangerous until proven otherwise."
+            )
+    if overall["flag"] == "NEGATIVE_EXPECTANCY":
+        print("[EDGE WARNING] Overall evaluated expectancy is negative. DO_NOT_SCALE.")
+
+
+def inferred_edge_fee(rec: dict) -> float | None:
+    confidence = _as_float(rec.get("original_confidence"))
+    if confidence is None:
+        confidence = _as_float(rec.get("confidence"))
+    entry = _as_float(rec.get("entry_price"))
+    edge = edge_value(rec)
+    if confidence is None or entry is None or edge is None:
+        return None
+    return confidence - entry - edge
+
+
+def high_edge_loser_flags(rec: dict) -> list[str]:
+    flags = []
+    entry = _as_float(rec.get("entry_price"))
+    exit_price = _as_float(rec.get("exit_price"))
+    clv = get_clv(rec)
+    inferred_fee = inferred_edge_fee(rec)
+
+    if edge_source(rec) == "edge":
+        flags.append("LEGACY_EDGE_FALLBACK")
+    if not any(rec.get(k) is not None for k in ("price_yes", "price_no", "yes_ask", "no_ask", "yes_bid", "no_bid")):
+        flags.append("NO_QUOTE_FIELDS")
+    if entry is not None and entry < 0.20:
+        flags.append("CHEAP_ENTRY_LOTTERY")
+    if inferred_fee is not None and abs(inferred_fee - 0.01) < 0.0001:
+        flags.append("EDGE_EQUALS_CONF_MINUS_ENTRY_MINUS_0.01")
+    if clv is not None and clv < 0:
+        flags.append("NEGATIVE_CLV")
+    if rec.get("status") == "SETTLED" and exit_price == 0:
+        flags.append("FULL_SETTLEMENT_LOSS")
+    if rec.get("strategy") and str(rec.get("strategy")).upper().startswith("TREND"):
+        flags.append("TREND_SOURCE")
+    return flags
+
+
+def print_high_edge_loser_forensics(rows: list[dict]) -> None:
+    losers = [
+        r for r in rows
+        if edge_value(r) is not None and edge_value(r) >= 0.08 and get_pnl(r) < 0
+    ]
+
+    print()
+    print("HIGH EDGE LOSER FORENSICS")
+    print("-------------------------")
+    print("Rows shown: evaluated trades with edge >= 0.08 and negative PnL.")
+    print("model_probability below means logged side confidence when explicit model_probability is absent.")
+
+    if not losers:
+        print("  (no high-edge losers)")
+        return
+
+    source_counts = defaultdict(int)
+    flag_counts = defaultdict(int)
+    for rec in losers:
+        source_counts[edge_source(rec)] += 1
+        for flag in high_edge_loser_flags(rec):
+            flag_counts[flag] += 1
+
+    print(
+        "Summary: "
+        + ", ".join(f"{source}={count}" for source, count in sorted(source_counts.items()))
+        + " | "
+        + ", ".join(f"{flag}={count}" for flag, count in sorted(flag_counts.items()))
+    )
+
+    for rec in losers:
+        confidence = _as_float(rec.get("original_confidence"))
+        if confidence is None:
+            confidence = _as_float(rec.get("confidence"))
+        inferred_fee = inferred_edge_fee(rec)
+        quote_bits = {
+            "yes_price": rec.get("yes_price") or rec.get("price_yes") or rec.get("yes_ask"),
+            "no_price": rec.get("no_price") or rec.get("price_no") or rec.get("no_ask"),
+            "yes_bid": rec.get("yes_bid"),
+            "no_bid": rec.get("no_bid"),
+            "market_mid": rec.get("market_mid"),
+        }
+        title = rec.get("title") or rec.get("question") or ""
+        if len(str(title)) > 70:
+            title = str(title)[:67] + "..."
+
+        print()
+        print(f"- {rec.get('timestamp', 'n/a')} | {rec.get('ticker', 'n/a')}")
+        if title:
+            print(f"  market/question: {title}")
+        print(
+            f"  horizon={market_horizon(rec)} strategy={rec.get('strategy', 'n/a')} "
+            f"raw_strategy={rec.get('raw_strategy', 'n/a')} side={rec.get('action', 'n/a')} "
+            f"edge_quality={edge_source_quality(rec)}"
+        )
+        print(
+            f"  outcome={rec.get('status', 'n/a')}/{rec.get('result', 'n/a')} "
+            f"entry={_fmt_field(_as_float(rec.get('entry_price')))} "
+            f"exit={_fmt_field(_as_float(rec.get('exit_price')))} "
+            f"size={_fmt_money(get_size(rec))} pnl={_fmt_money(get_pnl(rec))} "
+            f"clv={_fmt_num(get_clv(rec))}"
+        )
+        print(
+            f"  model_probability={_fmt_num(confidence)} "
+            f"confidence={_fmt_num(_as_float(rec.get('confidence')))} "
+            f"original_confidence={_fmt_num(_as_float(rec.get('original_confidence')))} "
+            f"council_confidence={_fmt_num(_as_float(rec.get('council_confidence')))}"
+        )
+        print(
+            f"  edge_source={edge_source(rec)} edge={_fmt_num(_as_float(rec.get('edge')))} "
+            f"original_edge={_fmt_num(_as_float(rec.get('original_edge')))} "
+            f"adjusted_edge={_fmt_num(_as_float(rec.get('adjusted_edge')))} "
+            f"risk_edge={_fmt_num(_as_float(rec.get('risk_edge')))} "
+            f"inferred_fee={_fmt_num(inferred_fee)}"
+        )
+        print(
+            "  quotes: "
+            f"yes_price={_fmt_field(quote_bits['yes_price'])} "
+            f"no_price={_fmt_field(quote_bits['no_price'])} "
+            f"yes_bid={_fmt_field(quote_bits['yes_bid'])} "
+            f"no_bid={_fmt_field(quote_bits['no_bid'])} "
+            f"market_mid={_fmt_field(quote_bits['market_mid'])}"
+        )
+        print(f"  decision_reason={rec.get('reasoning') or rec.get('decision_reason') or 'n/a'}")
+        print(f"  flags={', '.join(high_edge_loser_flags(rec)) or 'none'}")
+
+
+def print_payout_asymmetry_report(rows: list[dict]) -> None:
+    print()
+    print("PAYOUT / ASYMMETRY DIAGNOSTICS (clean settled + time exits)")
+    print("-----------------------------------------------------------")
+    print("A group can win more often than it loses and still lose money if")
+    print("avg losses are larger than avg wins. BE_WR is the breakeven win rate.")
+    print_asymmetry_row("OVERALL", rows)
+    print_asymmetry_group("ASYMMETRY BY STRATEGY", rows, strategy_key)
+    print_asymmetry_group("ASYMMETRY BY MARKET HORIZON", rows, market_horizon, HORIZON_ORDER)
+    print_asymmetry_group("ASYMMETRY BY ENTRY PRICE", rows, entry_price_bucket, ENTRY_PRICE_ORDER)
+    print_asymmetry_group(
+        "ASYMMETRY BY EDGE BUCKET",
+        rows,
+        edge_bucket,
+        EDGE_ORDER,
+    )
+
+
 def print_horizon_breakdown(rows: list[dict]) -> None:
     print()
     print("MARKET HORIZON BREAKDOWN (clean settled + time exits)")
@@ -329,8 +1245,7 @@ def print_horizon_breakdown(rows: list[dict]) -> None:
                 print_metrics(f"    {strategy}", strategy_rows)
 
         edge_groups = group_by(horizon_rows, edge_bucket)
-        for bucket in ["<0.00", "0.00-0.009", "0.01-0.019", "0.02-0.029",
-                       "0.03-0.049", "0.05-0.079", ">=0.08", "unknown"]:
+        for bucket in EDGE_ORDER:
             bucket_rows = edge_groups.get(bucket, [])
             if not bucket_rows:
                 continue
@@ -370,8 +1285,7 @@ def collect_zone_candidates(rows: list[dict]) -> list[dict]:
         ("confidence", confidence_bucket, ["<0.50", "0.50-0.54", "0.55-0.59", "0.60-0.64",
                                            "0.65-0.69", "0.70-0.74", "0.75-0.79",
                                            ">=0.80", "unknown"]),
-        ("edge", edge_bucket, ["<0.00", "0.00-0.009", "0.01-0.019", "0.02-0.029",
-                               "0.03-0.049", "0.05-0.079", ">=0.08", "unknown"]),
+        ("edge", edge_bucket, EDGE_ORDER),
     ]
 
     for scope, key_func, order in specs:
@@ -549,6 +1463,13 @@ def main() -> None:
     )
 
     evaluated = clean_settled + time_exits
+    print_payout_asymmetry_report(evaluated)
+    print_modern_vs_legacy_evidence(evaluated)
+    print_modern_calibration_report(evaluated)
+    print_true_ev_report(evaluated)
+    print_edge_truth_audit(evaluated)
+    print_edge_source_quality(evaluated)
+    print_high_edge_loser_forensics(evaluated)
     print_group_table("LEARNING VS NORMAL (clean settled + time exits)", evaluated,
                       lambda r: "LEARNING" if is_learning_trade(r) else "NORMAL")
     print_group_table("STRATEGY BREAKDOWN (clean settled + time exits)", evaluated, strategy_key)
@@ -563,8 +1484,7 @@ def main() -> None:
         "EDGE BUCKETS USING risk_edge ELSE edge (clean settled + time exits)",
         evaluated,
         edge_bucket,
-        ["<0.00", "0.00-0.009", "0.01-0.019", "0.02-0.029",
-         "0.03-0.049", "0.05-0.079", ">=0.08", "unknown"],
+        EDGE_ORDER,
     )
     print_group_table(
         "ENTRY PRICE BUCKETS (clean settled + time exits)",

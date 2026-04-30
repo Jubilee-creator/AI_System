@@ -20,6 +20,8 @@ Rules enforced:
 import sys
 import argparse
 import json
+import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
@@ -40,6 +42,114 @@ _RESOLVED_STATUSES: frozenset[str] = frozenset({"determined", "settled", "finali
 # "void" (market cancelled) is intentionally excluded — we never settle voids.
 _TRADEABLE_RESULTS: frozenset[str] = frozenset({"yes", "no"})
 MAX_TRADE_DURATION_SECONDS = 7200  # 2 hours
+
+
+# ── Optional notifications ────────────────────────────────────────────────────
+
+def _load_monitor_env() -> None:
+    """
+    Load local monitor notification credentials when auto_settle_trades.py is
+    run directly or before tools/auto_monitor.sh sources .env.monitor.
+    """
+    env_path = Path(__file__).parent / ".env.monitor"
+    if not env_path.exists():
+        return
+    try:
+        for raw in env_path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except Exception as exc:
+        print(f"[WARN] notification env load failed: {exc}")
+
+
+def _notify(title: str, message: str) -> None:
+    """
+    Best-effort operator notification. Never raises into settlement flow.
+    Uses the same Pushover env vars and macOS notification pattern as
+    tools/auto_monitor.sh.
+    """
+    try:
+        _load_monitor_env()
+
+        user_key = os.environ.get("PUSHOVER_USER_KEY", "")
+        api_token = os.environ.get("PUSHOVER_API_TOKEN", "")
+        if user_key and api_token:
+            result = subprocess.run([
+                "curl",
+                "-sS",
+                "--fail",
+                "https://api.pushover.net/1/messages.json",
+                "-F", f"token={api_token}",
+                "-F", f"user={user_key}",
+                "-F", f"title={title}",
+                "-F", f"message={message}",
+            ], capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                print("[NOTIFY] Pushover alert sent")
+            else:
+                err = (result.stderr or result.stdout or "").strip()
+                print(f"[WARN] pushover failed: {err}")
+        else:
+            print("[NOTIFY] Pushover skipped: PUSHOVER_USER_KEY/PUSHOVER_API_TOKEN not set")
+    except Exception as exc:
+        print(f"[WARN] pushover notification failed: {exc}")
+
+    try:
+        script = f'''
+ObjC.import("Cocoa");
+var notification = $.NSUserNotification.alloc.init;
+notification.setTitle({json.dumps(title)});
+notification.setInformativeText({json.dumps(message)});
+$.NSUserNotificationCenter.defaultUserNotificationCenter.deliverNotification(notification);
+'''
+        subprocess.run([
+            "osascript",
+            "-l", "JavaScript",
+            "-e", script,
+        ], check=False)
+    except Exception as exc:
+        print(f"[WARN] macOS notification failed: {exc}")
+
+
+def _edge_for_alert(trade: dict):
+    return trade.get("risk_edge", trade.get("edge"))
+
+
+def _format_trade_alert(trade: dict) -> str:
+    return "\n".join([
+        f"Ticker: {trade.get('ticker', 'UNKNOWN')}",
+        f"Result: {trade.get('result', 'UNKNOWN')}",
+        f"PnL: ${float(trade.get('pnl') or 0.0):+.2f}",
+        f"Entry: {trade.get('entry_price', 'n/a')}",
+        f"Exit: {trade.get('exit_price', 'n/a')}",
+        f"Edge: {_edge_for_alert(trade) if _edge_for_alert(trade) is not None else 'n/a'}",
+        f"CLV: {trade.get('clv', 'n/a')}",
+        f"Status: {trade.get('status', 'UNKNOWN')}",
+    ])
+
+
+def _send_trade_settlement_alert(trade: dict) -> None:
+    _notify("AI_System Trade Settled", _format_trade_alert(trade))
+
+
+def _send_auto_settle_summary_alert(settled: int, forced_closed: int,
+                                    pnl_delta: float, remaining_open: int) -> None:
+    if settled + forced_closed <= 0:
+        return
+    message = "\n".join([
+        "Auto-settle complete:",
+        f"Settled: {settled}",
+        f"Time exits: {forced_closed}",
+        f"PnL change: ${pnl_delta:+.2f}",
+        f"Remaining open: {remaining_open}",
+    ])
+    _notify("AI_System Auto-Settle", message)
 
 
 # ── Kalshi API helper ──────────────────────────────────────────────────────────
@@ -172,6 +282,8 @@ def _time_exit_risk_result(pnl: float) -> str:
 def _append_forced_close_record(trader: PaperTrader, trade: dict, exit_price: float,
                                 pnl: float, duration_seconds: float) -> dict:
     now_iso = datetime.now(timezone.utc).isoformat()
+    # Preserve all entry-time metadata from the original OPEN row, then
+    # override only terminal outcome fields for the appended TIME_EXIT row.
     closed = dict(trade)
     closed["status"] = "FORCED_CLOSE"
     closed["result"] = "TIME_EXIT"
@@ -183,8 +295,7 @@ def _append_forced_close_record(trader: PaperTrader, trade: dict, exit_price: fl
     closed["reason"] = "TIME_EXIT"
     closed["cleanup_reason"] = "TIME_EXIT"
 
-    with open(trader.logger.log_file, "a") as fh:
-        fh.write(json.dumps(closed) + "\n")
+    trader.logger.log_trade(closed)
 
     if trade in trader.open_trades:
         trader.open_trades.remove(trade)
@@ -286,13 +397,14 @@ def run(dry_run: bool) -> None:
             if dry_run:
                 print("    [DRY-RUN] Would append FORCED_CLOSE reason=TIME_EXIT")
             else:
-                _append_forced_close_record(
+                closed = _append_forced_close_record(
                     trader=trader,
                     trade=trade,
                     exit_price=exit_price,
                     pnl=time_exit_pnl,
                     duration_seconds=duration_seconds,
                 )
+                _send_trade_settlement_alert(closed)
                 print("    Forced : FORCED_CLOSE  reason=TIME_EXIT")
 
             forced_closed += 1
@@ -318,6 +430,7 @@ def run(dry_run: bool) -> None:
                 trade_pnl  = float(result.get("pnl", 0.0))
                 pnl_delta += trade_pnl
                 settled   += 1
+                _send_trade_settlement_alert(result)
                 print(f"    Settled : {result['result']}  P&L : ${trade_pnl:+.2f}")
 
         print()
@@ -347,6 +460,12 @@ def run(dry_run: bool) -> None:
         print(f"  Total P&L          : ${trader.total_pnl:+.2f}")
         print(f"  Total settled      : {stats['settled_trades']}"
               f"  (wins={stats['wins']}  losses={stats['losses']})")
+        _send_auto_settle_summary_alert(
+            settled=settled,
+            forced_closed=forced_closed,
+            pnl_delta=pnl_delta,
+            remaining_open=len(trader.open_trades),
+        )
 
     print()
 

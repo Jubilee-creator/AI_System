@@ -80,6 +80,65 @@ def _market_spread(market_data: MarketData, action: str) -> float:
     return max(0.0, float(ask) - float(bid))
 
 
+def _as_optional_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _market_midpoint(bid, ask):
+    bid = _as_optional_float(bid)
+    ask = _as_optional_float(ask)
+    if bid is None or ask is None:
+        return None
+    return round((bid + ask) / 2, 6)
+
+
+def _paper_trade_metadata(market_data: MarketData, action: str, fee_estimate: float) -> dict:
+    yes_price = _as_optional_float(getattr(market_data, "yes_price", None))
+    no_price = _as_optional_float(getattr(market_data, "no_price", None))
+    yes_bid = _as_optional_float(getattr(market_data, "yes_bid", None))
+    yes_ask = _as_optional_float(getattr(market_data, "yes_ask", None))
+    no_bid = _as_optional_float(getattr(market_data, "no_bid", None))
+    no_ask = _as_optional_float(getattr(market_data, "no_ask", None))
+    yes_mid = _market_midpoint(yes_bid, yes_ask)
+    no_mid = _market_midpoint(no_bid, no_ask)
+
+    metadata = {
+        "price_yes": yes_price,
+        "price_no": no_price,
+        "yes_price": yes_price,
+        "no_price": no_price,
+        "yes_bid": yes_bid,
+        "yes_ask": yes_ask,
+        "no_bid": no_bid,
+        "no_ask": no_ask,
+        "yes_mid": yes_mid,
+        "no_mid": no_mid,
+        "market_mid": no_mid if action == "BET_NO" else yes_mid,
+        "spread": _as_optional_float(getattr(market_data, "spread", None)),
+        "volume": _as_optional_float(getattr(market_data, "volume_24h", None)),
+        "liquidity": _as_optional_float(getattr(market_data, "liquidity", None)),
+        "fee_estimate": fee_estimate,
+        "source": getattr(market_data, "venue", None),
+        "scanner_source": getattr(market_data, "scanner_source", None),
+        "market_id": getattr(market_data, "market_id", None),
+        "event_id": getattr(market_data, "event_id", None),
+        "horizon": getattr(market_data, "horizon", None),
+        "title": getattr(market_data, "title", None),
+        "question": getattr(market_data, "question", None),
+        "reasoning": getattr(market_data, "reasoning", None),
+        "decision_reason": getattr(market_data, "decision_reason", None),
+        "close_time": getattr(market_data, "close_time", None),
+        "result_time": getattr(market_data, "result_time", None),
+        "time_to_expiry": _as_optional_float(getattr(market_data, "time_to_expiry", None)),
+    }
+    return {k: v for k, v in metadata.items() if v is not None}
+
+
 # ═══════════════════════════════════════════════════════════════
 # PAPER TRADER
 # ═══════════════════════════════════════════════════════════════
@@ -383,7 +442,8 @@ class PaperTrader:
         
         # Calculate edge (after fees)
         original_confidence = estimated_prob
-        edge = estimated_prob - price - 0.01  # 1¢ fee estimate
+        fee_estimate = 0.01  # 1¢ fee estimate used by existing edge calculation
+        edge = estimated_prob - price - fee_estimate
         original_edge = edge
         council_confidence = original_confidence
         adjusted_edge = original_edge
@@ -436,7 +496,7 @@ class PaperTrader:
 
             estimated_prob = float(council_result.get("final_confidence", estimated_prob))
             estimated_prob = min(max(estimated_prob, 0.0), 1.0)
-            edge = estimated_prob - price - 0.01
+            edge = estimated_prob - price - fee_estimate
             council_confidence = estimated_prob
             adjusted_edge = edge
             net_adjustment = float(council_result.get("net_confidence_adjustment") or 0.0)
@@ -593,6 +653,7 @@ class PaperTrader:
             "original_edge": original_edge,
             "adjusted_edge": adjusted_edge,
             "risk_edge": risk_edge,
+            "model_probability": original_confidence,
             "data_collection_override": force_data_collection_learning,
             "learning_trade": is_learning_trade,
             "raw_strategy": raw_strategy_text or strategy,
@@ -602,6 +663,7 @@ class PaperTrader:
             "exit_price": None,
             "settled_at": None
         }
+        trade.update(_paper_trade_metadata(market_data, action, fee_estimate))
         
         # Log to file
         self.logger.log_trade(trade)

@@ -85,6 +85,7 @@ BANKROLL = float(os.getenv("BANKROLL", "500"))
 AUTO_BET_THRESHOLD = 0.70  # confidence needed for auto-bet (not enabled yet)
 RECENT_RISK_EVENT_LIMIT = 250
 MAX_DISPLAY_OPPORTUNITIES = 300
+LIVE_EVENT_LIMIT = 80
 
 app = Flask(__name__)
 CORS(app)
@@ -385,6 +386,199 @@ def summarize_recent_blocked_reasons() -> dict:
     }
 
 
+def _event_timestamp(value=None) -> str:
+    if value:
+        return str(value)
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _live_event(source: str, level: str, message: str, timestamp=None) -> dict:
+    return {
+        "timestamp": _event_timestamp(timestamp),
+        "source": source,
+        "level": level,
+        "message": message,
+    }
+
+
+def _event_sort_key(event: dict) -> str:
+    return str(event.get("timestamp") or "")
+
+
+def _fmt_event_money(value) -> str:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    sign = "+" if amount >= 0 else "-"
+    return f"{sign}${abs(amount):.2f}"
+
+
+def _trade_event(rec: dict) -> dict:
+    status = str(rec.get("status") or "UNKNOWN")
+    result = str(rec.get("result") or "")
+    ticker = rec.get("ticker") or "UNKNOWN"
+    action = rec.get("action") or "--"
+    pnl = get_pnl(rec) if PERFORMANCE_REPORT_OK else _safe_float(rec.get("pnl"))
+    edge = rec.get("risk_edge", rec.get("edge"))
+    timestamp = rec.get("settled_at") or rec.get("timestamp")
+
+    if status == "OPEN":
+        level = "SUCCESS"
+        message = (
+            f"Trade opened {ticker} {action} "
+            f"${get_size(rec):.2f} @ {_safe_float(rec.get('entry_price')):.4f}"
+        )
+        if edge is not None:
+            message += f" edge={_safe_float(edge):+.4f}"
+        return _live_event("paper_trader", level, message, timestamp)
+
+    if status == "SETTLED":
+        level = "SUCCESS" if pnl > 0 else "WARN" if pnl < 0 else "INFO"
+        message = f"Trade settled {ticker} {result or status} PnL {_fmt_event_money(pnl)}"
+        if rec.get("exit_price") is not None:
+            message += f" exit={_safe_float(rec.get('exit_price')):.4f}"
+        if rec.get("clv") is not None:
+            message += f" CLV={_safe_float(rec.get('clv')):+.4f}"
+        return _live_event("settlement", level, message, timestamp)
+
+    if status == "FORCED_CLOSE":
+        level = "WARN" if pnl < 0 else "INFO"
+        reason = rec.get("reason") or rec.get("cleanup_reason") or result or "FORCED_CLOSE"
+        message = f"Forced close {ticker} {reason} PnL {_fmt_event_money(pnl)}"
+        if rec.get("exit_price") is not None:
+            message += f" exit={_safe_float(rec.get('exit_price')):.4f}"
+        if rec.get("clv") is not None:
+            message += f" CLV={_safe_float(rec.get('clv')):+.4f}"
+        return _live_event("settlement", level, message, timestamp)
+
+    return _live_event("paper_trader", "INFO", f"Trade record {ticker} status={status}", timestamp)
+
+
+def _risk_event_level(event: dict) -> str:
+    raw = str(event.get("severity") or event.get("level") or "").upper()
+    if raw in {"ERROR", "WARN", "WARNING", "SUCCESS"}:
+        return "WARN" if raw == "WARNING" else raw
+    event_type = str(event.get("event_type") or "")
+    if event_type in {"TRADE_BLOCKED", "COOLDOWN_ACTIVE", "MAX_POSITIONS_REACHED"}:
+        return "WARN"
+    if event_type in {"KILL_SWITCH_ACTIVE", "HARD_STOP"}:
+        return "ERROR"
+    return "INFO"
+
+
+def _risk_event_message(event: dict) -> str:
+    event_type = event.get("event_type") or "RISK_EVENT"
+    details = event.get("details") or {}
+    reason = details.get("message") or details.get("reason")
+    ticker = details.get("ticker") or details.get("market") or details.get("symbol")
+    parts = [str(event_type)]
+    if ticker:
+        parts.append(str(ticker))
+    if reason:
+        parts.append(str(reason))
+    return " | ".join(parts)
+
+
+def build_live_events(limit: int = LIVE_EVENT_LIMIT) -> list:
+    events = []
+
+    for item in state.get("scan_log", [])[:20]:
+        events.append(_live_event(
+            "scanner",
+            "INFO" if "ERROR" not in str(item.get("msg", "")).upper() else "ERROR",
+            str(item.get("msg") or "scan event"),
+            item.get("time"),
+        ))
+
+    funnel = state.get("execution_funnel") or {}
+    funnel_has_activity = any(
+        int(funnel.get(k) or 0) > 0
+        for k in (
+            "scanned",
+            "actionable",
+            "entered_paper_trader",
+            "market_filter_blocked",
+            "council_blocked",
+            "council_overridden",
+            "risk_blocked",
+            "trade_opened",
+            "other_blocked",
+        )
+    )
+    if funnel and funnel_has_activity:
+        events.append(_live_event(
+            "dashboard",
+            "INFO",
+            (
+                f"Execution funnel scanned={funnel.get('scanned', 0)} "
+                f"actionable={funnel.get('actionable', 0)} "
+                f"entered={funnel.get('entered_paper_trader', 0)} "
+                f"opened={funnel.get('trade_opened', 0)} "
+                f"risk_blocked={funnel.get('risk_blocked', 0)}"
+            ),
+            funnel.get("last_updated") or state.get("last_scan"),
+        ))
+        if funnel.get("council_blocked"):
+            events.append(_live_event(
+                "paper_trader",
+                "WARN",
+                f"Council blocked {funnel.get('council_blocked')} signal(s) in latest scan",
+                funnel.get("last_updated") or state.get("last_scan"),
+            ))
+        if funnel.get("council_overridden"):
+            events.append(_live_event(
+                "paper_trader",
+                "INFO",
+                f"Data collection override allowed {funnel.get('council_overridden')} signal(s)",
+                funnel.get("last_updated") or state.get("last_scan"),
+            ))
+        if funnel.get("market_filter_blocked"):
+            events.append(_live_event(
+                "paper_trader",
+                "WARN",
+                f"Market quality filter blocked {funnel.get('market_filter_blocked')} signal(s)",
+                funnel.get("last_updated") or state.get("last_scan"),
+            ))
+        if funnel.get("risk_blocked"):
+            events.append(_live_event(
+                "risk",
+                "WARN",
+                f"Risk manager blocked {funnel.get('risk_blocked')} signal(s) in latest scan",
+                funnel.get("last_updated") or state.get("last_scan"),
+            ))
+
+    for event in read_recent_risk_events(60):
+        events.append(_live_event(
+            "risk",
+            _risk_event_level(event),
+            _risk_event_message(event),
+            event.get("timestamp"),
+        ))
+
+    if PERFORMANCE_REPORT_OK:
+        for rec in load_trades()[-60:]:
+            events.append(_trade_event(rec))
+
+    risk = get_risk_status() if paper_trader else {}
+    if risk:
+        status = risk.get("system_status") or "NORMAL"
+        level = "ERROR" if status in {"KILL_SWITCH", "HARD_STOP"} else "WARN" if status == "NEAR_LIMIT" else "INFO"
+        events.append(_live_event(
+            "risk",
+            level,
+            (
+                f"Risk status {status} daily={_fmt_event_money(risk.get('daily_pnl'))} "
+                f"weighted_exposure={_fmt_event_money(risk.get('weighted_exposure'))} "
+                f"room={_fmt_event_money(risk.get('remaining_risk_room'))} "
+                f"open={risk.get('open_positions', 0)}/{risk.get('max_open_trade_slots', 0)}"
+            ),
+        ))
+
+    events.sort(key=_event_sort_key, reverse=True)
+    return events[:limit]
+
+
 def get_risk_status() -> dict:
     if not paper_trader:
         return {}
@@ -577,6 +771,7 @@ def background_scan():
                         
                         # Determine reason tag
                         reason_tag = determine_reason_tag(opp)
+                        strategy_label = f"{reason_tag}_{event_type}"
                         
                         # Build MarketData with real quotes from scanner
                         _yes_ask = opp.get("yes_ask", opp.get("price_yes", 0.5))
@@ -599,11 +794,34 @@ def background_scan():
                             time_to_expiry=24.0,
                             venue="kalshi"
                         )
+                        metadata_passthrough = {
+                            "market_id": opp.get("market_id"),
+                            "event_id": opp.get("event_id"),
+                            "title": opp.get("title"),
+                            "question": opp.get("question"),
+                            "close_time": opp.get("close_time"),
+                            "result_time": opp.get("result_time"),
+                            "scanner_source": opp.get("scanner_source"),
+                            "horizon": opp.get("horizon"),
+                            "raw_strategy": strategy_label,
+                            "reasoning": opp.get("reasoning"),
+                            "decision_reason": opp.get("decision_reason"),
+                            "scanner_edge": opp.get("edge"),
+                            "scanner_confidence": opp.get("confidence"),
+                            "arb_edge": opp.get("arb_edge"),
+                            "z_score": opp.get("z_score"),
+                            "kelly_frac": opp.get("kelly_frac"),
+                            "scanner_timestamp": opp.get("timestamp"),
+                        }
+                        if opp.get("time_to_expiry") is not None:
+                            metadata_passthrough["time_to_expiry"] = opp.get("time_to_expiry")
+                        for key, value in metadata_passthrough.items():
+                            if value is not None and value != "":
+                                setattr(market_data, key, value)
                         
                         # Process signal through paper trader
                         estimated_prob = opp.get("confidence", 0.5)
                         if estimated_prob > 0:
-                            strategy_label = f"{reason_tag}_{event_type}"
                             funnel["entered_paper_trader"] += 1
                             trade, trace_text = call_paper_trader_with_trace(
                                 market_data=market_data,
@@ -903,6 +1121,33 @@ body::after {
 }
 .log-time { color: var(--green-dim); margin-right: 8px; font-size: 9px; }
 
+/* ── LIVE OPS FEED ── */
+.event-row {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(13,40,13,0.45);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.event-row.info { border-left: 2px solid var(--green-dim); }
+.event-row.success { border-left: 2px solid var(--green2); background: rgba(0,255,65,0.025); }
+.event-row.warn { border-left: 2px solid var(--yellow); background: rgba(255,214,0,0.025); }
+.event-row.error { border-left: 2px solid var(--red); background: rgba(255,23,68,0.04); }
+.event-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 8px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.event-source { color: var(--cyan); }
+.event-level.info { color: var(--muted); }
+.event-level.success { color: var(--green2); }
+.event-level.warn { color: var(--yellow); }
+.event-level.error { color: var(--red); }
+.event-msg { color: var(--text); margin-top: 2px; }
+
 /* ── ALERT ROWS ── */
 .alert-row {
   padding: 8px 10px;
@@ -1159,7 +1404,7 @@ body::after {
   </div>
 
   <!-- COL 2: ALERTS + LOG -->
-  <div class="col" style="display:grid;grid-template-rows:auto 1fr auto 1fr">
+  <div class="col" style="display:grid;grid-template-rows:auto 1fr auto 1fr auto 1.2fr">
 
     <!-- ARB OPPORTUNITIES -->
     <div class="ph">
@@ -1177,6 +1422,15 @@ body::after {
     </div>
     <div class="pb" id="scan-log">
       <div class="log-row">Initializing scanner...</div>
+    </div>
+
+    <!-- LIVE OPS FEED -->
+    <div class="ph" style="margin-top:1px">
+      <span class="ph-title">AI_SYSTEM LIVE OPS / AGENT CONSOLE</span>
+      <span class="ph-sub" id="live-events-count">--</span>
+    </div>
+    <div class="pb" id="live-events-feed">
+      <div class="empty">Waiting for live system events...</div>
     </div>
   </div>
 
@@ -1456,6 +1710,42 @@ function renderLog(logs) {
   el.innerHTML = logs.map(l =>
     `<div class="log-row"><span class="log-time">${l.time}</span>${l.msg}</div>`
   ).join('');
+}
+
+function escapeHtml(v) {
+  return String(v == null ? '' : v)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function renderLiveEvents(events) {
+  const el = document.getElementById('live-events-feed');
+  const countEl = document.getElementById('live-events-count');
+  if (!el || !countEl) return;
+  const rows = events || [];
+  countEl.textContent = rows.length + ' real events';
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">No live events available yet.</div>';
+    return;
+  }
+
+  el.innerHTML = rows.map(ev => {
+    const level = String(ev.level || 'INFO').toLowerCase();
+    const safeLevel = ['info', 'success', 'warn', 'error'].includes(level) ? level : 'info';
+    const timestamp = escapeHtml(String(ev.timestamp || '').slice(0, 19).replace('T', ' '));
+    const source = escapeHtml(ev.source || 'system');
+    const message = escapeHtml(ev.message || '');
+    return `<div class="event-row ${safeLevel}">
+      <div class="event-top">
+        <span><span class="event-source">${source}</span> ${timestamp}</span>
+        <span class="event-level ${safeLevel}">${escapeHtml(ev.level || 'INFO')}</span>
+      </div>
+      <div class="event-msg">${message}</div>
+    </div>`;
+  }).join('');
 }
 
 function fmtMoney(v) {
@@ -1755,6 +2045,7 @@ async function fetchState() {
     renderOpportunities(displayOpps, totalOpps);
     renderArbs(displayOpps);
     renderLog(d.scan_log || []);
+    renderLiveEvents(d.live_events || []);
     renderPaperStats(d.performance_report || d.paper_stats || {});
     renderExecutionFunnel(d.execution_funnel || {});
     renderBlockedReasons(d.recent_blocked_reasons || {});
@@ -1813,6 +2104,7 @@ def api_state():
     state["recent_blocked_reasons"] = summarize_recent_blocked_reasons()
     if paper_trader:
         state["risk_status"] = get_risk_status()
+    state["live_events"] = build_live_events()
     return jsonify(state)
 
 
@@ -1836,6 +2128,12 @@ def api_paper_stats():
 def api_risk_status():
     """Return real-time risk status snapshot (M-18)."""
     return jsonify(get_risk_status())
+
+
+@app.route("/api/live_events")
+def api_live_events():
+    """Return read-only live ops feed assembled from dashboard state and logs."""
+    return jsonify({"events": build_live_events()})
 
 
 # ─────────────────────────────────────────
