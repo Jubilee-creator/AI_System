@@ -397,9 +397,20 @@ class RiskManager:
 
             return False, reason
 
-        # ── CHECK 3b: Effective daily risk (realized P&L + open exposure) ──
-        # Worst-case: all open positions lose their full size.
-        effective_daily_risk = self.daily_pnl - self.total_exposure
+        # ── CHECK 3b: Effective daily risk (realized P&L + weighted open exposure) ──
+        # Keep risk protection while reducing over-blocking from unrealized exposure.
+        effective_daily_risk = self.daily_pnl - (self.total_exposure * 0.5)
+        self.logger.log_event(
+            event_type="RISK_DEBUG",
+            details={
+                "message": "[RISK_DEBUG] effective_daily_risk recalculated",
+                "daily_pnl": self.daily_pnl,
+                "open_exposure": self.total_exposure,
+                "exposure_weight": 0.5,
+                "effective_daily_risk": effective_daily_risk,
+            },
+            severity="INFO"
+        )
         if effective_daily_risk <= DAILY_LOSS_LIMIT:
             reason = (
                 f"Effective daily risk breaches limit — "
