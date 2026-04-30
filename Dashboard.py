@@ -168,6 +168,48 @@ def _safe_float(value, default=0.0):
         return default
 
 
+def _quote_price_for_action(quote, action: str):
+    if not quote:
+        return None
+
+    if action == "BET_NO":
+        value = quote.get("no_ask", quote.get("price_no"))
+    else:
+        value = quote.get("yes_ask", quote.get("price_yes"))
+
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _current_quote_index() -> dict:
+    return {
+        opp.get("ticker"): opp
+        for opp in state.get("opportunities", [])
+        if opp.get("ticker")
+    }
+
+
+def _mark_open_trade(rec: dict, quote_index: dict) -> dict:
+    quote = quote_index.get(rec.get("ticker"))
+    mark_price = _quote_price_for_action(quote, rec.get("action"))
+    entry_price = _safe_float(rec.get("entry_price"), None)
+    size = get_size(rec)
+
+    unrealized_pnl = None
+    if mark_price is not None and entry_price not in (None, 0):
+        contracts = size / entry_price
+        unrealized_pnl = round((mark_price - entry_price) * contracts, 2)
+
+    return {
+        "mark_price": mark_price,
+        "unrealized_pnl": unrealized_pnl,
+    }
+
+
 def summarize_performance() -> dict:
     if not PERFORMANCE_REPORT_OK:
         return {"error": "performance_report helpers unavailable"}
@@ -196,6 +238,9 @@ def summarize_performance() -> dict:
     conf_vals = [_safe_float(r.get("confidence")) for r in clean_settled if r.get("confidence") is not None]
     edge_vals = [_safe_float(r.get("edge")) for r in clean_settled if r.get("edge") is not None]
     clv_vals = [v for v in (get_clv(r) for r in clean_settled) if v is not None]
+    quote_index = _current_quote_index()
+    realized_pnl = round(total_pnl, 2)
+    unrealized_vals = []
 
     clv_by_strategy = defaultdict(lambda: {"count": 0, "total": 0.0, "positive": 0, "negative": 0, "flat": 0})
     for rec in clean_settled:
@@ -215,6 +260,9 @@ def summarize_performance() -> dict:
 
     active_trade_cards = []
     for rec in sorted(active_opens, key=lambda x: x.get("timestamp", "")):
+        mark = _mark_open_trade(rec, quote_index)
+        if mark["unrealized_pnl"] is not None:
+            unrealized_vals.append(mark["unrealized_pnl"])
         active_trade_cards.append({
             "timestamp": str(rec.get("timestamp", ""))[:19],
             "ticker": rec.get("ticker"),
@@ -228,6 +276,8 @@ def summarize_performance() -> dict:
             "original_edge": rec.get("original_edge"),
             "adjusted_edge": rec.get("adjusted_edge") or rec.get("edge"),
             "risk_edge": rec.get("risk_edge"),
+            "open_trade_mark_price": mark["mark_price"],
+            "open_trade_unrealized_pnl": mark["unrealized_pnl"],
         })
 
     clv_strategy_rows = []
@@ -273,6 +323,13 @@ def summarize_performance() -> dict:
             "clv_positive": sum(1 for v in clv_vals if v > 0),
             "clv_negative": sum(1 for v in clv_vals if v < 0),
             "clv_flat": sum(1 for v in clv_vals if v == 0),
+        },
+        "live_pnl": {
+            "realized_pnl": realized_pnl,
+            "unrealized_pnl": round(sum(unrealized_vals), 2) if unrealized_vals else 0.0,
+            "live_total_pnl": round(realized_pnl + sum(unrealized_vals), 2),
+            "marked_open_trades": len(unrealized_vals),
+            "unmarked_open_trades": len(active_opens) - len(unrealized_vals),
         },
         "active_trades": active_trade_cards,
         "clv_by_strategy": clv_strategy_rows,
@@ -1165,6 +1222,14 @@ body::after {
       </div>
 
       <div class="mini-section">
+        <div class="mini-title">Live Mark-to-Market P&amp;L</div>
+        <div class="mini-row"><span class="mini-key">Realized P&amp;L</span><span id="live-realized-pnl" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Unrealized P&amp;L</span><span id="live-unrealized-pnl" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Live Total P&amp;L</span><span id="live-total-pnl" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Marked / Missing Quotes</span><span id="live-mark-count" class="mini-val">--</span></div>
+      </div>
+
+      <div class="mini-section">
         <div class="mini-title">Execution Funnel</div>
         <div id="funnel-box"></div>
       </div>
@@ -1375,6 +1440,15 @@ function renderLog(logs) {
   ).join('');
 }
 
+function fmtMoney(v) {
+  if (v == null) return '--';
+  return (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
+}
+
+function moneyClass(v) {
+  return 'mini-val ' + (v > 0 ? 'good' : v < 0 ? 'bad' : '');
+}
+
 function renderPaperStats(stats) {
   if (!stats || Object.keys(stats).length === 0) {
     document.getElementById('p-trades').textContent = '0';
@@ -1386,6 +1460,10 @@ function renderPaperStats(stats) {
     document.getElementById('p-clv').textContent = '--';
     document.getElementById('p-sharpe').textContent = '--';
     document.getElementById('paper-progress').textContent = '0 / 100 trades';
+    document.getElementById('live-realized-pnl').textContent = '--';
+    document.getElementById('live-unrealized-pnl').textContent = '--';
+    document.getElementById('live-total-pnl').textContent = '--';
+    document.getElementById('live-mark-count').textContent = '--';
     return;
   }
 
@@ -1418,6 +1496,20 @@ function renderPaperStats(stats) {
   document.getElementById('m-raw-settled').textContent = raw.settled_rows != null ? raw.settled_rows : '--';
   document.getElementById('m-conflicted').textContent = clean.conflicted_settled != null ? clean.conflicted_settled : '--';
   document.getElementById('m-stale-open').textContent = clean.stale_open != null ? clean.stale_open : '--';
+
+  const live = stats.live_pnl || {};
+  const realizedEl = document.getElementById('live-realized-pnl');
+  const unrealizedEl = document.getElementById('live-unrealized-pnl');
+  const liveTotalEl = document.getElementById('live-total-pnl');
+  realizedEl.textContent = fmtMoney(live.realized_pnl);
+  unrealizedEl.textContent = fmtMoney(live.unrealized_pnl);
+  liveTotalEl.textContent = fmtMoney(live.live_total_pnl);
+  realizedEl.className = moneyClass(live.realized_pnl || 0);
+  unrealizedEl.className = moneyClass(live.unrealized_pnl || 0);
+  liveTotalEl.className = moneyClass(live.live_total_pnl || 0);
+  document.getElementById('live-mark-count').textContent =
+    `${live.marked_open_trades || 0} / ${live.unmarked_open_trades || 0}`;
+
   document.getElementById('clv-dist').textContent =
     `${clean.clv_positive || 0} / ${clean.clv_negative || 0}` +
     (clean.clv_flat ? ` / flat ${clean.clv_flat}` : '');
@@ -1446,7 +1538,9 @@ function renderPaperStats(stats) {
         council=${t.council_confidence != null ? Number(t.council_confidence).toFixed(3) : '--'}<br>
         edge raw=${t.original_edge != null ? Number(t.original_edge).toFixed(4) : '--'}
         adjusted=${t.adjusted_edge != null ? Number(t.adjusted_edge).toFixed(4) : '--'}
-        risk=${t.risk_edge != null ? Number(t.risk_edge).toFixed(4) : '--'}
+        risk=${t.risk_edge != null ? Number(t.risk_edge).toFixed(4) : '--'}<br>
+        mark=${t.open_trade_mark_price != null ? Number(t.open_trade_mark_price).toFixed(4) : '--'}
+        unrealized=${t.open_trade_unrealized_pnl != null ? fmtMoney(Number(t.open_trade_unrealized_pnl)) : '--'}
       </div>
     </div>`).join('') : '<div class="empty">No active trades.</div>';
 
