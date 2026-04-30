@@ -40,6 +40,14 @@ HORIZON_ORDER = [
     "EVENT_OTHER",
     "UNKNOWN",
 ]
+ENTRY_PRICE_ORDER = [
+    "<0.20",
+    "0.20-0.39",
+    "0.40-0.59",
+    "0.60-0.79",
+    ">=0.80",
+    "unknown",
+]
 
 
 def _as_float(value: Any):
@@ -150,6 +158,21 @@ def edge_bucket(rec: dict) -> str:
     return ">=0.08"
 
 
+def entry_price_bucket(rec: dict) -> str:
+    price = _as_float(rec.get("entry_price"))
+    if price is None:
+        return "unknown"
+    if price < 0.20:
+        return "<0.20"
+    if price < 0.40:
+        return "0.20-0.39"
+    if price < 0.60:
+        return "0.40-0.59"
+    if price < 0.80:
+        return "0.60-0.79"
+    return ">=0.80"
+
+
 def market_horizon(rec: dict) -> str:
     ticker = str(rec.get("ticker") or "").upper()
     title = str(rec.get("title") or "").upper()
@@ -220,7 +243,7 @@ def calc_metrics(rows: list[dict]) -> dict:
         if v is not None
     ]
     risk_edge_vals = [
-        v for v in (_as_float(r.get("risk_edge")) for r in rows) if v is not None
+        v for v in (edge_value(r) for r in rows) if v is not None
     ]
     clv_vals = [v for v in (get_clv(r) for r in rows) if v is not None]
 
@@ -258,9 +281,10 @@ def strategy_key(rec: dict) -> str:
 
 def print_metrics(name: str, rows: list[dict]) -> None:
     m = calc_metrics(rows)
+    label = "  [tiny sample]" if 0 < m["count"] < 5 else ""
     print(f"{name:<28} n={m['count']:>3}  W={m['wins']:>3}  L={m['losses']:>3}  P={m['pushes']:>3}  "
           f"WR={_fmt_pct(m['win_rate']):>6}  PnL={_fmt_money(m['total_pnl']):>9}  "
-          f"Avg={_fmt_money(m['avg_pnl']):>8}  ROI={_fmt_pct(m['roi']):>8}")
+          f"Avg={_fmt_money(m['avg_pnl']):>8}  ROI={_fmt_pct(m['roi']):>8}{label}")
     print(
         f"{'':<28} avg_conf={_fmt_num(m['avg_confidence'])}  "
         f"orig_edge={_fmt_num(m['avg_original_edge'])}  "
@@ -311,6 +335,131 @@ def print_horizon_breakdown(rows: list[dict]) -> None:
             if not bucket_rows:
                 continue
             print_metrics(f"    edge {bucket}", bucket_rows)
+
+
+def print_entry_price_inside_horizons(rows: list[dict]) -> None:
+    print()
+    print("ENTRY PRICE BUCKETS INSIDE MARKET HORIZON")
+    print("-----------------------------------------")
+    horizon_groups = group_by(rows, market_horizon)
+    printed = False
+    for horizon in HORIZON_ORDER:
+        horizon_rows = horizon_groups.get(horizon, [])
+        if not horizon_rows:
+            continue
+        printed = True
+        print()
+        print(f"{horizon}")
+        print("-" * len(horizon))
+        entry_groups = group_by(horizon_rows, entry_price_bucket)
+        for bucket in ENTRY_PRICE_ORDER:
+            bucket_rows = entry_groups.get(bucket, [])
+            if not bucket_rows:
+                continue
+            print_metrics(f"  entry {bucket}", bucket_rows)
+    if not printed:
+        print("  (no rows)")
+
+
+def collect_zone_candidates(rows: list[dict]) -> list[dict]:
+    candidates = []
+    specs = [
+        ("horizon", market_horizon, HORIZON_ORDER),
+        ("entry_price", entry_price_bucket, ENTRY_PRICE_ORDER),
+        ("strategy", strategy_key, None),
+        ("confidence", confidence_bucket, ["<0.50", "0.50-0.54", "0.55-0.59", "0.60-0.64",
+                                           "0.65-0.69", "0.70-0.74", "0.75-0.79",
+                                           ">=0.80", "unknown"]),
+        ("edge", edge_bucket, ["<0.00", "0.00-0.009", "0.01-0.019", "0.02-0.029",
+                               "0.03-0.049", "0.05-0.079", ">=0.08", "unknown"]),
+    ]
+
+    for scope, key_func, order in specs:
+        groups = group_by(rows, key_func)
+        keys = order or sorted(groups)
+        for key in keys:
+            bucket_rows = groups.get(key, [])
+            if not bucket_rows:
+                continue
+            candidates.append({
+                "scope": scope,
+                "bucket": key,
+                "metrics": calc_metrics(bucket_rows),
+            })
+
+    horizon_groups = group_by(rows, market_horizon)
+    for horizon in HORIZON_ORDER:
+        horizon_rows = horizon_groups.get(horizon, [])
+        if not horizon_rows:
+            continue
+        entry_groups = group_by(horizon_rows, entry_price_bucket)
+        for bucket in ENTRY_PRICE_ORDER:
+            bucket_rows = entry_groups.get(bucket, [])
+            if not bucket_rows:
+                continue
+            candidates.append({
+                "scope": "horizon_entry",
+                "bucket": f"{horizon} / entry {bucket}",
+                "metrics": calc_metrics(bucket_rows),
+            })
+
+    return candidates
+
+
+def _zone_reason(m: dict, mode: str) -> list[str]:
+    reasons = []
+    if mode == "danger":
+        if m["roi"] < -0.25:
+            reasons.append(f"ROI {_fmt_pct(m['roi'])}")
+        if m["win_rate"] == 0:
+            reasons.append("win_rate 0.0%")
+        if m["avg_clv"] is not None and m["avg_clv"] < 0:
+            reasons.append(f"avg_clv {_fmt_num(m['avg_clv'])}")
+    else:
+        if m["roi"] > 0:
+            reasons.append(f"ROI {_fmt_pct(m['roi'])}")
+        if m["avg_clv"] is not None and m["avg_clv"] > 0:
+            reasons.append(f"avg_clv {_fmt_num(m['avg_clv'])}")
+        if m["win_rate"] >= 0.50:
+            reasons.append(f"win_rate {_fmt_pct(m['win_rate'])}")
+    return reasons
+
+
+def print_zone_report(title: str, rows: list[dict], mode: str) -> None:
+    print()
+    print(title)
+    print("-" * len(title))
+    hits = []
+    for candidate in collect_zone_candidates(rows):
+        m = candidate["metrics"]
+        if m["count"] < 2:
+            continue
+        reasons = _zone_reason(m, mode)
+        if reasons:
+            hits.append((candidate, reasons))
+
+    if mode == "danger":
+        hits.sort(key=lambda x: (x[0]["metrics"]["roi"], x[0]["metrics"]["avg_clv"] or 0))
+    else:
+        hits.sort(key=lambda x: (-x[0]["metrics"]["roi"], -(x[0]["metrics"]["avg_clv"] or 0)))
+
+    if not hits:
+        print("  (no buckets met criteria)")
+        return
+
+    for candidate, reasons in hits:
+        m = candidate["metrics"]
+        sample_note = "tiny sample" if m["count"] < 5 else "small sample" if m["count"] < SAMPLE_WARNING_THRESHOLD else "sample>=30"
+        proof_note = ""
+        if mode == "promising" and m["count"] < SAMPLE_WARNING_THRESHOLD:
+            proof_note = " | watchlist only, not proven"
+        print(
+            f"{candidate['scope']:<14} {candidate['bucket']:<42} "
+            f"n={m['count']:>3} WR={_fmt_pct(m['win_rate']):>6} "
+            f"PnL={_fmt_money(m['total_pnl']):>9} ROI={_fmt_pct(m['roi']):>8} "
+            f"CLV={_fmt_num(m['avg_clv'])} | {sample_note}{proof_note} | "
+            f"{'; '.join(reasons)}"
+        )
 
 
 def classify_records(all_records: list[dict]) -> dict[str, list[dict]]:
@@ -394,6 +543,10 @@ def main() -> None:
             f"[WARN] TIME_EXIT sample size {len(time_exits)} < "
             f"{SAMPLE_WARNING_THRESHOLD}; time-exit behavior is not statistically reliable."
         )
+    print(
+        "[WARN] Bucket-level results with n < 5 are tiny samples. "
+        "Positive-looking buckets are watchlist only, not proven."
+    )
 
     evaluated = clean_settled + time_exits
     print_group_table("LEARNING VS NORMAL (clean settled + time exits)", evaluated,
@@ -413,7 +566,14 @@ def main() -> None:
         ["<0.00", "0.00-0.009", "0.01-0.019", "0.02-0.029",
          "0.03-0.049", "0.05-0.079", ">=0.08", "unknown"],
     )
+    print_group_table(
+        "ENTRY PRICE BUCKETS (clean settled + time exits)",
+        evaluated,
+        entry_price_bucket,
+        ENTRY_PRICE_ORDER,
+    )
     print_horizon_breakdown(evaluated)
+    print_entry_price_inside_horizons(evaluated)
     print_group_table(
         "CLOSE_TIME HORIZON LENGTH (when timestamp fields allow)",
         evaluated,
@@ -421,6 +581,8 @@ def main() -> None:
         ["<=1h", "1-6h", "6-24h", "1-3d", "3-30d", ">30d",
          "invalid_negative", "unknown"],
     )
+    print_zone_report("DANGER ZONES", evaluated, "danger")
+    print_zone_report("PROMISING ZONES", evaluated, "promising")
 
     print()
     print("=" * 92)
