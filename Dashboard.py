@@ -84,6 +84,7 @@ PORT = 5001
 BANKROLL = float(os.getenv("BANKROLL", "500"))
 AUTO_BET_THRESHOLD = 0.70  # confidence needed for auto-bet (not enabled yet)
 RECENT_RISK_EVENT_LIMIT = 250
+MAX_DISPLAY_OPPORTUNITIES = 300
 
 app = Flask(__name__)
 CORS(app)
@@ -208,6 +209,10 @@ def _mark_open_trade(rec: dict, quote_index: dict) -> dict:
         "mark_price": mark_price,
         "unrealized_pnl": unrealized_pnl,
     }
+
+
+def _display_opportunities(opportunities: list) -> list:
+    return opportunities[:MAX_DISPLAY_OPPORTUNITIES]
 
 
 def summarize_performance() -> dict:
@@ -434,6 +439,8 @@ def get_risk_status() -> dict:
 state = {
     "markets": [],          # raw crypto markets
     "opportunities": [],    # AI-analyzed opportunities
+    "display_opportunities": [],
+    "market_count": 0,
     "alerts": [],           # high-confidence alerts
     "scan_log": [],
     "last_scan": "Never",
@@ -532,6 +539,8 @@ def background_scan():
             if BRAIN_OK:
 
                 state["opportunities"] = opportunities
+                state["display_opportunities"] = _display_opportunities(opportunities)
+                state["market_count"] = len(opportunities)
                 state["last_scan"] = now
                 state["total_scans"] += 1
 
@@ -660,6 +669,8 @@ def background_scan():
                     "volume": m.get("volume",0),
                     "reasoning": "Brain offline — install brain/market_scanner.py",
                 } for m in crypto_markets]
+                state["display_opportunities"] = _display_opportunities(state["opportunities"])
+                state["market_count"] = len(state["opportunities"])
                 state["last_scan"] = now
                 state["total_scans"] += 1
                 log_msg = f"Scan #{state['total_scans']} (legacy) — {len(crypto_markets)} crypto markets"
@@ -1384,12 +1395,19 @@ function confColor(conf) {
   return 'var(--muted)';
 }
 
-function renderOpportunities(opps) {
+function renderOpportunities(opps, totalCount) {
   const el = document.getElementById('opp-feed');
-  document.getElementById('opp-count').textContent = opps.length + ' markets';
+  const total = totalCount != null ? totalCount : opps.length;
+  const shown = opps.length;
+  document.getElementById('opp-count').textContent =
+    total + ' markets' + (shown < total ? ` (${shown} shown)` : '');
 
-  if (!opps.length) {
+  if (!total) {
     el.innerHTML = '<div class="empty">No crypto markets found.<br>Markets are most liquid 9am–4pm ET + sports events.</div>';
+    return;
+  }
+  if (!opps.length) {
+    el.innerHTML = '<div class="empty">Markets scanned, display list unavailable.</div>';
     return;
   }
 
@@ -1720,20 +1738,22 @@ async function fetchState() {
     console.log("RISK STATUS DATA:", risk);
 
     // Header
-    const arbs = (d.opportunities||[]).filter(o => o.action === 'ARB').length;
-    const bets = (d.opportunities||[]).filter(o => o.action && o.action.includes('BET')).length;
+    const displayOpps = d.display_opportunities || d.opportunities || [];
+    const totalOpps = d.market_count != null ? d.market_count : (d.opportunities || []).length;
+    const arbs = d.arb_count != null ? d.arb_count : displayOpps.filter(o => o.action === 'ARB').length;
+    const bets = d.bet_count != null ? d.bet_count : displayOpps.filter(o => o.action && o.action.includes('BET')).length;
     const paperTrades = (d.performance_report && d.performance_report.clean && d.performance_report.clean.settled_trades)
       || (d.paper_stats && d.paper_stats.total_trades) || 0;
 
-    document.getElementById('h-opps').textContent = (d.opportunities||[]).length;
+    document.getElementById('h-opps').textContent = totalOpps;
     document.getElementById('h-arb').textContent = arbs;
     document.getElementById('h-bet').textContent = bets;
     document.getElementById('h-scans').textContent = d.total_scans;
     document.getElementById('h-paper-trades').textContent = paperTrades;
     document.getElementById('h-last').textContent = 'Last: ' + (d.last_scan||'--');
 
-    renderOpportunities(d.opportunities || []);
-    renderArbs(d.opportunities || []);
+    renderOpportunities(displayOpps, totalOpps);
+    renderArbs(displayOpps);
     renderLog(d.scan_log || []);
     renderPaperStats(d.performance_report || d.paper_stats || {});
     renderExecutionFunnel(d.execution_funnel || {});
@@ -1772,6 +1792,23 @@ def index():
 
 @app.route("/api/state")
 def api_state():
+    opportunities = state.get("opportunities") or []
+    state["market_count"] = len(opportunities)
+    state["display_opportunities"] = _display_opportunities(opportunities)
+    state["arb_count"] = sum(1 for o in opportunities if o.get("action") == "ARB")
+    state["bet_count"] = sum(1 for o in opportunities if "BET" in str(o.get("action", "")))
+    funnel = state.get("execution_funnel") or {}
+    if opportunities and not funnel.get("scanned"):
+        state["execution_funnel"] = {
+            **state["execution_funnel"],
+            "scanned": len(opportunities),
+            "actionable": sum(1 for o in opportunities if o.get("action") != "PASS"),
+            "entered_paper_trader": (
+                sum(1 for o in opportunities if o.get("action") != "PASS")
+                if paper_trader and PAPER_TRADER_OK else 0
+            ),
+            "last_updated": state.get("last_scan"),
+        }
     state["performance_report"] = summarize_performance()
     state["recent_blocked_reasons"] = summarize_recent_blocked_reasons()
     if paper_trader:
