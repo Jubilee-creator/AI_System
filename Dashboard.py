@@ -258,6 +258,18 @@ def _is_time_exit_record(rec: dict) -> bool:
     )
 
 
+def _overdue_minutes(result_time_str):
+    """Return minutes past result_time if result_time has passed, else None."""
+    if not result_time_str:
+        return None
+    try:
+        rt = datetime.fromisoformat(result_time_str.replace("Z", "+00:00"))
+        delta = (datetime.now(timezone.utc) - rt).total_seconds() / 60
+        return round(delta, 1) if delta > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _has_quote_metadata(rec: dict) -> bool:
     if rec.get("price_yes") is not None or rec.get("price_no") is not None:
         return True
@@ -555,6 +567,7 @@ def summarize_performance() -> dict:
             "spread": _quote_spread(quote),
             "close_time": rec.get("close_time"),
             "result_time": rec.get("result_time"),
+            "overdue_minutes": _overdue_minutes(rec.get("result_time")),
         })
 
     clv_strategy_rows = []
@@ -2191,7 +2204,7 @@ function renderMarketVisuals(visuals) {
           <span class="market-price">${fmtNum(m.market_mid)}</span>
         </div>
         <div class="market-tile-top" style="margin-top:3px">
-          <span class="mini-key">${escapeHtml(m.action || '--')}</span>
+          <span class="mini-key">scanner: ${escapeHtml(m.action || '--')}</span>
           <span class="market-change ${changeCls}">${changeText}</span>
         </div>
         <div class="sparkline">${renderSparkline(m.sparkline || [])}</div>
@@ -2207,12 +2220,16 @@ function renderMarketVisuals(visuals) {
     if (!selected) {
       selectedEl.innerHTML = '<div class="empty">No selected market yet.</div>';
     } else {
+      const noSelectedQuote = selected.market_mid == null && selected.yes_bid == null && selected.yes_ask == null;
       selectedEl.innerHTML = `
         <div class="mini-row"><span class="mini-key">Ticker / Side</span><span class="mini-val">${escapeHtml(selected.ticker || '--')} ${escapeHtml(selected.action || '')}</span></div>
         <div class="mini-row"><span class="mini-key">Entry / Mid</span><span class="mini-val">${fmtNum(selected.entry_price)} / ${fmtNum(selected.market_mid)}</span></div>
-        <div class="mini-row"><span class="mini-key">YES bid/ask</span><span class="mini-val">${fmtNum(selected.yes_bid)} / ${fmtNum(selected.yes_ask)}</span></div>
+        ${noSelectedQuote
+          ? '<div class="mini-row"><span class="mini-key" style="color:var(--yellow,#f5c518);font-weight:700">QUOTE UNAVAILABLE</span><span class="mini-val" style="color:var(--yellow,#f5c518)">market not in scanner</span></div>'
+          : `<div class="mini-row"><span class="mini-key">YES bid/ask</span><span class="mini-val">${fmtNum(selected.yes_bid)} / ${fmtNum(selected.yes_ask)}</span></div>
         <div class="mini-row"><span class="mini-key">NO bid/ask</span><span class="mini-val">${fmtNum(selected.no_bid)} / ${fmtNum(selected.no_ask)}</span></div>
-        <div class="mini-row"><span class="mini-key">Spread</span><span class="mini-val">${fmtNum(selected.spread)}</span></div>
+        <div class="mini-row"><span class="mini-key">Spread</span><span class="mini-val">${fmtNum(selected.spread)}</span></div>`
+        }
         <div class="line-chart">${renderSparkline(selected.history || [], 'chartbar')}</div>
         <div class="entry-line-note">entry=${fmtNum(selected.entry_price)} | close=${fmtCountdown(selected.close_time)} | result=${fmtCountdown(selected.result_time)}</div>
       `;
@@ -2224,13 +2241,16 @@ function renderMarketVisuals(visuals) {
   if (pressureBox) {
     pressureBox.innerHTML = pressure.length ? pressure.map(q => {
       const imbalance = q.imbalance;
+      const noQuote = q.yes_bid == null && q.yes_ask == null && q.no_bid == null && q.no_ask == null;
       const width = imbalance == null ? 50 : Math.max(4, Math.min(96, 50 + imbalance * 100));
       const cls = imbalance != null && imbalance < 0 ? 'bad' : '';
       return `<div class="active-card">
         <div class="active-card-top"><span>${escapeHtml(q.ticker || 'UNKNOWN')}</span><span>spread=${fmtNum(q.spread)}</span></div>
         <div class="active-card-meta">
-          YES ${fmtNum(q.yes_bid)} / ${fmtNum(q.yes_ask)} | NO ${fmtNum(q.no_bid)} / ${fmtNum(q.no_ask)} | imbalance=${fmtNum(imbalance)}
-          <div class="pressure-bar-wrap"><div class="pressure-bar ${cls}" style="width:${width}%"></div></div>
+          ${noQuote
+            ? '<span style="color:var(--yellow,#f5c518);font-weight:700">QUOTE UNAVAILABLE — market no longer in scanner</span>'
+            : `YES ${fmtNum(q.yes_bid)} / ${fmtNum(q.yes_ask)} | NO ${fmtNum(q.no_bid)} / ${fmtNum(q.no_ask)} | imbalance=${fmtNum(imbalance)}<div class="pressure-bar-wrap"><div class="pressure-bar ${cls}" style="width:${width}%"></div></div>`
+          }
         </div>
       </div>`;
     }).join('') : '<div class="mini-row"><span class="mini-key">No active quote pressure</span><span class="mini-val">--</span></div>';
@@ -2403,6 +2423,8 @@ function renderPaperStats(stats) {
         age=${fmtAge(t.timestamp)}
         close=${fmtCountdown(t.close_time)}
         result=${fmtCountdown(t.result_time)}
+        ${t.current_market_mid == null ? '<span style="color:var(--yellow,#f5c518);font-weight:700"> NO LIVE QUOTE</span>' : ''}
+        ${t.overdue_minutes != null ? '<span style="color:var(--red,#e74c3c);font-weight:700"> NEEDS_SETTLEMENT_CHECK (overdue ' + t.overdue_minutes.toFixed(0) + 'm)</span>' : ''}
       </div>
     </div>`).join('') : '<div class="empty">No active trades.</div>';
 
