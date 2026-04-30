@@ -132,7 +132,12 @@ class RiskManager:
         
         # Logger
         self.logger = RiskLogger()
-        
+
+        # Dedup state for CHECK 3b — prevents repeated identical CRITICAL logs
+        # while the same risk condition holds across consecutive scans.
+        # Reset on daily rollover so the first fire of each new day always logs.
+        self._check3b_last_log_key = ()
+
         # Load persisted state
         self._load_state()
         
@@ -247,6 +252,7 @@ class RiskManager:
             self.daily_pnl = 0.0
             self.trades_today = 0
             self.last_reset_date = today
+            self._check3b_last_log_key = ()  # allow fresh log on new day
             
             # Check weekly reset
             if today >= self.week_start_date + timedelta(days=7):
@@ -419,17 +425,24 @@ class RiskManager:
                 f"effective=${effective_daily_risk:.2f} "
                 f"limit=${DAILY_LOSS_LIMIT:.2f}"
             )
-            self.logger.log_event(
-                event_type="TRADE_BLOCKED",
-                details={
-                    "reason": "Effective daily risk includes open exposure",
-                    "daily_pnl": self.daily_pnl,
-                    "open_exposure": self.total_exposure,
-                    "effective_daily_risk": effective_daily_risk,
-                    "daily_loss_limit": DAILY_LOSS_LIMIT,
-                },
-                severity="CRITICAL"
+            _log_key = (
+                round(self.daily_pnl, 2),
+                round(self.total_exposure, 2),
+                round(effective_daily_risk, 2),
             )
+            if _log_key != self._check3b_last_log_key:
+                self.logger.log_event(
+                    event_type="TRADE_BLOCKED",
+                    details={
+                        "reason": "Effective daily risk includes open exposure",
+                        "daily_pnl": self.daily_pnl,
+                        "open_exposure": self.total_exposure,
+                        "effective_daily_risk": effective_daily_risk,
+                        "daily_loss_limit": DAILY_LOSS_LIMIT,
+                    },
+                    severity="CRITICAL"
+                )
+                self._check3b_last_log_key = _log_key
             return False, reason
 
         # ── CHECK 4: Weekly loss limit ──
