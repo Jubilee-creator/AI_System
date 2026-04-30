@@ -37,6 +37,7 @@ from config.trading_config import (
 MIN_LEARNING_BET = 5.00
 MAX_LEARNING_EXPOSURE = 20.00
 MAX_CONCURRENT_OPEN_TRADES = 3
+DATA_COLLECTION_MODE = True
 
 
 def _compute_clv(entry_price: float, exit_price: float) -> float:
@@ -395,6 +396,8 @@ class PaperTrader:
             print(f"[PAPER_DEBUG] blocked: below min edge | edge={edge:.4f} min_edge={self.min_edge:.4f} strategy={strategy}")
             return None
 
+        force_data_collection_learning = False
+
         # Decision Council gate.  Fail-open by design so scanner runtime
         # errors cannot crash or halt the paper trading loop in paper mode.
         try:
@@ -412,12 +415,20 @@ class PaperTrader:
             council_decision = council_result.get("final_decision", "ALLOW")
             council_reason = council_result.get("reason", "")
             if council_decision == "BLOCK":
-                print(
-                    "[TRACE] stop: council block "
-                    f"confidence_before={old_prob:.3f} reason={council_reason}"
-                )
-                print(f"[COUNCIL] BLOCKED: {council_reason}")
-                return None
+                if DATA_COLLECTION_MODE:
+                    force_data_collection_learning = True
+                    print(
+                        "[COUNCIL] DATA_COLLECTION_OVERRIDE allowing blocked "
+                        "signal as $5 learning trade"
+                    )
+                    print(f"[COUNCIL] BLOCKED reason: {council_reason}")
+                else:
+                    print(
+                        "[TRACE] stop: council block "
+                        f"confidence_before={old_prob:.3f} reason={council_reason}"
+                    )
+                    print(f"[COUNCIL] BLOCKED: {council_reason}")
+                    return None
 
             estimated_prob = float(council_result.get("final_confidence", estimated_prob))
             estimated_prob = min(max(estimated_prob, 0.0), 1.0)
@@ -447,7 +458,10 @@ class PaperTrader:
             f"kelly_size=${bet_size:.2f}"
         )
 
-        if 0.50 <= estimated_prob < self.min_confidence:
+        if force_data_collection_learning:
+            bet_size = MIN_LEARNING_BET
+            is_learning_trade = True
+        elif 0.50 <= estimated_prob < self.min_confidence:
             original_kelly_size = bet_size
             bet_size = MIN_LEARNING_BET
             is_learning_trade = True
