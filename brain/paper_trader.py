@@ -422,6 +422,7 @@ class PaperTrader:
         
         # Calculate bet size
         is_learning_trade = False
+        cap_reason = "none"
         bet_size = self._calculate_kelly_size(estimated_prob, price)
 
         # Validation-mode cap: limit trade size while collecting edge data.
@@ -429,6 +430,7 @@ class PaperTrader:
         if PAPER_VALIDATION_MODE and bet_size > PAPER_VALIDATION_MAX_BET_SIZE:
             print(f"[PAPER_DEBUG] validation cap applied: original_size={bet_size:.2f} capped_size={PAPER_VALIDATION_MAX_BET_SIZE:.2f}")
             bet_size = PAPER_VALIDATION_MAX_BET_SIZE
+            cap_reason = "VALIDATION_MODE_CAP"
 
         # DEBUG 5: Show bet size calculation
         print(f"[PAPER_DEBUG] bet_size={bet_size:.2f} bankroll={self.bankroll:.2f} max_bet_size={self.max_bet_size:.2f}")
@@ -442,6 +444,7 @@ class PaperTrader:
             original_kelly_size = bet_size
             bet_size = MIN_LEARNING_BET
             is_learning_trade = True
+            cap_reason = "MID_CONFIDENCE_LEARNING_OVERRIDE"
             print(
                 "[LEARNING] MID_CONFIDENCE_LEARNING_OVERRIDE "
                 f"original_confidence={estimated_prob:.3f} "
@@ -470,6 +473,7 @@ class PaperTrader:
             if edge >= self.min_edge or strategy == "ARB":
                 bet_size = MIN_LEARNING_BET
                 is_learning_trade = True
+                cap_reason = "KELLY_ZERO_LEARNING_FALLBACK"
                 print(
                     "[LEARNING] Kelly size was 0; using minimum learning bet: "
                     f"${MIN_LEARNING_BET:.2f}"
@@ -478,6 +482,28 @@ class PaperTrader:
                 print("[TRACE] stop: bet size <= 0 after learning checks")
                 print(f"[PAPER_DEBUG] blocked: bet size <= 0")
                 return None
+
+        is_trend_crypto = (
+            raw_strategy_text == "TREND_CRYPTO"
+            or (strategy == "TREND" and market_type == "CRYPTO")
+        )
+        if is_trend_crypto and bet_size > MIN_LEARNING_BET:
+            original_trend_size = bet_size
+            bet_size = MIN_LEARNING_BET
+            cap_reason = "TREND_CRYPTO_DATA_COLLECTION_CAP"
+            print(
+                "[LEARNING] TREND_CRYPTO cap applied "
+                f"original_size=${original_trend_size:.2f} "
+                f"final_size=${MIN_LEARNING_BET:.2f}"
+            )
+
+        print(
+            "[SIZE] "
+            f"strategy={raw_strategy_text or strategy} "
+            f"learning_trade={is_learning_trade} "
+            f"final_size=${bet_size:.2f} "
+            f"cap_reason={cap_reason}"
+        )
         
         # DEBUG 7: About to call risk manager
         print(
