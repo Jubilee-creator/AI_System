@@ -383,6 +383,7 @@ class PaperTrader:
         
         # Calculate edge (after fees)
         edge = estimated_prob - price - 0.01  # 1¢ fee estimate
+        original_edge = edge
         
         # DEBUG 3: Show calculated values
         print(f"[PAPER_DEBUG] action={action} price={price:.3f} estimated_prob={estimated_prob:.3f} edge={edge:.4f} min_edge={self.min_edge:.4f}")
@@ -508,12 +509,20 @@ class PaperTrader:
                 print("[TRACE] stop: bet size <= 0 after learning checks")
                 print(f"[PAPER_DEBUG] blocked: bet size <= 0")
                 return None
+
+        risk_edge = original_edge if force_data_collection_learning else edge
+        if force_data_collection_learning:
+            print(
+                "[COUNCIL] DATA_COLLECTION_OVERRIDE preserving original edge "
+                f"for risk check original_edge={original_edge:.4f} "
+                f"council_edge={edge:.4f}"
+            )
         
         # DEBUG 7: About to call risk manager
         print(
             "[TRACE] sending to risk_manager "
             f"confidence={estimated_prob:.3f} "
-            f"edge={edge:.4f} "
+            f"edge={risk_edge:.4f} "
             f"final_size=${bet_size:.2f} "
             f"learning_trade={is_learning_trade}"
         )
@@ -528,7 +537,7 @@ class PaperTrader:
             action=action,
             size=bet_size,
             confidence=estimated_prob,
-            edge=edge,
+            edge=risk_edge,
             strategy=strategy,
             learning_trade=is_learning_trade
         )
