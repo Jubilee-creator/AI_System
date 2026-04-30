@@ -11,6 +11,9 @@ import sys
 import json
 import time
 import threading
+import io
+import contextlib
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,12 +44,28 @@ except ImportError as e:
 
 # Import paper trader
 try:
-    from brain.paper_trader import PaperTrader
+    from brain.paper_trader import PaperTrader, MAX_CONCURRENT_OPEN_TRADES
     from engine.edge_calculator import MarketData
     PAPER_TRADER_OK = True
 except ImportError as e:
     print(f"[WARN] Paper trader not found: {e}")
     PAPER_TRADER_OK = False
+    MAX_CONCURRENT_OPEN_TRADES = 0
+
+try:
+    from tools.performance_report import (
+        load_trades,
+        get_pnl,
+        get_size,
+        get_clv,
+        build_terminal_key_sets,
+        classify_open_records,
+        classify_settled_records,
+    )
+    PERFORMANCE_REPORT_OK = True
+except ImportError as e:
+    print(f"[WARN] Performance report helpers not found: {e}")
+    PERFORMANCE_REPORT_OK = False
 
 # Fallback: use existing kalshi_arb if brain not available
 try:
@@ -64,9 +83,13 @@ SCAN_INTERVAL = 30       # seconds — fast scan for crypto markets
 PORT = 5001
 BANKROLL = float(os.getenv("BANKROLL", "500"))
 AUTO_BET_THRESHOLD = 0.70  # confidence needed for auto-bet (not enabled yet)
+RECENT_RISK_EVENT_LIMIT = 250
 
 app = Flask(__name__)
 CORS(app)
+
+ROOT = Path(__file__).parent
+RISK_EVENTS_LOG = ROOT / "logs" / "risk_events.jsonl"
 
 # Initialize paper trader
 paper_trader = None
@@ -85,6 +108,221 @@ if PAPER_TRADER_OK:
 # HELPER: Real-time risk status snapshot (M-18)
 # ─────────────────────────────────────────
 
+class _TeeStdout(io.StringIO):
+    """Capture process_signal traces while preserving normal terminal output."""
+
+    def __init__(self, passthrough):
+        super().__init__()
+        self.passthrough = passthrough
+
+    def write(self, text):
+        self.passthrough.write(text)
+        return super().write(text)
+
+    def flush(self):
+        self.passthrough.flush()
+        return super().flush()
+
+
+def call_paper_trader_with_trace(*args, **kwargs) -> tuple:
+    capture = _TeeStdout(sys.stdout)
+    with contextlib.redirect_stdout(capture):
+        trade = paper_trader.process_signal(*args, **kwargs)
+    return trade, capture.getvalue()
+
+
+def classify_execution_trace(trace_text: str, trade) -> dict:
+    trace = trace_text or ""
+    info = {
+        "market_filter_blocked": 0,
+        "council_blocked": 0,
+        "council_overridden": 0,
+        "risk_blocked": 0,
+        "trade_opened": 0,
+        "other_blocked": 0,
+    }
+
+    if "DATA_COLLECTION_OVERRIDE" in trace:
+        info["council_overridden"] = 1
+
+    if trade:
+        info["trade_opened"] = 1
+        return info
+
+    if "market quality filter" in trace or "[FILTER] skipped" in trace:
+        info["market_filter_blocked"] = 1
+    elif "stop: council block" in trace or "[COUNCIL] BLOCKED:" in trace:
+        info["council_blocked"] = 1
+    elif "risk decision=BLOCK" in trace or "Trade blocked by risk manager" in trace:
+        info["risk_blocked"] = 1
+    else:
+        info["other_blocked"] = 1
+
+    return info
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def summarize_performance() -> dict:
+    if not PERFORMANCE_REPORT_OK:
+        return {"error": "performance_report helpers unavailable"}
+
+    all_records = load_trades()
+    total_lines = len(all_records)
+    raw_settled = [r for r in all_records if r.get("status") == "SETTLED"]
+    raw_wins = [r for r in raw_settled if get_pnl(r) > 0]
+    raw_losses = [r for r in raw_settled if get_pnl(r) < 0]
+    raw_pnl = sum(get_pnl(r) for r in raw_settled)
+
+    active_opens, stale_opens = classify_open_records(all_records)
+    settled_keys, forced_close_keys, void_keys = build_terminal_key_sets(all_records)
+    clean_settled, conflicted_settled = classify_settled_records(
+        all_records,
+        settled_keys,
+        forced_close_keys,
+        void_keys,
+    )
+
+    wins = [r for r in clean_settled if get_pnl(r) > 0]
+    losses = [r for r in clean_settled if get_pnl(r) < 0]
+    pushes = [r for r in clean_settled if get_pnl(r) == 0]
+    total_pnl = sum(get_pnl(r) for r in clean_settled)
+    total_wagered = sum(get_size(r) for r in clean_settled)
+    conf_vals = [_safe_float(r.get("confidence")) for r in clean_settled if r.get("confidence") is not None]
+    edge_vals = [_safe_float(r.get("edge")) for r in clean_settled if r.get("edge") is not None]
+    clv_vals = [v for v in (get_clv(r) for r in clean_settled) if v is not None]
+
+    clv_by_strategy = defaultdict(lambda: {"count": 0, "total": 0.0, "positive": 0, "negative": 0, "flat": 0})
+    for rec in clean_settled:
+        clv = get_clv(rec)
+        if clv is None:
+            continue
+        strategy = rec.get("strategy") or rec.get("raw_strategy") or "UNKNOWN"
+        row = clv_by_strategy[strategy]
+        row["count"] += 1
+        row["total"] += clv
+        if clv > 0:
+            row["positive"] += 1
+        elif clv < 0:
+            row["negative"] += 1
+        else:
+            row["flat"] += 1
+
+    active_trade_cards = []
+    for rec in sorted(active_opens, key=lambda x: x.get("timestamp", "")):
+        active_trade_cards.append({
+            "timestamp": str(rec.get("timestamp", ""))[:19],
+            "ticker": rec.get("ticker"),
+            "action": rec.get("action"),
+            "size": get_size(rec),
+            "entry_price": rec.get("entry_price"),
+            "strategy": rec.get("strategy"),
+            "raw_strategy": rec.get("raw_strategy"),
+            "original_confidence": rec.get("original_confidence") or rec.get("raw_confidence"),
+            "council_confidence": rec.get("council_confidence") or rec.get("confidence"),
+            "original_edge": rec.get("original_edge"),
+            "adjusted_edge": rec.get("adjusted_edge") or rec.get("edge"),
+            "risk_edge": rec.get("risk_edge"),
+        })
+
+    clv_strategy_rows = []
+    for strategy, row in sorted(clv_by_strategy.items()):
+        avg = row["total"] / row["count"] if row["count"] else 0.0
+        clv_strategy_rows.append({
+            "strategy": strategy,
+            "count": row["count"],
+            "avg_clv": round(avg, 4),
+            "positive": row["positive"],
+            "negative": row["negative"],
+            "flat": row["flat"],
+        })
+
+    return {
+        "raw": {
+            "total_records": total_lines,
+            "settled_rows": len(raw_settled),
+            "open_raw": sum(1 for r in all_records if r.get("status") == "OPEN"),
+            "forced_close": sum(1 for r in all_records if r.get("status") == "FORCED_CLOSE"),
+            "voided": sum(1 for r in all_records if r.get("status") == "VOID_LEGACY_DUPLICATE"),
+            "no_status": sum(1 for r in all_records if "status" not in r),
+            "wins": len(raw_wins),
+            "losses": len(raw_losses),
+            "win_rate": len(raw_wins) / len(raw_settled) if raw_settled else 0.0,
+            "total_pnl": round(raw_pnl, 2),
+        },
+        "clean": {
+            "settled_trades": len(clean_settled),
+            "conflicted_settled": len(conflicted_settled),
+            "active_open": len(active_opens),
+            "stale_open": len(stale_opens),
+            "wins": len(wins),
+            "losses": len(losses),
+            "pushes": len(pushes),
+            "win_rate": len(wins) / len(clean_settled) if clean_settled else 0.0,
+            "total_pnl": round(total_pnl, 2),
+            "total_wagered": round(total_wagered, 2),
+            "roi": round(total_pnl / total_wagered, 4) if total_wagered else 0.0,
+            "avg_confidence": round(sum(conf_vals) / len(conf_vals), 4) if conf_vals else None,
+            "avg_edge": round(sum(edge_vals) / len(edge_vals), 4) if edge_vals else None,
+            "avg_clv": round(sum(clv_vals) / len(clv_vals), 4) if clv_vals else None,
+            "clv_positive": sum(1 for v in clv_vals if v > 0),
+            "clv_negative": sum(1 for v in clv_vals if v < 0),
+            "clv_flat": sum(1 for v in clv_vals if v == 0),
+        },
+        "active_trades": active_trade_cards,
+        "clv_by_strategy": clv_strategy_rows,
+    }
+
+
+def read_recent_risk_events(limit: int = RECENT_RISK_EVENT_LIMIT) -> list:
+    if not RISK_EVENTS_LOG.exists():
+        return []
+    rows = []
+    with open(RISK_EVENTS_LOG) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return rows[-limit:]
+
+
+def summarize_recent_blocked_reasons() -> dict:
+    events = read_recent_risk_events()
+    reason_counts = Counter()
+    event_counts = Counter()
+    for event in events:
+        event_type = event.get("event_type", "UNKNOWN")
+        event_counts[event_type] += 1
+        details = event.get("details") or {}
+        reason = details.get("message") or details.get("reason") or event_type
+        if event_type in {
+            "TRADE_BLOCKED",
+            "MAX_POSITIONS_REACHED",
+            "INSUFFICIENT_EDGE",
+            "INSUFFICIENT_CONFIDENCE",
+            "COOLDOWN_ACTIVE",
+        }:
+            reason_counts[str(reason)] += 1
+
+    return {
+        "window_events": len(events),
+        "event_counts": dict(event_counts.most_common(10)),
+        "blocked_reasons": [
+            {"reason": reason, "count": count}
+            for reason, count in reason_counts.most_common(8)
+        ],
+    }
+
+
 def get_risk_status() -> dict:
     if not paper_trader:
         return {}
@@ -93,9 +331,10 @@ def get_risk_status() -> dict:
     open_trades    = paper_trader.open_trades
     open_count     = len(open_trades)
     total_exposure = round(sum(float(t.get("size", 0.0)) for t in open_trades), 2)
+    weighted_exposure = round(total_exposure * 0.5, 2)
     daily_pnl            = rm.daily_pnl
     loss_limit           = rm_s["daily_loss_limit"]
-    effective_daily_risk = round(daily_pnl - total_exposure, 2)
+    effective_daily_risk = round(daily_pnl - weighted_exposure, 2)
     remaining_risk_room  = round(effective_daily_risk - loss_limit, 2)
     risk_used_pct = (round(abs(effective_daily_risk) / abs(loss_limit) * 100, 1)
                      if loss_limit != 0 else 0.0)
@@ -121,6 +360,9 @@ def get_risk_status() -> dict:
     return {
         "daily_pnl": round(daily_pnl, 2), "weekly_pnl": round(rm.weekly_pnl, 2),
         "open_positions": open_count, "total_exposure": total_exposure,
+        "full_exposure": total_exposure, "weighted_exposure": weighted_exposure,
+        "max_open_trade_slots": MAX_CONCURRENT_OPEN_TRADES,
+        "open_trade_slots_available": max(0, MAX_CONCURRENT_OPEN_TRADES - open_count),
         "effective_daily_risk": effective_daily_risk, "daily_loss_limit": loss_limit,
         "remaining_risk_room": remaining_risk_room, "risk_used_pct": risk_used_pct,
         "loss_streak": rm.loss_streak, "kill_switch_active": rm.kill_switch_active,
@@ -148,6 +390,20 @@ state = {
     "paper_trader_ok": PAPER_TRADER_OK,
     "paper_stats": {},      # Paper trading stats
     "risk_status": {},      # Risk manager snapshot (M-18)
+    "performance_report": {},
+    "execution_funnel": {
+        "scanned": 0,
+        "actionable": 0,
+        "entered_paper_trader": 0,
+        "market_filter_blocked": 0,
+        "council_blocked": 0,
+        "council_overridden": 0,
+        "risk_blocked": 0,
+        "trade_opened": 0,
+        "other_blocked": 0,
+        "last_updated": None,
+    },
+    "recent_blocked_reasons": {},
 }
 
 
@@ -227,6 +483,18 @@ def background_scan():
                 bets = [o for o in opportunities if "BET" in o["action"]]
                 state["arb_count"] = len(arbs)
                 state["bet_count"] = len(bets)
+                funnel = {
+                    "scanned": len(opportunities),
+                    "actionable": sum(1 for o in opportunities if o.get("action") != "PASS"),
+                    "entered_paper_trader": 0,
+                    "market_filter_blocked": 0,
+                    "council_blocked": 0,
+                    "council_overridden": 0,
+                    "risk_blocked": 0,
+                    "trade_opened": 0,
+                    "other_blocked": 0,
+                    "last_updated": now,
+                }
 
                 # ─── PAPER TRADE EVERY SIGNAL ───
                 if paper_trader and PAPER_TRADER_OK:
@@ -270,15 +538,23 @@ def background_scan():
                         estimated_prob = opp.get("confidence", 0.5)
                         if estimated_prob > 0:
                             strategy_label = f"{reason_tag}_{event_type}"
-                            paper_trader.process_signal(
+                            funnel["entered_paper_trader"] += 1
+                            trade, trace_text = call_paper_trader_with_trace(
                                 market_data=market_data,
                                 estimated_prob=estimated_prob,
                                 strategy=strategy_label
                             )
+                            trace_counts = classify_execution_trace(trace_text, trade)
+                            for key, value in trace_counts.items():
+                                funnel[key] += value
                     
                     # Update paper stats
                     state["paper_stats"] = paper_trader.get_stats()
                     state["risk_status"] = get_risk_status()
+                    state["performance_report"] = summarize_performance()
+                    state["recent_blocked_reasons"] = summarize_recent_blocked_reasons()
+
+                state["execution_funnel"] = funnel
 
                 # Fire alerts for high-confidence signals
                 for o in opportunities:
@@ -696,6 +972,63 @@ body::after {
 }
 .exp-ticker { color: var(--cyan); }
 .exp-size   { color: var(--green); }
+
+.mini-section {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+}
+.mini-title {
+  font-size: 8px;
+  color: var(--muted);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.mini-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(13,40,13,0.35);
+  font-size: 9px;
+}
+.mini-key { color: var(--muted); }
+.mini-val { color: var(--text); text-align: right; }
+.mini-val.good { color: var(--green2); }
+.mini-val.bad { color: var(--red); }
+.mini-val.warn { color: var(--yellow); }
+.active-card {
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(13,40,13,0.5);
+}
+.active-card-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--cyan);
+  font-size: 9px;
+}
+.active-card-meta {
+  color: var(--muted);
+  font-size: 8px;
+  margin-top: 3px;
+  line-height: 1.5;
+}
+.bar-row {
+  display: grid;
+  grid-template-columns: 1fr 34px;
+  gap: 6px;
+  align-items: center;
+  padding: 2px 0;
+  font-size: 9px;
+}
+.bar-label {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bar-count { color: var(--green2); text-align: right; }
 </style>
 </head>
 <body>
@@ -791,11 +1124,11 @@ body::after {
       <div class="stat-grid">
         <div class="stat-cell">
           <div class="stat-val-big" id="p-trades">0</div>
-          <div class="stat-label-small">Total Trades</div>
+          <div class="stat-label-small">Total Records</div>
         </div>
         <div class="stat-cell">
           <div class="stat-val-big" id="p-settled">0</div>
-          <div class="stat-label-small">Settled</div>
+          <div class="stat-label-small">Clean Settled</div>
         </div>
         <div class="stat-cell">
           <div class="stat-val-big" id="p-winrate">--</div>
@@ -811,7 +1144,7 @@ body::after {
         </div>
         <div class="stat-cell">
           <div class="stat-val-big" id="p-ev">--</div>
-          <div class="stat-label-small">Avg EV</div>
+          <div class="stat-label-small">ROI</div>
         </div>
         <div class="stat-cell">
           <div class="stat-val-big" id="p-clv">--</div>
@@ -821,6 +1154,35 @@ body::after {
           <div class="stat-val-big" id="p-sharpe">--</div>
           <div class="stat-label-small">Sharpe</div>
         </div>
+      </div>
+
+      <div class="mini-section">
+        <div class="mini-title">Clean vs Raw Truth</div>
+        <div class="mini-row"><span class="mini-key">Clean Settled</span><span id="m-clean-settled" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Raw Settled Rows</span><span id="m-raw-settled" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Conflicted Settled</span><span id="m-conflicted" class="mini-val warn">--</span></div>
+        <div class="mini-row"><span class="mini-key">Stale Open Rows</span><span id="m-stale-open" class="mini-val warn">--</span></div>
+      </div>
+
+      <div class="mini-section">
+        <div class="mini-title">Execution Funnel</div>
+        <div id="funnel-box"></div>
+      </div>
+
+      <div class="mini-section">
+        <div class="mini-title">Recent Blocked Reasons</div>
+        <div id="blocked-reasons-box"></div>
+      </div>
+
+      <div class="mini-section">
+        <div class="mini-title">CLV</div>
+        <div class="mini-row"><span class="mini-key">Positive / Negative</span><span id="clv-dist" class="mini-val">--</span></div>
+        <div id="clv-strategy-box"></div>
+      </div>
+
+      <div class="mini-section">
+        <div class="mini-title">Active Trade Cards</div>
+        <div id="active-trades-box"></div>
       </div>
 
       <!-- Verdict -->
@@ -869,8 +1231,16 @@ body::after {
           <span id="r-open-pos" class="risk-val">--</span>
         </div>
         <div class="risk-row">
-          <span class="risk-label">Total Exposure</span>
+          <span class="risk-label">Open Slots</span>
+          <span id="r-open-slots" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Full Exposure</span>
           <span id="r-exposure" class="risk-val">--</span>
+        </div>
+        <div class="risk-row">
+          <span class="risk-label">Weighted Exposure</span>
+          <span id="r-weighted-exposure" class="risk-val">--</span>
         </div>
         <div class="risk-row">
           <span class="risk-label">Effective Daily Risk</span>
@@ -1019,13 +1389,15 @@ function renderPaperStats(stats) {
     return;
   }
 
-  const total = stats.total_trades || 0;
-  const settled = stats.settled_trades || 0;
-  const winRate = stats.win_rate || 0;
-  const pnl = stats.total_pnl || 0;
-  const edge = stats.avg_edge || 0;
-  const ev = stats.avg_ev || 0;
-  const clv = stats.avg_clv || 0;
+  const clean = stats.clean || stats;
+  const raw = stats.raw || {};
+  const total = raw.total_records || stats.total_trades || 0;
+  const settled = clean.settled_trades || 0;
+  const winRate = clean.win_rate || 0;
+  const pnl = clean.total_pnl || 0;
+  const edge = clean.avg_edge || 0;
+  const ev = clean.roi || 0;
+  const clv = clean.avg_clv;
   const sharpe = stats.sharpe || 0;
 
   document.getElementById('p-trades').textContent = total;
@@ -1037,15 +1409,51 @@ function renderPaperStats(stats) {
   pnlEl.className = 'stat-val-big ' + (pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');
 
   document.getElementById('p-edge').textContent = settled > 0 ? (edge > 0 ? '+' : '') + (edge * 100).toFixed(2) + '%' : '--';
-  document.getElementById('p-ev').textContent = settled > 0 ? (ev > 0 ? '+' : '') + ev.toFixed(3) : '--';
-  document.getElementById('p-clv').textContent = settled > 0 ? (clv > 0 ? '+' : '') + clv.toFixed(3) : '--';
+  document.getElementById('p-ev').textContent = settled > 0 ? (ev > 0 ? '+' : '') + (ev * 100).toFixed(1) + '%' : '--';
+  document.getElementById('p-clv').textContent = (settled > 0 && clv != null) ? (clv > 0 ? '+' : '') + clv.toFixed(3) : '--';
   document.getElementById('p-sharpe').textContent = settled > 1 ? sharpe.toFixed(2) : '--';
-  document.getElementById('paper-progress').textContent = total + ' / 100 trades';
+  document.getElementById('paper-progress').textContent = settled + ' clean / 100 trades';
+
+  document.getElementById('m-clean-settled').textContent = settled;
+  document.getElementById('m-raw-settled').textContent = raw.settled_rows != null ? raw.settled_rows : '--';
+  document.getElementById('m-conflicted').textContent = clean.conflicted_settled != null ? clean.conflicted_settled : '--';
+  document.getElementById('m-stale-open').textContent = clean.stale_open != null ? clean.stale_open : '--';
+  document.getElementById('clv-dist').textContent =
+    `${clean.clv_positive || 0} / ${clean.clv_negative || 0}` +
+    (clean.clv_flat ? ` / flat ${clean.clv_flat}` : '');
+
+  const clvStrategyBox = document.getElementById('clv-strategy-box');
+  const clvRows = stats.clv_by_strategy || [];
+  clvStrategyBox.innerHTML = clvRows.length ? clvRows.map(r => `
+    <div class="mini-row">
+      <span class="mini-key">${r.strategy}</span>
+      <span class="mini-val ${r.avg_clv > 0 ? 'good' : r.avg_clv < 0 ? 'bad' : ''}">
+        n=${r.count} avg=${r.avg_clv > 0 ? '+' : ''}${r.avg_clv.toFixed(4)}
+      </span>
+    </div>`).join('') : '<div class="mini-row"><span class="mini-key">No CLV by strategy yet</span><span class="mini-val">--</span></div>';
+
+  const activeBox = document.getElementById('active-trades-box');
+  const active = stats.active_trades || [];
+  activeBox.innerHTML = active.length ? active.map(t => `
+    <div class="active-card">
+      <div class="active-card-top">
+        <span>${t.ticker || 'UNKNOWN'}</span>
+        <span>$${Number(t.size || 0).toFixed(2)} @ ${Number(t.entry_price || 0).toFixed(4)}</span>
+      </div>
+      <div class="active-card-meta">
+        ${t.action || '--'} | strategy=${t.strategy || '--'} | raw=${t.raw_strategy || '--'}<br>
+        conf raw=${t.original_confidence != null ? Number(t.original_confidence).toFixed(3) : '--'}
+        council=${t.council_confidence != null ? Number(t.council_confidence).toFixed(3) : '--'}<br>
+        edge raw=${t.original_edge != null ? Number(t.original_edge).toFixed(4) : '--'}
+        adjusted=${t.adjusted_edge != null ? Number(t.adjusted_edge).toFixed(4) : '--'}
+        risk=${t.risk_edge != null ? Number(t.risk_edge).toFixed(4) : '--'}
+      </div>
+    </div>`).join('') : '<div class="empty">No active trades.</div>';
 
   // Verdicts
-  const profitable = stats.is_profitable || false;
-  const hasEdge = stats.has_edge || false;
-  const beatsClosing = stats.beats_closing || false;
+  const profitable = pnl > 0;
+  const hasEdge = edge > 0;
+  const beatsClosing = clv != null && clv > 0;
 
   document.getElementById('v-profitable').textContent = profitable ? '✓' : '✗';
   document.getElementById('v-profitable').className = 'verdict-icon ' + (profitable ? 'pass' : 'fail');
@@ -1071,6 +1479,46 @@ function renderPaperStats(stats) {
     msg = '<span style="color:var(--red)">✗ NO EDGE DETECTED</span><br>Do NOT go live. Fix model first.';
   }
   document.getElementById('verdict-msg').innerHTML = msg;
+}
+
+function renderExecutionFunnel(funnel) {
+  const box = document.getElementById('funnel-box');
+  if (!box) return;
+  if (!funnel || Object.keys(funnel).length === 0) {
+    box.innerHTML = '<div class="mini-row"><span class="mini-key">No scan yet</span><span class="mini-val">--</span></div>';
+    return;
+  }
+  const rows = [
+    ['scanned', 'Scanned'],
+    ['actionable', 'Actionable'],
+    ['entered_paper_trader', 'Entered PaperTrader'],
+    ['market_filter_blocked', 'Market Filter Blocked'],
+    ['council_blocked', 'Council Blocked'],
+    ['council_overridden', 'Council Overridden'],
+    ['risk_blocked', 'Risk Blocked'],
+    ['trade_opened', 'Trade Opened'],
+    ['other_blocked', 'Other Blocked'],
+  ];
+  box.innerHTML = rows.map(([key, label]) => `
+    <div class="mini-row">
+      <span class="mini-key">${label}</span>
+      <span class="mini-val">${funnel[key] != null ? funnel[key] : 0}</span>
+    </div>`).join('');
+}
+
+function renderBlockedReasons(summary) {
+  const box = document.getElementById('blocked-reasons-box');
+  if (!box) return;
+  const reasons = (summary && summary.blocked_reasons) || [];
+  if (!reasons.length) {
+    box.innerHTML = '<div class="mini-row"><span class="mini-key">No recent risk blocks</span><span class="mini-val">--</span></div>';
+    return;
+  }
+  box.innerHTML = reasons.map(r => `
+    <div class="bar-row" title="${r.reason}">
+      <span class="bar-label">${r.reason}</span>
+      <span class="bar-count">${r.count}</span>
+    </div>`).join('');
 }
 
 function renderRiskStatus(risk) {
@@ -1109,7 +1557,11 @@ function renderRiskStatus(risk) {
   wpEl.className = pnlClass(risk.weekly_pnl);
 
   document.getElementById('r-open-pos').textContent  = risk.open_positions != null ? risk.open_positions : '--';
+  document.getElementById('r-open-slots').textContent = risk.max_open_trade_slots != null
+    ? `${risk.open_positions || 0}/${risk.max_open_trade_slots} (${risk.open_trade_slots_available || 0} free)`
+    : '--';
   document.getElementById('r-exposure').textContent  = risk.total_exposure  != null ? '$' + risk.total_exposure.toFixed(2) : '--';
+  document.getElementById('r-weighted-exposure').textContent = risk.weighted_exposure != null ? '$' + risk.weighted_exposure.toFixed(2) : '--';
 
   const effEl = document.getElementById('r-eff-risk');
   effEl.textContent = fmtPnl(risk.effective_daily_risk);
@@ -1176,7 +1628,8 @@ async function fetchState() {
     // Header
     const arbs = (d.opportunities||[]).filter(o => o.action === 'ARB').length;
     const bets = (d.opportunities||[]).filter(o => o.action && o.action.includes('BET')).length;
-    const paperTrades = (d.paper_stats && d.paper_stats.total_trades) || 0;
+    const paperTrades = (d.performance_report && d.performance_report.clean && d.performance_report.clean.settled_trades)
+      || (d.paper_stats && d.paper_stats.total_trades) || 0;
 
     document.getElementById('h-opps').textContent = (d.opportunities||[]).length;
     document.getElementById('h-arb').textContent = arbs;
@@ -1188,7 +1641,9 @@ async function fetchState() {
     renderOpportunities(d.opportunities || []);
     renderArbs(d.opportunities || []);
     renderLog(d.scan_log || []);
-    renderPaperStats(d.paper_stats || {});
+    renderPaperStats(d.performance_report || d.paper_stats || {});
+    renderExecutionFunnel(d.execution_funnel || {});
+    renderBlockedReasons(d.recent_blocked_reasons || {});
     renderRiskStatus(risk);
 
     startProgressBar();
@@ -1223,6 +1678,10 @@ def index():
 
 @app.route("/api/state")
 def api_state():
+    state["performance_report"] = summarize_performance()
+    state["recent_blocked_reasons"] = summarize_recent_blocked_reasons()
+    if paper_trader:
+        state["risk_status"] = get_risk_status()
     return jsonify(state)
 
 
@@ -1239,9 +1698,7 @@ def api_alerts():
 @app.route("/api/paper_stats")
 def api_paper_stats():
     """Return paper trading stats"""
-    if paper_trader:
-        return jsonify(paper_trader.get_stats())
-    return jsonify({"error": "Paper trader not initialized"})
+    return jsonify(summarize_performance())
 
 
 @app.route("/api/risk_status")
