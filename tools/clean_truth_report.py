@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,13 @@ from tools.performance_report import (
 
 
 SAMPLE_WARNING_THRESHOLD = 30
+HORIZON_ORDER = [
+    "SHORT_INTRADAY_15M",
+    "DAILY_CRYPTO",
+    "LONG_TERM",
+    "EVENT_OTHER",
+    "UNKNOWN",
+]
 
 
 def _as_float(value: Any):
@@ -59,6 +67,19 @@ def _fmt_num(value: float | None, digits: int = 4) -> str:
     if value is None:
         return "n/a"
     return f"{value:+.{digits}f}"
+
+
+def parse_ts(value: Any):
+    if not value:
+        return None
+    try:
+        text = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        return None
 
 
 def is_time_exit(rec: dict) -> bool:
@@ -127,6 +148,56 @@ def edge_bucket(rec: dict) -> str:
     if edge < 0.08:
         return "0.05-0.079"
     return ">=0.08"
+
+
+def market_horizon(rec: dict) -> str:
+    ticker = str(rec.get("ticker") or "").upper()
+    title = str(rec.get("title") or "").upper()
+    text = f"{ticker} {title}"
+
+    if "15M" in ticker:
+        return "SHORT_INTRADAY_15M"
+    if "27JAN" in ticker or "2027" in text or "MINY" in ticker:
+        return "LONG_TERM"
+    if any(token in ticker for token in ("BTCD", "ETHD", "XRPD", "DOGED", "SOLD")):
+        return "DAILY_CRYPTO"
+
+    entry_ts = parse_ts(rec.get("timestamp"))
+    end_ts = parse_ts(rec.get("close_time")) or parse_ts(rec.get("result_time"))
+    if entry_ts and end_ts:
+        hours = (end_ts - entry_ts).total_seconds() / 3600
+        if hours <= 1:
+            return "SHORT_INTRADAY_15M"
+        if hours <= 36:
+            return "DAILY_CRYPTO"
+        if hours >= 24 * 30:
+            return "LONG_TERM"
+
+    if any(asset in ticker for asset in ("BTC", "ETH", "XRP", "DOGE", "SOL")):
+        return "EVENT_OTHER"
+    return "UNKNOWN"
+
+
+def close_time_horizon_bucket(rec: dict) -> str:
+    entry_ts = parse_ts(rec.get("timestamp"))
+    end_ts = parse_ts(rec.get("close_time")) or parse_ts(rec.get("result_time"))
+    if not entry_ts or not end_ts:
+        return "unknown"
+
+    hours = (end_ts - entry_ts).total_seconds() / 3600
+    if hours < 0:
+        return "invalid_negative"
+    if hours <= 1:
+        return "<=1h"
+    if hours <= 6:
+        return "1-6h"
+    if hours <= 24:
+        return "6-24h"
+    if hours <= 72:
+        return "1-3d"
+    if hours <= 24 * 30:
+        return "3-30d"
+    return ">30d"
 
 
 def calc_metrics(rows: list[dict]) -> dict:
@@ -214,6 +285,32 @@ def print_group_table(title: str, rows: list[dict], key_func, order: list[str] |
         printed = True
     if not printed:
         print("  (no rows)")
+
+
+def print_horizon_breakdown(rows: list[dict]) -> None:
+    print()
+    print("MARKET HORIZON BREAKDOWN (clean settled + time exits)")
+    print("------------------------------------------------------")
+    groups = group_by(rows, market_horizon)
+    for horizon in HORIZON_ORDER:
+        horizon_rows = groups.get(horizon, [])
+        if not horizon_rows:
+            continue
+        print_metrics(horizon, horizon_rows)
+
+        strategy_groups = group_by(horizon_rows, strategy_key)
+        if len(strategy_groups) > 1:
+            for strategy, strategy_rows in sorted(strategy_groups.items()):
+                print(f"  strategy={strategy}")
+                print_metrics(f"    {strategy}", strategy_rows)
+
+        edge_groups = group_by(horizon_rows, edge_bucket)
+        for bucket in ["<0.00", "0.00-0.009", "0.01-0.019", "0.02-0.029",
+                       "0.03-0.049", "0.05-0.079", ">=0.08", "unknown"]:
+            bucket_rows = edge_groups.get(bucket, [])
+            if not bucket_rows:
+                continue
+            print_metrics(f"    edge {bucket}", bucket_rows)
 
 
 def classify_records(all_records: list[dict]) -> dict[str, list[dict]]:
@@ -315,6 +412,14 @@ def main() -> None:
         edge_bucket,
         ["<0.00", "0.00-0.009", "0.01-0.019", "0.02-0.029",
          "0.03-0.049", "0.05-0.079", ">=0.08", "unknown"],
+    )
+    print_horizon_breakdown(evaluated)
+    print_group_table(
+        "CLOSE_TIME HORIZON LENGTH (when timestamp fields allow)",
+        evaluated,
+        close_time_horizon_bucket,
+        ["<=1h", "1-6h", "6-24h", "1-3d", "3-30d", ">30d",
+         "invalid_negative", "unknown"],
     )
 
     print()
