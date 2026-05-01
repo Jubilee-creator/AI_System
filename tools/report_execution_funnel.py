@@ -12,7 +12,7 @@ import json
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -52,6 +52,38 @@ def pct(part: int, total: int) -> str:
 
 def action(row: Dict[str, Any], key: str) -> str:
     return str(row.get(key) or "UNKNOWN").upper()
+
+
+def as_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def as_int(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def avg(values: List[Any]) -> Optional[float]:
+    nums = [as_float(value) for value in values]
+    nums = [value for value in nums if value is not None]
+    if not nums:
+        return None
+    return sum(nums) / len(nums)
+
+
+def fmt_num(value: Optional[float], digits: int = 3) -> str:
+    if value is None:
+        return "--"
+    return f"{value:.{digits}f}"
 
 
 def latest_scan(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -188,6 +220,184 @@ def print_scan_join_audit(scanner_rows: List[Dict[str, Any]], funnel_rows: List[
         )
 
 
+def rank_cap_rows(
+    scanner_rows: List[Dict[str, Any]],
+    funnel_rows: List[Dict[str, Any]],
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    scanner_by_scan: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    funnel_by_scan: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    ordered_scan_ids: List[str] = []
+
+    for row in scanner_rows:
+        scan_id = str(row.get("scan_id") or "UNKNOWN")
+        if scan_id not in scanner_by_scan:
+            ordered_scan_ids.append(scan_id)
+        scanner_by_scan[scan_id].append(row)
+
+    for row in funnel_rows:
+        scan_id = str(row.get("scan_id") or "UNKNOWN")
+        funnel_by_scan[scan_id].append(row)
+
+    rows: List[Dict[str, Any]] = []
+    for scan_id in ordered_scan_ids:
+        scan_rows = scanner_by_scan[scan_id]
+        non_pass = [row for row in scan_rows if action(row, "scanner_action") != "PASS"]
+        if not non_pass:
+            continue
+
+        first_yes_rank = None
+        first_no_rank = None
+        yes_ranks: List[int] = []
+        no_ranks: List[int] = []
+        yes_conf: List[Any] = []
+        no_conf: List[Any] = []
+        yes_edge: List[Any] = []
+        no_edge: List[Any] = []
+
+        for rank, row in enumerate(non_pass, start=1):
+            scanner_action = action(row, "scanner_action")
+            if scanner_action == "BET_YES":
+                yes_ranks.append(rank)
+                yes_conf.append(row.get("confidence"))
+                yes_edge.append(row.get("edge"))
+                if first_yes_rank is None:
+                    first_yes_rank = rank
+            elif scanner_action == "BET_NO":
+                no_ranks.append(rank)
+                no_conf.append(row.get("confidence"))
+                no_edge.append(row.get("edge"))
+                if first_no_rank is None:
+                    first_no_rank = rank
+
+        if first_no_rank is None:
+            continue
+
+        scan_funnel = funnel_by_scan.get(scan_id, [])
+        first_funnel_no_index = None
+        for idx, row in enumerate(scan_funnel):
+            if action(row, "scanner_action") == "BET_NO":
+                first_funnel_no_index = idx
+                break
+
+        opened_before_first_no = 0
+        max_open_blocks_before_or_at_no = 0
+        first_no_cap_full = None
+        first_no_final_reason = None
+        if first_funnel_no_index is not None:
+            rows_to_no = scan_funnel[: first_funnel_no_index + 1]
+            opened_before_first_no = sum(1 for row in scan_funnel[:first_funnel_no_index] if row.get("paper_trade_opened"))
+            max_open_blocks_before_or_at_no = sum(
+                1 for row in rows_to_no
+                if row.get("final_reason") == "BLOCKED_MAX_OPEN_TRADES"
+            )
+            first_no_row = scan_funnel[first_funnel_no_index]
+            first_no_cap_full = first_no_row.get("cap_already_full")
+            first_no_final_reason = first_no_row.get("final_reason")
+
+        max_open_candidates = [as_int(row.get("max_open_trades")) for row in scan_funnel]
+        max_open_candidates = [value for value in max_open_candidates if value is not None]
+        max_open = max_open_candidates[-1] if max_open_candidates else 3
+        yes_before_first_no = sum(
+            1 for row in non_pass[: first_no_rank - 1]
+            if action(row, "scanner_action") == "BET_YES"
+        )
+        likely_after_slots = (
+            first_no_cap_full is True
+            or first_no_final_reason == "BLOCKED_MAX_OPEN_TRADES"
+            or yes_before_first_no >= max_open
+        )
+
+        rows.append({
+            "scan_id": scan_id,
+            "first_yes_rank": first_yes_rank,
+            "first_no_rank": first_no_rank,
+            "yes_before_first_no": yes_before_first_no,
+            "opened_before_first_no": opened_before_first_no,
+            "max_open_blocks_before_or_at_no": max_open_blocks_before_or_at_no,
+            "no_avg_rank": avg(no_ranks),
+            "yes_avg_rank": avg(yes_ranks),
+            "no_avg_confidence": avg(no_conf),
+            "yes_avg_confidence": avg(yes_conf),
+            "no_avg_edge": avg(no_edge),
+            "yes_avg_edge": avg(yes_edge),
+            "likely_after_slots": likely_after_slots,
+            "funnel_no_seen": first_funnel_no_index is not None,
+        })
+
+    return rows[-limit:]
+
+
+def print_rank_cap_audit(scanner_rows: List[Dict[str, Any]], funnel_rows: List[Dict[str, Any]]) -> None:
+    print()
+    print("RANK / CAP AUDIT")
+    print("----------------")
+    rows = rank_cap_rows(scanner_rows, funnel_rows)
+    if not rows:
+        print("(no scanner scans with BET_NO)")
+        return
+
+    print(
+        "scan_id              "
+        "first_Y  first_N  Y_before_N  opened_before_N  max_blocks_to_N  "
+        "avg_rank_Y  avg_rank_N  avg_conf_Y  avg_conf_N  avg_edge_Y  avg_edge_N  likely_after_slots"
+    )
+    for row in rows:
+        print(
+            f"{row['scan_id']:<20} "
+            f"{str(row['first_yes_rank'] or '--'):>7} "
+            f"{str(row['first_no_rank'] or '--'):>8} "
+            f"{row['yes_before_first_no']:>10} "
+            f"{row['opened_before_first_no']:>16} "
+            f"{row['max_open_blocks_before_or_at_no']:>15} "
+            f"{fmt_num(row['yes_avg_rank'], 1):>11} "
+            f"{fmt_num(row['no_avg_rank'], 1):>11} "
+            f"{fmt_num(row['yes_avg_confidence'], 3):>10} "
+            f"{fmt_num(row['no_avg_confidence'], 3):>10} "
+            f"{fmt_num(row['yes_avg_edge'], 4):>10} "
+            f"{fmt_num(row['no_avg_edge'], 4):>10} "
+            f"{'YES' if row['likely_after_slots'] else 'NO'}"
+        )
+
+    all_no_ranks: List[Any] = []
+    all_yes_ranks: List[Any] = []
+    all_no_conf: List[Any] = []
+    all_yes_conf: List[Any] = []
+    all_no_edge: List[Any] = []
+    all_yes_edge: List[Any] = []
+
+    scanner_by_scan: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in scanner_rows:
+        scanner_by_scan[str(row.get("scan_id") or "UNKNOWN")].append(row)
+    for scan_rows in scanner_by_scan.values():
+        non_pass = [row for row in scan_rows if action(row, "scanner_action") != "PASS"]
+        for rank, row in enumerate(non_pass, start=1):
+            scanner_action = action(row, "scanner_action")
+            if scanner_action == "BET_YES":
+                all_yes_ranks.append(rank)
+                all_yes_conf.append(row.get("confidence"))
+                all_yes_edge.append(row.get("edge"))
+            elif scanner_action == "BET_NO":
+                all_no_ranks.append(rank)
+                all_no_conf.append(row.get("confidence"))
+                all_no_edge.append(row.get("edge"))
+
+    likely_count = sum(1 for row in rows if row["likely_after_slots"])
+    print()
+    print(
+        "overall scanner non-PASS ranks: "
+        f"BET_YES avg={fmt_num(avg(all_yes_ranks), 2)}  "
+        f"BET_NO avg={fmt_num(avg(all_no_ranks), 2)}"
+    )
+    print(
+        "overall scanner confidence/edge: "
+        f"BET_YES conf={fmt_num(avg(all_yes_conf), 3)} edge={fmt_num(avg(all_yes_edge), 4)}  "
+        f"BET_NO conf={fmt_num(avg(all_no_conf), 3)} edge={fmt_num(avg(all_no_edge), 4)}"
+    )
+    print(f"recent BET_NO scans likely after slots filled: {likely_count}/{len(rows)}")
+    print("Historical scanner ranks are reconstructed from JSONL row order within each scan_id.")
+
+
 def print_bet_no_sample(scanner_rows: List[Dict[str, Any]], limit: int = 10) -> None:
     print()
     print("BET_NO SCANNER SAMPLE")
@@ -244,6 +454,7 @@ def main() -> None:
     print_counts("FUNNEL FINAL REASONS", Counter(str(r.get("final_reason") or "UNKNOWN") for r in funnel_rows))
     print_counts("COUNCIL DECISIONS IN FUNNEL", Counter(str(r.get("council_decision") or "UNKNOWN") for r in funnel_rows))
     print_scan_join_audit(scanner_rows, funnel_rows)
+    print_rank_cap_audit(scanner_rows, funnel_rows)
     print_bet_no_sample(scanner_rows)
 
     print()

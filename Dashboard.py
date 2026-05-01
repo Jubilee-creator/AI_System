@@ -1257,6 +1257,24 @@ def background_scan():
 
                 # ─── PAPER TRADE EVERY SIGNAL ───
                 if paper_trader and PAPER_TRADER_OK:
+                    rank_context_by_id = {}
+                    first_bet_yes_rank_in_scan = None
+                    first_bet_no_rank_in_scan = None
+                    scan_non_pass_rank = 0
+                    for opportunity_rank, ranked_opp in enumerate(opportunities, start=1):
+                        scanner_action = str(ranked_opp.get("action") or "").upper()
+                        if scanner_action == "PASS":
+                            continue
+                        scan_non_pass_rank += 1
+                        if scanner_action == "BET_YES" and first_bet_yes_rank_in_scan is None:
+                            first_bet_yes_rank_in_scan = scan_non_pass_rank
+                        if scanner_action == "BET_NO" and first_bet_no_rank_in_scan is None:
+                            first_bet_no_rank_in_scan = scan_non_pass_rank
+                        rank_context_by_id[id(ranked_opp)] = {
+                            "opportunity_rank": opportunity_rank,
+                            "scan_non_pass_rank": scan_non_pass_rank,
+                        }
+
                     for opp in opportunities:
                         # Skip PASS signals
                         if opp["action"] == "PASS":
@@ -1321,6 +1339,8 @@ def background_scan():
                         # Process signal through paper trader
                         estimated_prob = opp.get("confidence", 0.5)
                         if estimated_prob > 0:
+                            open_count_before = len(paper_trader.open_trades)
+                            open_slots_before = max(0, MAX_CONCURRENT_OPEN_TRADES - open_count_before)
                             funnel["entered_paper_trader"] += 1
                             trade, trace_text = call_paper_trader_with_trace(
                                 market_data=market_data,
@@ -1332,12 +1352,22 @@ def background_scan():
                             for key, value in trace_counts.items():
                                 funnel[key] += value
                             if EXECUTION_FUNNEL_LOGGER_OK:
+                                rank_context = {
+                                    **rank_context_by_id.get(id(opp), {}),
+                                    "open_slots_before": open_slots_before,
+                                    "open_count_before": open_count_before,
+                                    "max_open_trades": MAX_CONCURRENT_OPEN_TRADES,
+                                    "cap_already_full": open_count_before >= MAX_CONCURRENT_OPEN_TRADES,
+                                    "first_bet_no_rank_in_scan": first_bet_no_rank_in_scan,
+                                    "first_bet_yes_rank_in_scan": first_bet_yes_rank_in_scan,
+                                }
                                 funnel_log_stats = log_execution_funnel(
                                     opportunity=opp,
                                     scan_id=f"dashboard_scan_{state['total_scans']}",
                                     trace_text=trace_text,
                                     trade=trade,
                                     trace_counts=trace_counts,
+                                    rank_context=rank_context,
                                 )
                                 state["execution_funnel_log_stats"] = {
                                     **funnel_log_stats,

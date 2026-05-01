@@ -81,6 +81,7 @@ def log_execution_funnel(
     trace_text: str,
     trade: Optional[Dict[str, Any]],
     trace_counts: Optional[Dict[str, Any]] = None,
+    rank_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Append one non-PASS opportunity funnel row. Fail-soft by design."""
     scanner_action = str(opportunity.get("action") or "UNKNOWN").upper()
@@ -93,15 +94,24 @@ def log_execution_funnel(
         and str(intended_action).upper() != str(executed_action).upper()
     )
     trace_counts = trace_counts or {}
+    rank_context = rank_context or {}
     final_reason = _final_reason(trace_text, trade)
 
     row = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "scan_id": scan_id,
         "ticker": opportunity.get("ticker"),
+        "opportunity_rank": rank_context.get("opportunity_rank"),
+        "scan_non_pass_rank": rank_context.get("scan_non_pass_rank"),
         "scanner_action": scanner_action,
         "confidence": _safe_float(opportunity.get("confidence")),
         "edge": _safe_float(opportunity.get("edge")),
+        "open_slots_before": rank_context.get("open_slots_before"),
+        "open_count_before": rank_context.get("open_count_before"),
+        "max_open_trades": rank_context.get("max_open_trades"),
+        "cap_already_full": rank_context.get("cap_already_full"),
+        "first_bet_no_rank_in_scan": rank_context.get("first_bet_no_rank_in_scan"),
+        "first_bet_yes_rank_in_scan": rank_context.get("first_bet_yes_rank_in_scan"),
         "dashboard_seen": True,
         "dashboard_skip_reason": None,
         "passed_to_paper_trader": True,
