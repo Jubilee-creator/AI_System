@@ -63,6 +63,13 @@ except ImportError as e:
     BTC15M_SNAPSHOT_LOGGER_OK = False
 
 try:
+    from logs.scanner_opportunity_logger import log_scanner_opportunities
+    SCANNER_OPPORTUNITY_LOGGER_OK = True
+except ImportError as e:
+    print(f"[WARN] Scanner opportunity logger not available: {e}")
+    SCANNER_OPPORTUNITY_LOGGER_OK = False
+
+try:
     from brokers.underlying_price_client import fetch_btc_usd_price
     BTC_PRICE_CLIENT_OK = True
 except ImportError as e:
@@ -1170,6 +1177,24 @@ def background_scan():
                 state["last_scan"] = now
                 state["total_scans"] += 1
                 update_market_history(opportunities, now)
+                if SCANNER_OPPORTUNITY_LOGGER_OK:
+                    scanner_log_stats = log_scanner_opportunities(
+                        opportunities,
+                        scan_id=f"dashboard_scan_{state['total_scans']}",
+                        source="dashboard",
+                    )
+                    state["scanner_opportunity_stats"] = {
+                        **scanner_log_stats,
+                        "last_updated": datetime.now(timezone.utc).isoformat(),
+                    }
+                    if scanner_log_stats.get("written") or scanner_log_stats.get("errors"):
+                        print(
+                            "[SCANNER_OPPORTUNITY_LOG] "
+                            f"seen={scanner_log_stats.get('seen', 0)} "
+                            f"written={scanner_log_stats.get('written', 0)} "
+                            f"errors={scanner_log_stats.get('errors', 0)} "
+                            f"actions={scanner_log_stats.get('action_counts', {})}"
+                        )
                 if BTC15M_SNAPSHOT_LOGGER_OK:
                     btc_price_snapshot = None
                     if BTC_PRICE_CLIENT_OK:
