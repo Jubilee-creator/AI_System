@@ -1630,6 +1630,13 @@ body::after {
   0%   { background: rgba(0,255,65,0.16); box-shadow: inset 0 0 18px rgba(0,255,65,0.18); }
   100% { background: var(--panel); box-shadow: none; }
 }
+.metric-flash-down {
+  animation: metricFlashDown 0.7s ease-out;
+}
+@keyframes metricFlashDown {
+  0%   { background: rgba(255,23,68,0.14); box-shadow: inset 0 0 18px rgba(255,23,68,0.18); }
+  100% { background: var(--panel); box-shadow: none; }
+}
 .metric-section-label {
   padding: 7px 10px;
   font-size: 8px;
@@ -1843,7 +1850,7 @@ body::after {
   margin-top: 4px;
 }
 .sparkline {
-  height: 34px;
+  height: 44px;
   display: flex;
   align-items: end;
   gap: 2px;
@@ -2247,7 +2254,7 @@ let progInterval;
 const prevMetricValues = {};
 const prevMarketValues = {};
 
-function setTextTracked(id, value) {
+function setTextTracked(id, value, rawValue) {
   const el = document.getElementById(id);
   if (!el) return;
   const next = String(value);
@@ -2255,9 +2262,10 @@ function setTextTracked(id, value) {
   if (prev !== undefined && prev !== next) {
     const cell = el.closest('[data-watch]') || el.parentElement;
     if (cell) {
-      cell.classList.remove('metric-flash');
+      const down = rawValue != null ? rawValue < 0 : next.startsWith('-');
+      cell.classList.remove('metric-flash', 'metric-flash-down');
       void cell.offsetWidth;
-      cell.classList.add('metric-flash');
+      cell.classList.add(down ? 'metric-flash-down' : 'metric-flash');
     }
   }
   prevMetricValues[id] = next;
@@ -2669,7 +2677,7 @@ function renderPaperStats(stats) {
   setTextTracked('p-winrate', settled > 0 ? (winRate * 100).toFixed(1) + '%' : '--');
   
   const pnlEl = document.getElementById('p-pnl');
-  setTextTracked('p-pnl', pnl >= 0 ? '+$' + pnl.toFixed(2) : '-$' + Math.abs(pnl).toFixed(2));
+  setTextTracked('p-pnl', pnl >= 0 ? '+$' + pnl.toFixed(2) : '-$' + Math.abs(pnl).toFixed(2), pnl);
   pnlEl.className = 'stat-val-big ' + (pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');
 
   setTextTracked('p-edge', settled > 0 ? (edge > 0 ? '+' : '') + (edge * 100).toFixed(2) + '%' : '--');
