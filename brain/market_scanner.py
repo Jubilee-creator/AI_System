@@ -26,6 +26,7 @@ from engine.decision_engine import (
     MarketSignal, TradeDecision, analyze_market, compute_arb_edge
 )
 from brokers.kalshi_client import kalshi_get, get_client
+from config.trading_config import MAX_TRADE_EXPIRY_HOURS
 
 
 # ─────────────────────────────────────────
@@ -46,6 +47,51 @@ MIN_VOLUME = 0
 MIN_EDGE = 0.015
 SCAN_INTERVAL = 30
 MAX_ENRICH_WORKERS = 15  # parallel threads for market detail calls
+
+
+def _parse_market_time(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _market_expiry_reference(market: dict) -> tuple[Optional[datetime], Optional[str]]:
+    """
+    Return the safest available close/expiry reference for filtering.
+
+    close_time is preferred because it represents the trading cutoff. If absent,
+    fall back to expected_expiration_time/result_time. Do not use Dashboard's
+    MarketData(time_to_expiry=24.0) placeholder here.
+    """
+    for field in ("close_time", "expected_expiration_time", "result_time"):
+        parsed = _parse_market_time(market.get(field))
+        if parsed is not None:
+            return parsed, field
+    return None, None
+
+
+def expiry_filter_reason(market: dict, now: Optional[datetime] = None) -> Optional[str]:
+    """Return SKIP_TOO_FAR_EXPIRY when a market is beyond the max trade horizon."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    expiry_ts, source_field = _market_expiry_reference(market)
+    if expiry_ts is None:
+        return None
+
+    hours = (expiry_ts - now).total_seconds() / 3600.0
+    if hours > MAX_TRADE_EXPIRY_HOURS:
+        return (
+            f"SKIP_TOO_FAR_EXPIRY "
+            f"{hours:.1f}h>{MAX_TRADE_EXPIRY_HOURS:.1f}h via {source_field}"
+        )
+    return None
 
 
 
@@ -442,8 +488,8 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
     print(f"[SCAN] {datetime.now().strftime('%H:%M:%S')} — Crypto market scan")
     print(f"{'='*70}")
     
-    skip_reasons = {"no_signal": 0, "low_volume": 0, "pass": 0}
-    skip_examples = {"no_signal": [], "pass": []}
+    skip_reasons = {"too_far_expiry": 0, "no_signal": 0, "low_volume": 0, "pass": 0}
+    skip_examples = {"too_far_expiry": [], "no_signal": [], "pass": []}
     
     markets = fetch_and_enrich_crypto_markets()
     
@@ -457,6 +503,14 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
     
     for market in markets:
         ticker = market.get("ticker", "?")
+
+        too_far_reason = expiry_filter_reason(market)
+        if too_far_reason:
+            skip_reasons["too_far_expiry"] += 1
+            if len(skip_examples["too_far_expiry"]) < 3:
+                skip_examples["too_far_expiry"].append(f"{ticker}: {too_far_reason}")
+            continue
+
         signal = build_signal(market)
         
         if not signal:
@@ -532,6 +586,9 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
     print(f"[SCAN]   Actionable: {len(actionable)} (ARB: {arb}, BET: {bet})")
     print(f"[SCAN] ──────────────────────────────────────────────────────────────────")
     print(f"[SCAN] SKIPS:")
+    print(f"[SCAN]   Too far expiry (>{MAX_TRADE_EXPIRY_HOURS:.1f}h): {skip_reasons['too_far_expiry']}")
+    for ex in skip_examples["too_far_expiry"]:
+        print(f"[SCAN]     • {ex}")
     print(f"[SCAN]   No signal: {skip_reasons['no_signal']}")
     for ex in skip_examples["no_signal"]:
         print(f"[SCAN]     • {ex}")

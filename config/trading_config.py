@@ -123,6 +123,12 @@ MAX_SPREAD = 0.05
 # Minimum time until expiry (in hours)
 MIN_TIME_TO_EXPIRY = 0.5  # 30 minutes minimum
 
+# Maximum time until market close/expiry for trade consideration.
+# Validation is focused on short-duration learning trades; long-dated
+# contracts such as Jan 2027 markets should not be opened and force-closed
+# after two hours as if they were short-term signals.
+MAX_TRADE_EXPIRY_HOURS = 24.0
+
 
 # ═══════════════════════════════════════════════════════════════
 # SLIPPAGE & FEES

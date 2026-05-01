@@ -313,9 +313,11 @@ def _proof_state(condition_pass: bool, condition_fail: bool, watch_reason: str) 
     return "WATCH"
 
 
-def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
-    modern_rows = [r for r in evaluated_rows if _is_modern_full_metadata(r)]
-    legacy_rows = [r for r in evaluated_rows if not _is_modern_full_metadata(r)]
+def build_proof_checklist(outcome_known_rows: list[dict], time_exit_rows: list[dict] | None = None) -> dict:
+    """Build proof status from true outcome-known SETTLED rows only."""
+    time_exit_rows = time_exit_rows or []
+    modern_rows = [r for r in outcome_known_rows if _is_modern_full_metadata(r)]
+    legacy_rows = [r for r in outcome_known_rows if not _is_modern_full_metadata(r)]
     modern_count = len(modern_rows)
     data_collection_count = sum(1 for r in modern_rows if r.get("data_collection_override"))
     bootstrap_provisional_count = sum(1 for r in modern_rows if r.get("bootstrap_provisional"))
@@ -355,8 +357,8 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
     )
 
     # ── Proof gate verdict (inline — same logic as clean_truth_report) ────────
-    _eval_wagered = sum(get_size(r) for r in evaluated_rows)
-    _eval_pnl     = sum(get_pnl(r)  for r in evaluated_rows)
+    _eval_wagered = sum(get_size(r) for r in outcome_known_rows)
+    _eval_pnl     = sum(get_pnl(r)  for r in outcome_known_rows)
     _overall_roi  = _eval_pnl / _eval_wagered if _eval_wagered else 0.0
     _m_wins_pnl   = sum(get_pnl(r) for r in modern_rows if get_pnl(r) > 0)
     _m_loss_pnl   = sum(get_pnl(r) for r in modern_rows if get_pnl(r) < 0)
@@ -398,6 +400,8 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
         "modern_evaluated_rows": modern_count,
         "target_minimum": 30,
         "target_proof": 100,
+        "proof_scope": "OUTCOME_KNOWN_SETTLED_ONLY",
+        "time_exit_excluded_count": len(time_exit_rows),
         "data_quality": quality,
         "legacy_evaluated_rows": len(legacy_rows),
         "data_collection_count": data_collection_count,
@@ -415,7 +419,7 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
                 "key": "profitability",
                 "state": profitability_state,
                 "label": "Profitability",
-                "value": f"Modern ROI {modern_roi * 100:+.1f}% | {modern_count}/30 rows",
+                "value": f"Modern outcome-known ROI {modern_roi * 100:+.1f}% | {modern_count}/30 rows",
                 "explanation": watch_reason or ("Modern ROI is positive" if profitability_state == "PASS" else "Modern ROI is not positive"),
             },
             {
@@ -426,7 +430,7 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
                     f"avg risk_edge {modern_avg_risk_edge:+.4f} | ROI {modern_roi * 100:+.1f}%"
                     if modern_avg_risk_edge is not None else f"risk_edge unavailable | {modern_count}/30 rows"
                 ),
-                "explanation": watch_reason or ("Risk edge and realized ROI agree" if edge_state == "PASS" else "Claimed risk edge is not translating to realized ROI"),
+                "explanation": watch_reason or ("Risk edge and outcome-known ROI agree" if edge_state == "PASS" else "Claimed risk edge is not translating to outcome-known ROI"),
             },
             {
                 "key": "clv",
@@ -436,7 +440,7 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
                     f"avg CLV {modern_avg_clv:+.4f} | {modern_count}/30 rows"
                     if modern_avg_clv is not None else f"avg CLV unavailable | {modern_count}/30 rows"
                 ),
-                "explanation": watch_reason or ("Modern trades beat closing line" if clv_state == "PASS" else "Modern trades are not beating closing line"),
+                "explanation": watch_reason or ("Modern settled trades beat terminal line" if clv_state == "PASS" else "Modern settled trades are not beating terminal line"),
             },
         ],
     }
@@ -575,7 +579,6 @@ def summarize_performance() -> dict:
         void_keys,
     )
     time_exits = [r for r in all_records if _is_time_exit_record(r)]
-    evaluated_rows = clean_settled + time_exits
 
     wins = [r for r in clean_settled if get_pnl(r) > 0]
     losses = [r for r in clean_settled if get_pnl(r) < 0]
@@ -585,6 +588,9 @@ def summarize_performance() -> dict:
     conf_vals = [_safe_float(r.get("confidence")) for r in clean_settled if r.get("confidence") is not None]
     edge_vals = [_safe_float(r.get("edge")) for r in clean_settled if r.get("edge") is not None]
     clv_vals = [v for v in (get_clv(r) for r in clean_settled) if v is not None]
+    time_exit_pnl = sum(get_pnl(r) for r in time_exits)
+    time_exit_wagered = sum(get_size(r) for r in time_exits)
+    time_exit_clv_vals = [v for v in (get_clv(r) for r in time_exits) if v is not None]
     quote_index = _current_quote_index()
     realized_pnl = round(total_pnl, 2)
     unrealized_vals = []
@@ -681,6 +687,19 @@ def summarize_performance() -> dict:
             "clv_negative": sum(1 for v in clv_vals if v < 0),
             "clv_flat": sum(1 for v in clv_vals if v == 0),
         },
+        "time_exit": {
+            "count": len(time_exits),
+            "pnl": round(time_exit_pnl, 2),
+            "total_wagered": round(time_exit_wagered, 2),
+            "roi": round(time_exit_pnl / time_exit_wagered, 4) if time_exit_wagered else 0.0,
+            "avg_clv": round(sum(time_exit_clv_vals) / len(time_exit_clv_vals), 4)
+            if time_exit_clv_vals else None,
+            "proof_note": "FORCED_CLOSE/TIME_EXIT rows are mid-price exits, not event-outcome proof.",
+        },
+        "blended": {
+            "settled_plus_time_exit_pnl": round(total_pnl + time_exit_pnl, 2),
+            "warning": "Blended P&L mixes outcome-known SETTLED rows with TIME_EXIT marks.",
+        },
         "live_pnl": {
             "realized_pnl": realized_pnl,
             "unrealized_pnl": round(sum(unrealized_vals), 2) if unrealized_vals else 0.0,
@@ -690,7 +709,7 @@ def summarize_performance() -> dict:
         },
         "active_trades": active_trade_cards,
         "clv_by_strategy": clv_strategy_rows,
-        "proof_checklist": build_proof_checklist(evaluated_rows),
+        "proof_checklist": build_proof_checklist(clean_settled, time_exits),
         "market_visuals": build_market_visuals(active_trade_cards),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -2581,7 +2600,11 @@ function renderProofChecklist(proof) {
   }
   if (qualityEl) {
     const quality = proof.data_quality || 'UNKNOWN';
-    qualityEl.textContent = quality + (proof.legacy_evaluated_rows ? ` | legacy rows ${proof.legacy_evaluated_rows}` : '');
+    const timeExitExcluded = proof.time_exit_excluded_count || 0;
+    qualityEl.textContent = quality
+      + (proof.legacy_evaluated_rows ? ` | legacy rows ${proof.legacy_evaluated_rows}` : '')
+      + ` | proof scope ${proof.proof_scope || 'OUTCOME_KNOWN_SETTLED_ONLY'}`
+      + (timeExitExcluded ? ` | time exits excluded ${timeExitExcluded}` : '');
     qualityEl.className = 'mini-val ' + (quality === 'MODERN_ONLY' ? 'good' : 'warn');
   }
   const dcEl = document.getElementById('v-data-collection');

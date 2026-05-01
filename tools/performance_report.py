@@ -20,7 +20,7 @@ Excluded from win/loss stats:
   - status="SETTLED" with a trade key that also has FORCED_CLOSE or
     VOID_LEGACY_DUPLICATE terminal records
   - status="VOID_LEGACY_DUPLICATE"  (duplicate cleanup artifacts)
-  - status="FORCED_CLOSE"           (validation reset records)
+  - status="FORCED_CLOSE"           (mid-price exits, not event outcomes)
   - status="OPEN"                   (open or stale — not settled outcomes)
   - Records with no "status" field  (old-format pre-M13 test records)
 
@@ -267,7 +267,7 @@ def run() -> None:
     print(f"      active:     {len(active_opens)}")
     print(f"      stale:      {len(stale_opens)}  (resolved by a later record)")
     print(f"    VOIDED:       {void_count}  (excluded — duplicate cleanup)")
-    print(f"    FORCED_CLOSE: {forced_count}  (excluded — validation reset)")
+    print(f"    FORCED_CLOSE: {forced_count}  (excluded — mid-price exits, not event outcomes)")
     if forced_avg_clv is not None:
         forced_pos = sum(1 for v in forced_clv_vals if v > 0)
         forced_neg = sum(1 for v in forced_clv_vals if v < 0)

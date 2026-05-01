@@ -1166,7 +1166,7 @@ def print_true_ev_report(rows: list[dict]) -> None:
 
 def print_edge_truth_audit(rows: list[dict]) -> None:
     print()
-    print("EDGE TRUTH AUDIT (clean settled + time exits)")
+    print("EDGE TRUTH AUDIT (outcome-known clean SETTLED)")
     print("---------------------------------------------")
     print("Edge label here means risk_edge if present, else logged edge.")
     print("Logged edge is model probability minus entry price minus fee estimate;")
@@ -1365,7 +1365,7 @@ def print_high_edge_loser_forensics(rows: list[dict]) -> None:
 
 def print_payout_asymmetry_report(rows: list[dict]) -> None:
     print()
-    print("PAYOUT / ASYMMETRY DIAGNOSTICS (clean settled + time exits)")
+    print("PAYOUT / ASYMMETRY DIAGNOSTICS (outcome-known clean SETTLED)")
     print("-----------------------------------------------------------")
     print("A group can win more often than it loses and still lose money if")
     print("avg losses are larger than avg wins. BE_WR is the breakeven win rate.")
@@ -1383,7 +1383,7 @@ def print_payout_asymmetry_report(rows: list[dict]) -> None:
 
 def print_horizon_breakdown(rows: list[dict]) -> None:
     print()
-    print("MARKET HORIZON BREAKDOWN (clean settled + time exits)")
+    print("MARKET HORIZON BREAKDOWN (outcome-known clean SETTLED)")
     print("------------------------------------------------------")
     groups = group_by(rows, market_horizon)
     for horizon in HORIZON_ORDER:
@@ -1571,6 +1571,10 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
     """
     Read-only verdict: is the system proven enough to scale beyond learning mode?
 
+    evaluated must contain only outcome-known clean SETTLED rows. TIME_EXIT /
+    FORCED_CLOSE rows are mid-price exits and are reported separately, not used
+    as proof of prediction accuracy.
+
     Tiers (first failing hard gate wins):
       NOT_PROVEN          — no council-approved modern trades at all
       DATA_COLLECTION_ONLY — sample too small or normal-approved count too low
@@ -1582,6 +1586,7 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
     """
     clean_settled = buckets["clean_settled"]
     active_opens  = buckets["active_open"]
+    time_exits = buckets["time_exit"]
 
     modern_full = [r for r in evaluated if row_quality_group(r) == "MODERN_FULL_METADATA"]
     modern_full_count  = len(modern_full)
@@ -1620,6 +1625,11 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
     if active_open_count > 0:
         warnings.append(
             f"{active_open_count} active unresolved open trade(s) — settlement still pending"
+        )
+    if time_exits:
+        warnings.append(
+            f"{len(time_exits)} TIME_EXIT/FORCED_CLOSE row(s) excluded from proof gates; "
+            "these are mid-price exits, not event outcomes"
         )
     if risk_override_count > 0:
         warnings.append(
@@ -1760,6 +1770,7 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
         "modern_avg_clv":             m_avg_clv,
         "modern_profit_factor":       round(m_pf, 4) if m_pf is not None else None,
         "active_open_count":          active_open_count,
+        "time_exit_excluded_count":   len(time_exits),
         "risk_override_count":        risk_override_count,
         "edge_profile_health":        edge_health,
     }
@@ -1804,6 +1815,8 @@ def print_proof_gate_verdict(gate: dict) -> None:
     print(f"  Modern profit factor:             {_pf(gate['modern_profit_factor'])}"
           f"  (need > {_GATE_MIN_PROFIT_FACTOR:.2f} for scale)")
     print(f"  Active unresolved/open trades:    {gate['active_open_count']}")
+    print(f"  TIME_EXIT rows excluded:          {gate['time_exit_excluded_count']}"
+          "  (mid-price exits; not event-outcome proof)")
     print(f"  Risk overrides used (evaluated):  {gate['risk_override_count']}")
     health = gate.get("edge_profile_health") or {}
     print(f"  Edge profile trusted:             {health.get('edge_profile_trusted')}")
@@ -1861,8 +1874,13 @@ def main() -> None:
     print()
     print("CORE PERFORMANCE")
     print("----------------")
-    print_metrics("Clean SETTLED", clean_settled)
-    print_metrics("TIME_EXIT", time_exits)
+    print_metrics("OUTCOME_KNOWN / Clean SETTLED", clean_settled)
+    print_metrics("TIME_EXIT / FORCED_CLOSE mid-price exits", time_exits)
+    blended_pnl = sum(get_pnl(r) for r in clean_settled + time_exits)
+    print(
+        f"Blended SETTLED + TIME_EXIT PnL: {_fmt_money(blended_pnl)} "
+        "(diagnostic only; mixes event outcomes with mid-price exits)"
+    )
 
     if len(clean_settled) < SAMPLE_WARNING_THRESHOLD:
         print(
@@ -1879,50 +1897,63 @@ def main() -> None:
         "Positive-looking buckets are watchlist only, not proven."
     )
 
-    evaluated = clean_settled + time_exits
-    print_payout_asymmetry_report(evaluated)
-    print_modern_vs_legacy_evidence(evaluated)
-    print_bootstrap_provisional_monitor(buckets, evaluated)
-    print_modern_calibration_report(evaluated)
-    print_true_ev_report(evaluated)
-    print_edge_truth_audit(evaluated)
-    print_edge_source_quality(evaluated)
-    print_high_edge_loser_forensics(evaluated)
-    print_group_table("LEARNING VS NORMAL (clean settled + time exits)", evaluated,
+    outcome_known = clean_settled
+    print()
+    print("PROOF SCOPE")
+    print("-----------")
+    print("Outcome-known proof uses clean SETTLED rows only.")
+    print("TIME_EXIT/FORCED_CLOSE rows are kept as separate mid-price exit diagnostics.")
+
+    print_payout_asymmetry_report(outcome_known)
+    print_modern_vs_legacy_evidence(outcome_known)
+    print_bootstrap_provisional_monitor(buckets, outcome_known)
+    print_modern_calibration_report(outcome_known)
+    print_true_ev_report(outcome_known)
+    print_edge_truth_audit(outcome_known)
+    print_edge_source_quality(outcome_known)
+    print_high_edge_loser_forensics(outcome_known)
+    print_group_table("LEARNING VS NORMAL (outcome-known clean SETTLED)", outcome_known,
                       lambda r: "LEARNING" if is_learning_trade(r) else "NORMAL")
-    print_group_table("STRATEGY BREAKDOWN (clean settled + time exits)", evaluated, strategy_key)
+    print_group_table("STRATEGY BREAKDOWN (outcome-known clean SETTLED)", outcome_known, strategy_key)
     print_group_table(
-        "CONFIDENCE BUCKETS (clean settled + time exits)",
-        evaluated,
+        "CONFIDENCE BUCKETS (outcome-known clean SETTLED)",
+        outcome_known,
         confidence_bucket,
         ["<0.50", "0.50-0.54", "0.55-0.59", "0.60-0.64", "0.65-0.69",
          "0.70-0.74", "0.75-0.79", ">=0.80", "unknown"],
     )
     print_group_table(
-        "EDGE BUCKETS USING risk_edge ELSE edge (clean settled + time exits)",
-        evaluated,
+        "EDGE BUCKETS USING risk_edge ELSE edge (outcome-known clean SETTLED)",
+        outcome_known,
         edge_bucket,
         EDGE_ORDER,
     )
     print_group_table(
-        "ENTRY PRICE BUCKETS (clean settled + time exits)",
-        evaluated,
+        "ENTRY PRICE BUCKETS (outcome-known clean SETTLED)",
+        outcome_known,
         entry_price_bucket,
         ENTRY_PRICE_ORDER,
     )
-    print_horizon_breakdown(evaluated)
-    print_entry_price_inside_horizons(evaluated)
+    print_horizon_breakdown(outcome_known)
+    print_entry_price_inside_horizons(outcome_known)
     print_group_table(
         "CLOSE_TIME HORIZON LENGTH (when timestamp fields allow)",
-        evaluated,
+        outcome_known,
         close_time_horizon_bucket,
         ["<=1h", "1-6h", "6-24h", "1-3d", "3-30d", ">30d",
          "invalid_negative", "unknown"],
     )
-    print_zone_report("DANGER ZONES", evaluated, "danger")
-    print_zone_report("PROMISING ZONES", evaluated, "promising")
+    print_zone_report("DANGER ZONES", outcome_known, "danger")
+    print_zone_report("PROMISING ZONES", outcome_known, "promising")
 
-    gate = evaluate_proof_gates(buckets, evaluated)
+    if time_exits:
+        print_group_table(
+            "TIME_EXIT DIAGNOSTICS ONLY (not event-outcome proof)",
+            time_exits,
+            strategy_key,
+        )
+
+    gate = evaluate_proof_gates(buckets, outcome_known)
     print_proof_gate_verdict(gate)
 
 
