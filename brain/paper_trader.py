@@ -357,10 +357,13 @@ class PaperTrader:
         
         Args:
             market_data: Market data object
-            estimated_prob: Model probability of YES outcome
+            estimated_prob: Scanner confidence. When intended_action is
+                BET_YES or BET_NO, this is treated as side-confidence for that
+                intended side. Without a valid intended_action, legacy
+                YES-probability fallback behavior is preserved.
             strategy: Strategy label (SIGNAL, ARB, TREND)
-            intended_action: Scanner-selected action for audit logging only.
-                PaperTrader does not trust or execute from this field yet.
+            intended_action: Scanner-selected action for execution handoff and
+                audit logging when it is BET_YES or BET_NO.
         
         Returns:
             Trade dict if executed, None if skipped/blocked
@@ -426,14 +429,22 @@ class PaperTrader:
                   f"({ticker_open_count} open position(s) already)")
             return None
 
-        # Determine action and price
-        if estimated_prob >= 0.5:
+        # Determine action and price.
+        #
+        # Scanner confidence is side-confidence for scanner BET_YES/BET_NO
+        # opportunities. Preserve that side when Dashboard supplies a valid
+        # intended_action. Fall back to legacy YES-probability inference only
+        # for old callers that do not provide a valid side.
+        if scanner_action in ("BET_YES", "BET_NO"):
+            action = scanner_action
+            price = market_data.no_price if action == "BET_NO" else market_data.yes_price
+        elif estimated_prob >= 0.5:
             action = "BET_YES"
             price = market_data.yes_price
         else:
             action = "BET_NO"
             price = market_data.no_price
-            estimated_prob = 1.0 - estimated_prob  # Flip for NO side
+            estimated_prob = 1.0 - estimated_prob  # Legacy YES-probability fallback
         
         # ARB override
         if strategy == "ARB":

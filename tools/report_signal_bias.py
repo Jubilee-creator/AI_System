@@ -202,9 +202,20 @@ def inspect_source_path() -> Dict[str, Any]:
         "decision_engine_has_bet_no_branch": 'action="BET_NO"' in decision_engine,
         "decision_engine_computes_no_edge": "no_edge = compute_edge(1.0 - model_prob, signal.price_no)" in decision_engine,
         "scanner_exports_decision_action": '"action": decision.action' in market_scanner,
-        "dashboard_passes_scanner_action_to_paper_trader": "estimated_prob = opp.get(\"confidence\", 0.5)" in dashboard
-        and "process_signal(" in dashboard
-        and "opp.get(\"action\")" not in dashboard[dashboard.find("estimated_prob = opp.get(\"confidence\", 0.5)"):dashboard.find("trace_counts = classify_execution_trace")],
+        "dashboard_passes_intended_action_to_paper_trader": (
+            "estimated_prob = opp.get(\"confidence\", 0.5)" in dashboard
+            and "process_signal(" in dashboard
+            and "intended_action=opp.get(\"action\")" in dashboard
+        ),
+        "dashboard_drops_scanner_action_before_paper_trader": (
+            "estimated_prob = opp.get(\"confidence\", 0.5)" in dashboard
+            and "process_signal(" in dashboard
+            and "intended_action=opp.get(\"action\")" not in dashboard
+        ),
+        "paper_trader_honors_intended_action": (
+            'scanner_action in ("BET_YES", "BET_NO")' in paper_trader
+            and "action = scanner_action" in paper_trader
+        ),
         "paper_trader_rederives_action_from_probability": (
             "if estimated_prob >= 0.5:" in paper_trader
             and 'action = "BET_YES"' in paper_trader
@@ -224,11 +235,19 @@ def print_source_findings(findings: Dict[str, Any]) -> None:
     print(f"Decision engine computes NO edge:           {findings['decision_engine_computes_no_edge']}")
     print(f"Scanner exports decision.action:            {findings['scanner_exports_decision_action']}")
     print(
-        "Dashboard drops scanner action before paper trader: "
-        f"{findings['dashboard_passes_scanner_action_to_paper_trader']}"
+        "Dashboard passes intended action to paper trader:   "
+        f"{findings['dashboard_passes_intended_action_to_paper_trader']}"
     )
     print(
-        "Paper trader re-derives side from probability:       "
+        "Dashboard drops scanner action before paper trader: "
+        f"{findings['dashboard_drops_scanner_action_before_paper_trader']}"
+    )
+    print(
+        "Paper trader honors intended action:                "
+        f"{findings['paper_trader_honors_intended_action']}"
+    )
+    print(
+        "Paper trader has legacy probability fallback:        "
         f"{findings['paper_trader_rederives_action_from_probability']}"
     )
     print(f"Model probability uses YES-side prior:       {findings['model_probability_uses_yes_prior']}")
@@ -246,9 +265,12 @@ def print_warnings(rows: List[dict], source_findings: Dict[str, Any]) -> None:
         warnings.append("ONE_SIDED_ACTION_DISTRIBUTION")
     if no == 0:
         warnings.append("BET_NO_COUNT_ZERO")
-    if source_findings["dashboard_passes_scanner_action_to_paper_trader"]:
+    if source_findings["dashboard_drops_scanner_action_before_paper_trader"]:
         warnings.append("SCANNER_ACTION_DROPPED_BEFORE_PAPER_TRADER")
-    if source_findings["paper_trader_rederives_action_from_probability"]:
+    if (
+        source_findings["paper_trader_rederives_action_from_probability"]
+        and not source_findings["paper_trader_honors_intended_action"]
+    ):
         warnings.append("PAPER_TRADER_REDERIVES_SIDE")
     if source_findings["model_probability_uses_yes_prior"] and source_findings["scanner_uses_yes_mid_price_history"]:
         warnings.append("YES_SIDE_MARKET_PRICE_USED_AS_PRIOR_AND_SIGNAL_HISTORY")
@@ -268,9 +290,11 @@ def print_warnings(rows: List[dict], source_findings: Dict[str, Any]) -> None:
         print("BET_NO has not appeared in the trade log. Current realized evidence is 100% YES-side.")
     if source_findings["decision_engine_has_bet_no_branch"]:
         print("BET_NO is theoretically possible in decision_engine.py.")
-    if source_findings["dashboard_passes_scanner_action_to_paper_trader"]:
+    if source_findings["dashboard_drops_scanner_action_before_paper_trader"]:
         print("But the Dashboard -> PaperTrader handoff does not preserve scanner action as execution side.")
-    if source_findings["paper_trader_rederives_action_from_probability"]:
+    if source_findings["paper_trader_honors_intended_action"]:
+        print("PaperTrader honors valid intended_action values; legacy probability fallback remains for missing/invalid handoffs.")
+    elif source_findings["paper_trader_rederives_action_from_probability"]:
         print("PaperTrader chooses BET_YES whenever side confidence is >= 0.5, which can turn scanner BET_NO confidence into BET_YES.")
     print("This report is diagnostic only. It does not prove edge and does not change trading.")
 

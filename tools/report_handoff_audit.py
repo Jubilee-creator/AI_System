@@ -78,6 +78,10 @@ def inspect_source() -> Dict[str, Any]:
             or "action:" in trader_signature
             or "side:" in trader_signature
         ),
+        "paper_trader_honors_intended_action": (
+            'scanner_action in ("BET_YES", "BET_NO")' in trader
+            and "action = scanner_action" in trader
+        ),
         "paper_trader_rederives_side": (
             "if estimated_prob >= 0.5:" in trader
             and 'action = "BET_YES"' in trader
@@ -166,7 +170,8 @@ def main() -> None:
     print(f"Dashboard passes action to PaperTrader:  {yn(source['dashboard_passes_action_to_paper_trader'])}")
     print(f"Dashboard passes confidence only:        {yn(source['dashboard_passes_confidence_only'])}")
     print(f"PaperTrader accepts intended action:     {yn(source['paper_trader_accepts_intended_action'])}")
-    print(f"PaperTrader re-derives side:             {yn(source['paper_trader_rederives_side'])}")
+    print(f"PaperTrader honors intended action:      {yn(source['paper_trader_honors_intended_action'])}")
+    print(f"PaperTrader legacy probability fallback: {yn(source['paper_trader_rederives_side'])}")
     print(f"PaperTrader flips NO probability:        {yn(source['paper_trader_flips_no_probability'])}")
     print(f"future trace fields wired:               {yn(future_trace_fields_wired)}")
 
@@ -196,7 +201,7 @@ def main() -> None:
         warnings.append("SCANNER_ACTION_NOT_PASSED_TO_PAPER_TRADER")
     if not source["paper_trader_accepts_intended_action"]:
         warnings.append("PAPER_TRADER_HAS_NO_INTENDED_ACTION_PARAMETER")
-    if source["paper_trader_rederives_side"]:
+    if source["paper_trader_rederives_side"] and not source["paper_trader_honors_intended_action"]:
         warnings.append("PAPER_TRADER_REDERIVES_SIDE_FROM_CONFIDENCE")
     if not logs["mismatch_measurable"] and future_trace_fields_wired:
         warnings.append("NO_NEW_TRACE_ROWS_YET_RUN_SCANNER_TO_MEASURE")
@@ -230,6 +235,8 @@ def main() -> None:
     if warnings:
         if future_trace_fields_wired and not logs["mismatch_measurable"]:
             print("Future handoff rows will be auditable, but current logs still cannot prove mismatch.")
+        elif source["paper_trader_honors_intended_action"]:
+            print("Source inspection shows PaperTrader honors valid intended_action; live logs still need BET_NO opens to prove production-path behavior.")
         else:
             print("Handoff is not auditable from current logs and source inspection shows action can be dropped.")
     else:
