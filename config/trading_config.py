@@ -271,6 +271,22 @@ BOOTSTRAP_MIN_CONFIDENCE = 0.65    # confidence floor for provisional candidates
 
 
 # ═══════════════════════════════════════════════════════════════
+# EDGE DANGER GUARD
+# ═══════════════════════════════════════════════════════════════
+
+# M-45 showed the current high-edge bucket is not reliable evidence:
+# edge >= 0.08 had negative realized ROI/CLV and behaved as an inverted signal.
+# This paper-only guard prevents the system from treating high predicted edge as
+# authority while calibration is unproven.  It is deliberately narrow and can be
+# removed only after modern full-metadata calibration proves edge is monotonic.
+EDGE_DANGER_GUARD_ENABLED = True
+EDGE_DANGER_BLOCK_HIGH_EDGE = True
+EDGE_DANGER_HIGH_EDGE_MIN = 0.08
+EDGE_DANGER_REQUIRE_PAPER_ONLY = True
+EDGE_DANGER_REASON = "M-45 high-edge bucket negative ROI/CLV; edge not trusted"
+
+
+# ═══════════════════════════════════════════════════════════════
 # LOGGING & PERSISTENCE
 # ═══════════════════════════════════════════════════════════════
 

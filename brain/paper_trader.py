@@ -32,6 +32,11 @@ from config.trading_config import (
     MAX_POSITIONS_PER_TICKER,
     MAX_SPREAD,
     MIN_VOLUME,
+    EDGE_DANGER_GUARD_ENABLED,
+    EDGE_DANGER_BLOCK_HIGH_EDGE,
+    EDGE_DANGER_HIGH_EDGE_MIN,
+    EDGE_DANGER_REQUIRE_PAPER_ONLY,
+    EDGE_DANGER_REASON,
 )
 
 MIN_LEARNING_BET = 5.00
@@ -469,6 +474,29 @@ class PaperTrader:
 
         # DEBUG 3: Show calculated values
         print(f"[PAPER_DEBUG] action={action} price={price:.3f} estimated_prob={estimated_prob:.3f} edge={edge:.4f} min_edge={self.min_edge:.4f}")
+
+        # M-46: high-edge danger guard.
+        # Current audits show edge >= 0.08 is inverted/untrusted in this
+        # system.  Block before Council/data-collection/bootstrap can treat
+        # fake edge as authority.  This affects new paper entries only.
+        edge_danger_guard_active = (
+            EDGE_DANGER_GUARD_ENABLED
+            and EDGE_DANGER_BLOCK_HIGH_EDGE
+            and (not EDGE_DANGER_REQUIRE_PAPER_ONLY or PAPER_VALIDATION_MODE)
+        )
+        if edge_danger_guard_active and original_edge >= EDGE_DANGER_HIGH_EDGE_MIN:
+            print(
+                "[EDGE_DANGER_GUARD_HIGH_EDGE] blocked: "
+                f"original_edge={original_edge:.4f} "
+                f"threshold={EDGE_DANGER_HIGH_EDGE_MIN:.4f} "
+                f"reason={EDGE_DANGER_REASON}"
+            )
+            print(
+                "[TRACE] stop: edge danger guard "
+                f"ticker={market_data.ticker} action={action} "
+                f"original_edge={original_edge:.4f}"
+            )
+            return None
         
         # DEBUG 4: Check minimum edge
         if edge < self.min_edge and strategy != "ARB":
