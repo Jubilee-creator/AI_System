@@ -32,6 +32,7 @@ from config.trading_config import (
     MAX_POSITIONS_PER_TICKER,
     MAX_SPREAD,
     MIN_VOLUME,
+    MIN_CONFIDENCE as CONFIG_MIN_CONFIDENCE,
     EDGE_DANGER_GUARD_ENABLED,
     EDGE_DANGER_BLOCK_HIGH_EDGE,
     EDGE_DANGER_HIGH_EDGE_MIN,
@@ -171,7 +172,7 @@ class PaperTrader:
         self,
         bankroll: float = 500.0,
         min_edge: float = 0.03,
-        min_confidence: float = 0.65,
+        min_confidence: float = CONFIG_MIN_CONFIDENCE,
         max_bet_size: float = 50.0,
         kelly_fraction: float = 0.25
     ):

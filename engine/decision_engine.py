@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 from collections import deque
 
+from config.trading_config import MIN_CONFIDENCE
+
 
 # ─────────────────────────────────────────────────────────────
 # DATA STRUCTURES
@@ -79,7 +81,6 @@ class TradeDecision:
 
 TRADING_COST = 0.01      # 1¢ per contract (Kalshi fee estimate)
 KELLY_FRACTION = 0.25    # Conservative: quarter Kelly
-MIN_CONFIDENCE = 0.60    # 60% minimum probability threshold
 
 
 # ─────────────────────────────────────────────────────────────

@@ -23,6 +23,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dotenv import load_dotenv
 load_dotenv()
 
+from config.trading_config import MIN_CONFIDENCE
+
 try:
     from flask import Flask, jsonify, render_template_string
     from flask_cors import CORS
@@ -115,7 +117,7 @@ if PAPER_TRADER_OK:
     paper_trader = PaperTrader(
         bankroll=BANKROLL,
         min_edge=0.03,
-        min_confidence=0.65,
+        min_confidence=MIN_CONFIDENCE,
         max_bet_size=50.0,
         kelly_fraction=0.25
     )
