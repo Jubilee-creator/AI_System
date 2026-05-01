@@ -242,10 +242,22 @@ PAPER_VALIDATION_MAX_BET_SIZE = 10.00  # $ per trade while in validation mode
 # calibration, and normal council-approved performance are proven.
 GLOBAL_FORCED_LEARNING_MODE = True
 
-# Research data-collection mode: when the Council blocks a signal, paper mode
-# can still log a $5 learning trade with data_collection_override=True.
-# These rows are explicitly NOT normal council-approved proof.
+# Research data-collection mode: marks the system as actively collecting
+# training signal. Reported in logs and dashboards as context.
 DATA_COLLECTION_MODE = True
+
+# Override control: when True and the Council returns BLOCK, the system still
+# logs a $5 learning trade tagged data_collection_override=True.  These rows
+# are explicitly NOT normal council-approved proof and do NOT advance proof
+# gates.  Set False to let council BLOCKs stay blocked so normal
+# council-approved trades can accumulate and proof gates can advance.
+#
+# TRUST DEADLOCK WARNING: while DATA_COLLECTION_OVERRIDE_ENABLED=True, the
+# council will never approve a trade (it always BLOCKs), and all trades will
+# be tagged data_collection_override.  normal_council_approved_modern stays 0
+# permanently and proof gates cannot advance.  Set this to False (Phase 6B-2)
+# once the plumbing is confirmed correct.
+DATA_COLLECTION_OVERRIDE_ENABLED = True
 
 # Maximum concurrent open positions per ticker (1 = no duplicate exposure)
 MAX_POSITIONS_PER_TICKER = 1
@@ -415,6 +427,8 @@ def get_config_summary() -> Dict[str, Any]:
         "kelly_fraction": KELLY_FRACTION,
         "global_forced_learning_mode": GLOBAL_FORCED_LEARNING_MODE,
         "data_collection_mode": DATA_COLLECTION_MODE,
+        "data_collection_override_enabled": DATA_COLLECTION_OVERRIDE_ENABLED,
+        "trust_deadlock_active": DATA_COLLECTION_OVERRIDE_ENABLED and DATA_COLLECTION_MODE,
         "side_balanced_research_enabled": SIDE_BALANCED_RESEARCH_ENABLED,
         "side_balanced_research_shadow_only": SIDE_BALANCED_RESEARCH_SHADOW_ONLY,
         "side_balanced_research_execute": SIDE_BALANCED_RESEARCH_EXECUTE,

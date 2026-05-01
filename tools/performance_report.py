@@ -40,7 +40,11 @@ ROOT       = Path(__file__).parent.parent
 TRADES_LOG = ROOT / "logs" / "paper_trades.jsonl"
 sys.path.insert(0, str(ROOT))
 
-from config.trading_config import DATA_COLLECTION_MODE, GLOBAL_FORCED_LEARNING_MODE
+from config.trading_config import (
+    DATA_COLLECTION_MODE,
+    DATA_COLLECTION_OVERRIDE_ENABLED,
+    GLOBAL_FORCED_LEARNING_MODE,
+)
 
 
 # ─── HELPERS ────────────────────────────────────────────────────────────────
@@ -306,8 +310,13 @@ def run() -> None:
     )
     print(
         "  Data collection:"
-        + (" ENABLED — Council blocks may be logged as $5 data-collection rows"
-           if DATA_COLLECTION_MODE else " DISABLED")
+        + (" ENABLED" if DATA_COLLECTION_MODE else " DISABLED")
+    )
+    print(
+        "  DC override:    "
+        + ("ENABLED — council BLOCKs overridden as $5 learning trades [TRUST DEADLOCK ACTIVE]"
+           if DATA_COLLECTION_OVERRIDE_ENABLED and DATA_COLLECTION_MODE
+           else ("ENABLED" if DATA_COLLECTION_OVERRIDE_ENABLED else "DISABLED — council BLOCKs respected"))
     )
     print(
         f"  Clean SETTLED classes: normal={clean_normal}  "

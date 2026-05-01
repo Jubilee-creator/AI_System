@@ -31,6 +31,7 @@ from config.trading_config import (
     PAPER_VALIDATION_MAX_BET_SIZE,
     GLOBAL_FORCED_LEARNING_MODE,
     DATA_COLLECTION_MODE,
+    DATA_COLLECTION_OVERRIDE_ENABLED,
     MAX_POSITIONS_PER_TICKER,
     MAX_SPREAD,
     MIN_VOLUME,
@@ -559,7 +560,7 @@ class PaperTrader:
                     f"{edge_profile_health.get('reason', 'unknown')}"
                 )
             if council_decision == "BLOCK":
-                if DATA_COLLECTION_MODE:
+                if DATA_COLLECTION_OVERRIDE_ENABLED:
                     force_data_collection_learning = True
                     print(
                         "[COUNCIL] DATA_COLLECTION_OVERRIDE allowing blocked "
@@ -795,6 +796,7 @@ class PaperTrader:
             "risk_edge": risk_edge,
             "model_probability": original_confidence,
             "data_collection_mode": DATA_COLLECTION_MODE,
+            "data_collection_override_enabled": DATA_COLLECTION_OVERRIDE_ENABLED,
             "data_collection_override": force_data_collection_learning,
             "learning_trade": is_learning_trade,
             "raw_strategy": raw_strategy_text or strategy,

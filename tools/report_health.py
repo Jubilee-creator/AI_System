@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 from config.trading_config import (
     DATA_COLLECTION_MODE,
+    DATA_COLLECTION_OVERRIDE_ENABLED,
     GLOBAL_FORCED_LEARNING_MODE,
     MIN_CONFIDENCE,
 )
@@ -253,6 +254,8 @@ def check_research_truth() -> dict:
         "scale_allowed": bool(gate.get("scale_allowed")),
         "real_money_allowed": bool(gate.get("real_money_allowed")),
         "data_collection_mode": DATA_COLLECTION_MODE,
+        "data_collection_override_enabled": DATA_COLLECTION_OVERRIDE_ENABLED,
+        "trust_deadlock_active": DATA_COLLECTION_OVERRIDE_ENABLED and DATA_COLLECTION_MODE,
         "global_forced_learning_mode": GLOBAL_FORCED_LEARNING_MODE,
         "kelly_sizing_used": not GLOBAL_FORCED_LEARNING_MODE,
         "min_confidence": MIN_CONFIDENCE,
@@ -297,6 +300,13 @@ def main() -> None:
         print(_status_line(bool(truth["edge_profile_trusted"]), "edge_profile_trusted", str(truth["edge_profile_trusted"])))
         print(_status_line(not truth["kelly_sizing_used"], "kelly_execution", "DISABLED" if not truth["kelly_sizing_used"] else "ENABLED"))
         print(_status_line(not truth["data_collection_mode"], "data_collection_mode", str(truth["data_collection_mode"])))
+        dc_override = truth.get("data_collection_override_enabled", False)
+        trust_deadlock = truth.get("trust_deadlock_active", False)
+        print(_status_line(not dc_override, "dc_override_enabled", str(dc_override)))
+        if trust_deadlock:
+            print("  !! TRUST DEADLOCK ACTIVE: DATA_COLLECTION_OVERRIDE_ENABLED=True")
+            print("     Council BLOCKs are overridden — normal_council_approved stays 0 forever.")
+            print("     Set DATA_COLLECTION_OVERRIDE_ENABLED=False (Phase 6B-2) to unblock proof.")
         print(_status_line(True, "min_confidence", f"{truth['min_confidence']:.2f}"))
         print(_status_line(not truth["scale_allowed"], "scale_allowed", "NO" if not truth["scale_allowed"] else "YES"))
         print(_status_line(not truth["real_money_allowed"], "real_money_allowed", "NO" if not truth["real_money_allowed"] else "YES"))
@@ -388,6 +398,12 @@ def main() -> None:
         alerts.append(f"COOLDOWN ACTIVE until {risk.get('cooldown_until')}")
     if not dashboard["running"]:
         alerts.append("DASHBOARD NOT RUNNING")
+    if truth.get("loaded") and truth.get("trust_deadlock_active"):
+        alerts.append(
+            "TRUST DEADLOCK ACTIVE — DATA_COLLECTION_OVERRIDE_ENABLED=True keeps "
+            "normal_council_approved at 0; proof gates cannot advance. "
+            "Set DATA_COLLECTION_OVERRIDE_ENABLED=False to unblock (Phase 6B-2)."
+        )
     if truth.get("loaded") and truth.get("proof_verdict") != "SCALE_ELIGIBLE":
         alerts.append(
             f"RESEARCH ONLY — proof verdict {truth.get('proof_verdict')} "
