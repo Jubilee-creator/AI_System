@@ -32,7 +32,13 @@ from config.trading_config import (
     DATA_COLLECTION_MODE,
     DATA_COLLECTION_OVERRIDE_ENABLED,
     GLOBAL_FORCED_LEARNING_MODE,
+    MIN_EDGE,
     MIN_CONFIDENCE,
+    BOOTSTRAP_MIN_EDGE,
+    BOOTSTRAP_MIN_CONFIDENCE,
+    BOOTSTRAP_CONFIDENCE_ADJUSTMENT,
+    BOOTSTRAP_ALLOW_ENABLED,
+    EDGE_DANGER_HIGH_EDGE_MIN,
 )
 from tools.clean_truth_report import classify_records, evaluate_proof_gates
 from tools.performance_report import load_trades
@@ -256,8 +262,10 @@ def check_research_truth() -> dict:
         "data_collection_mode": DATA_COLLECTION_MODE,
         "data_collection_override_enabled": DATA_COLLECTION_OVERRIDE_ENABLED,
         "trust_deadlock_active": DATA_COLLECTION_OVERRIDE_ENABLED and DATA_COLLECTION_MODE,
+        "bootstrap_allow_enabled": BOOTSTRAP_ALLOW_ENABLED,
         "global_forced_learning_mode": GLOBAL_FORCED_LEARNING_MODE,
         "kelly_sizing_used": not GLOBAL_FORCED_LEARNING_MODE,
+        "min_edge": MIN_EDGE,
         "min_confidence": MIN_CONFIDENCE,
         "edge_profile_trusted": health.get("edge_profile_trusted", False),
         "edge_profile_reason": health.get("reason", ""),
@@ -266,6 +274,7 @@ def check_research_truth() -> dict:
         "normal_modern_count": gate.get("normal_modern_count", 0),
         "data_collection_override_count": gate.get("dc_count", 0),
         "bootstrap_provisional_count": gate.get("bootstrap_count", 0),
+        "bootstrap_era_allow_count": gate.get("bootstrap_era_allow_count", 0),
         "time_exit_excluded_count": gate.get("time_exit_excluded_count", 0),
     }
 
@@ -310,17 +319,33 @@ def main() -> None:
         print(_status_line(True, "min_confidence", f"{truth['min_confidence']:.2f}"))
         print(_status_line(not truth["scale_allowed"], "scale_allowed", "NO" if not truth["scale_allowed"] else "YES"))
         print(_status_line(not truth["real_money_allowed"], "real_money_allowed", "NO" if not truth["real_money_allowed"] else "YES"))
+        ba_ok = truth.get("bootstrap_allow_enabled", False)
+        print(_status_line(ba_ok, "bootstrap_allow_enabled", str(ba_ok)))
         print(
             "    samples: "
             f"clean_settled={truth['clean_settled_count']}  "
             f"modern_full={truth['modern_full_count']}  "
             f"normal_modern={truth['normal_modern_count']}  "
             f"data_collection={truth['data_collection_override_count']}  "
-            f"bootstrap={truth['bootstrap_provisional_count']}  "
+            f"bootstrap_provisional={truth['bootstrap_provisional_count']}  "
+            f"bootstrap_era_allow={truth['bootstrap_era_allow_count']}  "
             f"time_exit_excluded={truth['time_exit_excluded_count']}"
         )
         reason = str(truth["proof_reason"])
         print(f"    reason: {reason[:120]}{'...' if len(reason) > 120 else ''}")
+
+    # ── Threshold contract ────────────────────────────────────────────────────
+    print("\nTHRESHOLD CONTRACT")
+    print("-" * 72)
+    print(_status_line(True, "min_edge",                    f"{MIN_EDGE:.3f} ({MIN_EDGE*100:.1f}%)"))
+    print(_status_line(True, "min_confidence",              f"{MIN_CONFIDENCE:.2f} ({MIN_CONFIDENCE*100:.0f}%)"))
+    print(_status_line(True, "bootstrap_min_edge",          f"{BOOTSTRAP_MIN_EDGE:.3f} ({BOOTSTRAP_MIN_EDGE*100:.1f}%)"))
+    print(_status_line(True, "bootstrap_min_confidence",    f"{BOOTSTRAP_MIN_CONFIDENCE:.2f} ({BOOTSTRAP_MIN_CONFIDENCE*100:.0f}%)"))
+    print(_status_line(True, "bootstrap_confidence_adj",    f"{BOOTSTRAP_CONFIDENCE_ADJUSTMENT:+.3f}"))
+    print(_status_line(BOOTSTRAP_ALLOW_ENABLED, "bootstrap_allow_enabled", str(BOOTSTRAP_ALLOW_ENABLED)))
+    print(_status_line(True, "edge_danger_high_edge_min",   f"{EDGE_DANGER_HIGH_EDGE_MIN:.3f} (guard blocks edge>={EDGE_DANGER_HIGH_EDGE_MIN:.2f})"))
+    print(_status_line(not DATA_COLLECTION_OVERRIDE_ENABLED, "dc_override_enabled", str(DATA_COLLECTION_OVERRIDE_ENABLED)))
+    print("    scanner applies no independent edge filter — decision_engine thresholds govern PASS")
 
     # ── Auto-settle loop ─────────────────────────────────────────────────────
     print("\nAUTO-SETTLE LOOP")

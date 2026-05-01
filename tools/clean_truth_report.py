@@ -1601,6 +1601,9 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
     modern_full_count  = len(modern_full)
     dc_count           = sum(1 for r in modern_full if r.get("data_collection_override"))
     bootstrap_count    = sum(1 for r in modern_full if r.get("bootstrap_provisional"))
+    # bootstrap_era_allow trades (Phase 6B-2) are NOT excluded — they count as
+    # normal_council_approved_modern.  Track separately for reporting only.
+    bootstrap_era_allow_count = sum(1 for r in modern_full if r.get("bootstrap_era_council_allow"))
     normal_modern_count = max(0, modern_full_count - dc_count - bootstrap_count)
     dc_pct = round(dc_count / modern_full_count * 100, 1) if modern_full_count else 0.0
     bootstrap_pct = round(bootstrap_count / modern_full_count * 100, 1) if modern_full_count else 0.0
@@ -1648,6 +1651,11 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
         warnings.append(
             f"{bootstrap_count} evaluated trade(s) are bootstrap_provisional and do NOT count as normal proof"
         )
+    if bootstrap_era_allow_count > 0:
+        warnings.append(
+            f"{bootstrap_era_allow_count} evaluated trade(s) are bootstrap_era_council_allow "
+            "and DO count as normal_council_approved_modern (Phase 6B-2 proof path)"
+        )
     if side_coverage:
         warnings.append(
             f"{len(side_coverage)} side_coverage_test row(s) excluded from normal proof and ROI"
@@ -1669,10 +1677,14 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
             f"proof rows ({dc_count} data_collection_override, "
             f"{bootstrap_count} bootstrap_provisional). "
             "Zero council-approved normal trades exist. Non-normal evidence is NOT "
-            "proof of normal model operation."
+            "proof of normal model operation. "
+            "BOOTSTRAP_ALLOW_ENABLED=True: future bootstrap-quality ALLOW signals "
+            "will count as normal_council_approved_modern (Phase 6B-2 path)."
         )
         next_req = (
-            "Resolve critic deadlock: collect normal council-approved modern trades. "
+            "Collect normal council-approved modern trades. "
+            "With BOOTSTRAP_ALLOW_ENABLED=True, bootstrap-quality signals (edge>=0.05, "
+            "conf>=0.65) return ALLOW and count toward the 10-trade trust gate. "
             "Bootstrap provisional rows do not advance proof gates."
         )
 
@@ -1775,6 +1787,7 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
         "dc_pct":                     dc_pct,
         "bootstrap_count":            bootstrap_count,
         "bootstrap_pct":              bootstrap_pct,
+        "bootstrap_era_allow_count":  bootstrap_era_allow_count,
         "clean_settled_count":        len(clean_settled),
         "clean_settled_roi_pct":      round(cs_roi * 100, 2),
         "clean_settled_avg_clv":      cs_avg_clv,

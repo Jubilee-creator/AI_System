@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dotenv import load_dotenv
 load_dotenv()
 
-from config.trading_config import DATA_COLLECTION_MODE, GLOBAL_FORCED_LEARNING_MODE, MIN_CONFIDENCE
+from config.trading_config import DATA_COLLECTION_MODE, GLOBAL_FORCED_LEARNING_MODE, MIN_CONFIDENCE, MIN_EDGE
 
 try:
     from flask import Flask, jsonify, render_template_string
@@ -142,7 +142,7 @@ paper_trader = None
 if PAPER_TRADER_OK:
     paper_trader = PaperTrader(
         bankroll=BANKROLL,
-        min_edge=0.03,
+        min_edge=MIN_EDGE,
         min_confidence=MIN_CONFIDENCE,
         max_bet_size=50.0,
         kelly_fraction=0.25

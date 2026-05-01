@@ -309,6 +309,10 @@ EDGE_PROFILE_MIN_NORMAL_MODERN = 10
 BOOTSTRAP_PROVISIONAL_MODE = True
 BOOTSTRAP_MIN_EDGE = 0.05          # edge floor for bootstrap candidates
 BOOTSTRAP_MIN_CONFIDENCE = 0.65    # confidence floor for bootstrap candidates
+# Conservative confidence penalty applied by the Critic when returning a
+# bootstrap_era_allow or provisional decision.  Tunable here; referenced by
+# brain/critic_brain.py so changes propagate automatically.
+BOOTSTRAP_CONFIDENCE_ADJUSTMENT = -0.05
 
 # Bootstrap allow mode (Phase 6B-2): when True, signals that meet the bootstrap
 # quality threshold (edge >= BOOTSTRAP_MIN_EDGE, confidence >= BOOTSTRAP_MIN_CONFIDENCE)
@@ -440,6 +444,10 @@ def get_config_summary() -> Dict[str, Any]:
         "data_collection_mode": DATA_COLLECTION_MODE,
         "data_collection_override_enabled": DATA_COLLECTION_OVERRIDE_ENABLED,
         "trust_deadlock_active": DATA_COLLECTION_OVERRIDE_ENABLED and DATA_COLLECTION_MODE,
+        "bootstrap_allow_enabled": BOOTSTRAP_ALLOW_ENABLED,
+        "bootstrap_min_edge": BOOTSTRAP_MIN_EDGE,
+        "bootstrap_min_confidence": BOOTSTRAP_MIN_CONFIDENCE,
+        "bootstrap_confidence_adjustment": BOOTSTRAP_CONFIDENCE_ADJUSTMENT,
         "side_balanced_research_enabled": SIDE_BALANCED_RESEARCH_ENABLED,
         "side_balanced_research_shadow_only": SIDE_BALANCED_RESEARCH_SHADOW_ONLY,
         "side_balanced_research_execute": SIDE_BALANCED_RESEARCH_EXECUTE,

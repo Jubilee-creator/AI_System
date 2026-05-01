@@ -35,7 +35,11 @@ from config.trading_config import (
     MAX_POSITIONS_PER_TICKER,
     MAX_SPREAD,
     MIN_VOLUME,
+    MIN_EDGE,
     MIN_CONFIDENCE as CONFIG_MIN_CONFIDENCE,
+    BOOTSTRAP_MIN_EDGE,
+    BOOTSTRAP_MIN_CONFIDENCE,
+    BOOTSTRAP_ALLOW_ENABLED,
     EDGE_DANGER_GUARD_ENABLED,
     EDGE_DANGER_BLOCK_HIGH_EDGE,
     EDGE_DANGER_HIGH_EDGE_MIN,
@@ -173,7 +177,7 @@ class PaperTrader:
     def __init__(
         self,
         bankroll: float = 500.0,
-        min_edge: float = 0.03,
+        min_edge: float = MIN_EDGE,
         min_confidence: float = CONFIG_MIN_CONFIDENCE,
         max_bet_size: float = 50.0,
         kelly_fraction: float = 0.25
@@ -838,6 +842,13 @@ class PaperTrader:
             "bootstrap_provisional": bootstrap_provisional_trade,
             "bootstrap_provisional_reason": bootstrap_provisional_reason,
             "bootstrap_era_council_allow": bootstrap_era_allow_trade,
+            # Threshold contract snapshot: records the active threshold values at
+            # trade entry time so historical trades remain auditable if config changes.
+            "min_edge_at_entry": self.min_edge,
+            "min_confidence_at_entry": self.min_confidence,
+            "bootstrap_min_edge_at_entry": BOOTSTRAP_MIN_EDGE,
+            "bootstrap_min_confidence_at_entry": BOOTSTRAP_MIN_CONFIDENCE,
+            "bootstrap_allow_enabled_at_entry": BOOTSTRAP_ALLOW_ENABLED,
         }
         trade.update(_paper_trade_metadata(market_data, action, fee_estimate))
         

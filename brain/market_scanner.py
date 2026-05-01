@@ -26,7 +26,7 @@ from engine.decision_engine import (
     MarketSignal, TradeDecision, analyze_market, compute_arb_edge
 )
 from brokers.kalshi_client import kalshi_get, get_client
-from config.trading_config import MAX_TRADE_EXPIRY_HOURS
+from config.trading_config import MAX_TRADE_EXPIRY_HOURS, MIN_CONFIDENCE
 
 
 # ─────────────────────────────────────────
@@ -44,7 +44,9 @@ CRYPTO_KEYWORDS = [
 
 BANKROLL = float(os.getenv("BANKROLL", "500"))
 MIN_VOLUME = 0
-MIN_EDGE = 0.015
+# Note: the scanner does NOT apply a separate edge filter.  PASS classification
+# is determined entirely by decision_engine.analyze_market(), which requires
+# confidence >= MIN_CONFIDENCE and edge > 0 on at least one side.
 SCAN_INTERVAL = 30
 MAX_ENRICH_WORKERS = 15  # parallel threads for market detail calls
 
@@ -593,7 +595,7 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
     for ex in skip_examples["no_signal"]:
         print(f"[SCAN]     • {ex}")
     print(f"[SCAN]   Low volume (no ARB): {skip_reasons['low_volume']}")
-    print(f"[SCAN]   PASS (edge < {MIN_EDGE:.3f}): {skip_reasons['pass']}")
+    print(f"[SCAN]   PASS (decision engine: conf<{MIN_CONFIDENCE:.0%} or edge≤0): {skip_reasons['pass']}")
     for ex in skip_examples["pass"]:
         print(f"[SCAN]     • {ex}")
     print(f"[SCAN] ──────────────────────────────────────────────────────────────────")
@@ -606,7 +608,7 @@ def scan_crypto_markets(bankroll: float = BANKROLL) -> list[dict]:
     else:
         print(f"\n[SCAN] ⚠️  NO ACTIONABLE OPPORTUNITIES")
         if skip_reasons["pass"] > 0:
-            print(f"[SCAN]   ({skip_reasons['pass']} had edge < {MIN_EDGE:.3f})")
+            print(f"[SCAN]   ({skip_reasons['pass']} below decision threshold — conf<{MIN_CONFIDENCE:.0%} or edge≤0)")
     
     print(f"{'='*70}\n")
     return opportunities

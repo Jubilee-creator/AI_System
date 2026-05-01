@@ -19,17 +19,18 @@ sys.path.insert(0, str(ROOT))
 from brain.strategy_utils import normalize_strategy
 from brain.edge_profile_health import edge_profile_health
 from config.trading_config import (
+    MIN_EDGE,
     BOOTSTRAP_PROVISIONAL_MODE,
     BOOTSTRAP_MIN_EDGE,
     BOOTSTRAP_MIN_CONFIDENCE,
     BOOTSTRAP_ALLOW_ENABLED,
+    BOOTSTRAP_CONFIDENCE_ADJUSTMENT,
 )
 
 DEFAULT_PROFILE_PATH = ROOT / "data" / "edge_profile.json"
 MIN_SAMPLE_SIZE = 5
-MIN_NORMAL_EDGE = 0.03
+# MIN_EDGE (from config) is used as the normal proof threshold — see usage below.
 MAX_SMALL_SAMPLE_ADJUSTMENT = -0.15
-BOOTSTRAP_CONFIDENCE_ADJUSTMENT = -0.05  # conservative penalty for provisional mode
 
 
 def confidence_bucket(confidence: Optional[float]) -> str:
@@ -311,12 +312,12 @@ def critique_signal(
     if (
         adjusted_edge is not None
         and action != "ARB"
-        and adjusted_edge < MIN_NORMAL_EDGE
+        and adjusted_edge < MIN_EDGE
         and caution_reasons
     ):
         block_reasons.append(
             "blocked: small-sample confidence reduction would put adjusted edge "
-            f"{adjusted_edge:.4f} below normal threshold {MIN_NORMAL_EDGE:.4f}"
+            f"{adjusted_edge:.4f} below normal threshold {MIN_EDGE:.4f}"
         )
 
     if block_reasons:
