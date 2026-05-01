@@ -70,6 +70,13 @@ except ImportError as e:
     SCANNER_OPPORTUNITY_LOGGER_OK = False
 
 try:
+    from logs.execution_funnel_logger import log_execution_funnel
+    EXECUTION_FUNNEL_LOGGER_OK = True
+except ImportError as e:
+    print(f"[WARN] Execution funnel logger not available: {e}")
+    EXECUTION_FUNNEL_LOGGER_OK = False
+
+try:
     from brokers.underlying_price_client import fetch_btc_usd_price
     BTC_PRICE_CLIENT_OK = True
 except ImportError as e:
@@ -1324,6 +1331,18 @@ def background_scan():
                             trace_counts = classify_execution_trace(trace_text, trade)
                             for key, value in trace_counts.items():
                                 funnel[key] += value
+                            if EXECUTION_FUNNEL_LOGGER_OK:
+                                funnel_log_stats = log_execution_funnel(
+                                    opportunity=opp,
+                                    scan_id=f"dashboard_scan_{state['total_scans']}",
+                                    trace_text=trace_text,
+                                    trade=trade,
+                                    trace_counts=trace_counts,
+                                )
+                                state["execution_funnel_log_stats"] = {
+                                    **funnel_log_stats,
+                                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                                }
                     
                     # Update paper stats
                     state["paper_stats"] = paper_trader.get_stats()
