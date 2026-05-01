@@ -39,7 +39,7 @@ ROOT       = Path(__file__).parent.parent
 TRADES_LOG = ROOT / "logs" / "paper_trades.jsonl"
 sys.path.insert(0, str(ROOT))
 
-from config.trading_config import GLOBAL_FORCED_LEARNING_MODE
+from config.trading_config import DATA_COLLECTION_MODE, GLOBAL_FORCED_LEARNING_MODE
 
 
 # ─── HELPERS ────────────────────────────────────────────────────────────────
@@ -207,6 +207,9 @@ def run() -> None:
         forced_close_keys,
         void_keys,
     )
+    clean_data_collection = sum(1 for r in clean_settled if r.get("data_collection_override"))
+    clean_bootstrap = sum(1 for r in clean_settled if r.get("bootstrap_provisional"))
+    clean_normal = max(0, len(clean_settled) - clean_data_collection - clean_bootstrap)
 
     wins   = [r for r in clean_settled if get_pnl(r) > 0]
     losses = [r for r in clean_settled if get_pnl(r) < 0]
@@ -290,6 +293,15 @@ def run() -> None:
     print(
         "  Actual sizing:  "
         + ("forced minimum learning bet" if GLOBAL_FORCED_LEARNING_MODE else "Kelly/risk path")
+    )
+    print(
+        "  Data collection:"
+        + (" ENABLED — Council blocks may be logged as $5 data-collection rows"
+           if DATA_COLLECTION_MODE else " DISABLED")
+    )
+    print(
+        f"  Clean SETTLED classes: normal={clean_normal}  "
+        f"data_collection={clean_data_collection}  bootstrap={clean_bootstrap}"
     )
 
     # ── Active open positions ────────────────────────────────────────────────

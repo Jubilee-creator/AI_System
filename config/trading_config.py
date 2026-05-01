@@ -242,6 +242,11 @@ PAPER_VALIDATION_MAX_BET_SIZE = 10.00  # $ per trade while in validation mode
 # calibration, and normal council-approved performance are proven.
 GLOBAL_FORCED_LEARNING_MODE = True
 
+# Research data-collection mode: when the Council blocks a signal, paper mode
+# can still log a $5 learning trade with data_collection_override=True.
+# These rows are explicitly NOT normal council-approved proof.
+DATA_COLLECTION_MODE = True
+
 # Maximum concurrent open positions per ticker (1 = no duplicate exposure)
 MAX_POSITIONS_PER_TICKER = 1
 
@@ -379,6 +384,7 @@ def get_config_summary() -> Dict[str, Any]:
         "min_confidence": MIN_CONFIDENCE,
         "kelly_fraction": KELLY_FRACTION,
         "global_forced_learning_mode": GLOBAL_FORCED_LEARNING_MODE,
+        "data_collection_mode": DATA_COLLECTION_MODE,
         "kill_switch_active": KILL_SWITCH_ACTIVE,
         "trading_paused": TRADING_PAUSED,
     }

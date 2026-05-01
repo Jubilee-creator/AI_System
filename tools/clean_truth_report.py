@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from brain.strategy_utils import normalize_strategy
 from brain.edge_profile_health import edge_profile_health
-from config.trading_config import GLOBAL_FORCED_LEARNING_MODE
+from config.trading_config import DATA_COLLECTION_MODE, GLOBAL_FORCED_LEARNING_MODE
 from tools.performance_report import (
     build_terminal_key_sets,
     classify_open_records,
@@ -1856,6 +1856,12 @@ def print_sizing_mode_note() -> None:
         print("This system is not scaling based on Kelly while proof verdict is NOT_PROVEN.")
     else:
         print("Kelly sizing: ENABLED. Confirm proof gates and human sign-off before trusting sizes.")
+    print(
+        "Data collection mode: "
+        + ("ENABLED — Council BLOCK rows may be logged as $5 data-collection trades."
+           if DATA_COLLECTION_MODE else "DISABLED.")
+    )
+    print("data_collection_override and bootstrap_provisional rows do NOT count as normal proof.")
 
 
 def main() -> None:

@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dotenv import load_dotenv
 load_dotenv()
 
-from config.trading_config import GLOBAL_FORCED_LEARNING_MODE, MIN_CONFIDENCE
+from config.trading_config import DATA_COLLECTION_MODE, GLOBAL_FORCED_LEARNING_MODE, MIN_CONFIDENCE
 
 try:
     from flask import Flask, jsonify, render_template_string
@@ -407,6 +407,7 @@ def build_proof_checklist(outcome_known_rows: list[dict], time_exit_rows: list[d
         "data_quality": quality,
         "legacy_evaluated_rows": len(legacy_rows),
         "data_collection_count": data_collection_count,
+        "data_collection_mode": DATA_COLLECTION_MODE,
         "bootstrap_provisional_count": bootstrap_provisional_count,
         "normal_trade_count": normal_trade_count,
         "modern_roi": modern_roi,
@@ -705,6 +706,7 @@ def summarize_performance() -> dict:
         "sizing_mode": {
             "global_forced_learning_mode": GLOBAL_FORCED_LEARNING_MODE,
             "kelly_sizing_used": not GLOBAL_FORCED_LEARNING_MODE,
+            "data_collection_mode": DATA_COLLECTION_MODE,
             "message": (
                 "Kelly is calculated/logged for audit only; actual entries are forced to learning size."
                 if GLOBAL_FORCED_LEARNING_MODE

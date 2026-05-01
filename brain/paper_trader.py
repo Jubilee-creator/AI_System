@@ -30,6 +30,7 @@ from config.trading_config import (
     PAPER_VALIDATION_MODE,
     PAPER_VALIDATION_MAX_BET_SIZE,
     GLOBAL_FORCED_LEARNING_MODE,
+    DATA_COLLECTION_MODE,
     MAX_POSITIONS_PER_TICKER,
     MAX_SPREAD,
     MIN_VOLUME,
@@ -44,7 +45,6 @@ from config.trading_config import (
 MIN_LEARNING_BET = 5.00
 MAX_LEARNING_EXPOSURE = 20.00
 MAX_CONCURRENT_OPEN_TRADES = 3
-DATA_COLLECTION_MODE = True
 
 
 def _compute_clv(entry_price: float, exit_price: float) -> float:
@@ -765,6 +765,7 @@ class PaperTrader:
             "adjusted_edge": adjusted_edge,
             "risk_edge": risk_edge,
             "model_probability": original_confidence,
+            "data_collection_mode": DATA_COLLECTION_MODE,
             "data_collection_override": force_data_collection_learning,
             "learning_trade": is_learning_trade,
             "raw_strategy": raw_strategy_text or strategy,
