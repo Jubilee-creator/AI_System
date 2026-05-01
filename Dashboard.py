@@ -53,6 +53,13 @@ except ImportError as e:
     MAX_CONCURRENT_OPEN_TRADES = 0
 
 try:
+    from logs.market_snapshot_logger import log_btc15m_snapshots
+    BTC15M_SNAPSHOT_LOGGER_OK = True
+except ImportError as e:
+    print(f"[WARN] BTC 15M snapshot logger not available: {e}")
+    BTC15M_SNAPSHOT_LOGGER_OK = False
+
+try:
     from tools.performance_report import (
         load_trades,
         get_pnl,
@@ -1075,6 +1082,19 @@ def background_scan():
                 state["last_scan"] = now
                 state["total_scans"] += 1
                 update_market_history(opportunities, now)
+                if BTC15M_SNAPSHOT_LOGGER_OK:
+                    snapshot_stats = log_btc15m_snapshots(
+                        opportunities,
+                        scan_id=f"dashboard_scan_{state['total_scans']}",
+                    )
+                    if snapshot_stats.get("written") or snapshot_stats.get("errors"):
+                        print(
+                            "[BTC15M_SNAPSHOT] "
+                            f"seen={snapshot_stats.get('seen', 0)} "
+                            f"matched={snapshot_stats.get('matched', 0)} "
+                            f"written={snapshot_stats.get('written', 0)} "
+                            f"errors={snapshot_stats.get('errors', 0)}"
+                        )
 
                 # Update alert counts
                 arbs = [o for o in opportunities if o["action"] == "ARB"]
