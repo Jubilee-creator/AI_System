@@ -96,6 +96,10 @@ def _trade_key(rec: dict):
     return (ts, ticker, action, size, ep)
 
 
+def is_side_coverage_record(rec: dict) -> bool:
+    return bool(rec.get("side_coverage_test") is True)
+
+
 def classify_open_records(all_records: List[dict]) -> Tuple[List[dict], List[dict]]:
     """
     Split all status=="OPEN" records into (active, stale).
@@ -163,13 +167,16 @@ def classify_settled_records(
     Split SETTLED rows into (clean, conflicted).
 
     Clean SETTLED rows are the only rows counted in performance metrics.
-    Conflicted SETTLED rows are terminal-state collisions and are reported
-    separately for validation visibility.
+    Side-coverage research rows are explicitly excluded from clean proof and
+    performance metrics even if they settle in a future phase.
     """
     clean, conflicted = [], []
 
     for rec in all_records:
         if rec.get("status") != "SETTLED":
+            continue
+        if is_side_coverage_record(rec):
+            conflicted.append(rec)
             continue
         key = _trade_key(rec)
         if (
@@ -211,6 +218,7 @@ def run() -> None:
     clean_data_collection = sum(1 for r in clean_settled if r.get("data_collection_override"))
     clean_bootstrap = sum(1 for r in clean_settled if r.get("bootstrap_provisional"))
     clean_normal = max(0, len(clean_settled) - clean_data_collection - clean_bootstrap)
+    side_coverage_excluded = sum(1 for r in all_records if is_side_coverage_record(r))
 
     wins   = [r for r in clean_settled if get_pnl(r) > 0]
     losses = [r for r in clean_settled if get_pnl(r) < 0]
@@ -270,7 +278,7 @@ def run() -> None:
     print(f"  Log:            {TRADES_LOG}")
     print(f"  Total records:  {total_lines}")
     print(f"    SETTLED:      {len(clean_settled)}  (clean — counted in stats)")
-    print(f"      conflicted: {len(conflicted_settled)}  (excluded — terminal-state conflict)")
+    print(f"      excluded:   {len(conflicted_settled)}  (terminal conflict or side coverage)")
     print(f"    OPEN (raw):   {raw_open}")
     print(f"      active:     {len(active_opens)}")
     print(f"      stale:      {len(stale_opens)}  (resolved by a later record)")
@@ -285,6 +293,7 @@ def run() -> None:
             f"(positive={forced_pos}, negative={forced_neg}, flat={forced_flat})"
         )
     print(f"    no-status:    {no_status}   (excluded — old format)")
+    print(f"    side coverage:{side_coverage_excluded}   (excluded from normal proof/ROI)")
     print()
     print("── SIZING MODE ─────────────────────────────────────────────")
     print(

@@ -31,6 +31,7 @@ from tools.performance_report import (
     get_clv,
     get_pnl,
     get_size,
+    is_side_coverage_record,
     load_trades,
 )
 
@@ -1546,12 +1547,14 @@ def classify_records(all_records: list[dict]) -> dict[str, list[dict]]:
         if r.get("status") == "FORCED_CLOSE" and not is_time_exit(r)
     ]
     voided = [r for r in all_records if r.get("status") == "VOID_LEGACY_DUPLICATE"]
+    side_coverage = [r for r in all_records if is_side_coverage_record(r)]
 
     return {
         "active_open": active_open,
         "stale_open": stale_open,
         "clean_settled": clean_settled,
         "conflicted_settled": conflicted_settled,
+        "side_coverage": side_coverage,
         "time_exit": time_exits,
         "forced_close": forced_other,
         "voided": voided,
@@ -1588,6 +1591,7 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
     clean_settled = buckets["clean_settled"]
     active_opens  = buckets["active_open"]
     time_exits = buckets["time_exit"]
+    side_coverage = buckets.get("side_coverage", [])
 
     modern_full = [r for r in evaluated if row_quality_group(r) == "MODERN_FULL_METADATA"]
     modern_full_count  = len(modern_full)
@@ -1639,6 +1643,10 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
     if bootstrap_count > 0:
         warnings.append(
             f"{bootstrap_count} evaluated trade(s) are bootstrap_provisional and do NOT count as normal proof"
+        )
+    if side_coverage:
+        warnings.append(
+            f"{len(side_coverage)} side_coverage_test row(s) excluded from normal proof and ROI"
         )
 
     # ── Hard gates (first matching gate wins) ────────────────────────────────

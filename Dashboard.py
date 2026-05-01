@@ -77,6 +77,16 @@ except ImportError as e:
     EXECUTION_FUNNEL_LOGGER_OK = False
 
 try:
+    from brain.side_coverage_queue import (
+        log_shadow_diagnostic,
+        select_shadow_candidate,
+    )
+    SIDE_COVERAGE_QUEUE_OK = True
+except ImportError as e:
+    print(f"[WARN] Side coverage queue not available: {e}")
+    SIDE_COVERAGE_QUEUE_OK = False
+
+try:
     from brokers.underlying_price_client import fetch_btc_usd_price
     BTC_PRICE_CLIENT_OK = True
 except ImportError as e:
@@ -1203,6 +1213,33 @@ def background_scan():
                             f"written={scanner_log_stats.get('written', 0)} "
                             f"errors={scanner_log_stats.get('errors', 0)} "
                             f"actions={scanner_log_stats.get('action_counts', {})}"
+                        )
+                if SIDE_COVERAGE_QUEUE_OK:
+                    open_count_for_shadow = len(paper_trader.open_trades) if paper_trader else None
+                    shadow_row = select_shadow_candidate(
+                        opportunities,
+                        scan_id=f"dashboard_scan_{state['total_scans']}",
+                        run_id=DASHBOARD_RUN_ID,
+                        open_count=open_count_for_shadow,
+                        max_open_trades=MAX_CONCURRENT_OPEN_TRADES,
+                    )
+                    if shadow_row.get("final_reason") != "SIDE_COVERAGE_DISABLED":
+                        side_coverage_stats = log_shadow_diagnostic(shadow_row)
+                    else:
+                        side_coverage_stats = {"written": 0, "errors": 0}
+                    state["side_coverage_shadow_stats"] = {
+                        **side_coverage_stats,
+                        "final_reason": shadow_row.get("final_reason"),
+                        "ticker": shadow_row.get("ticker"),
+                        "last_updated": datetime.now(timezone.utc).isoformat(),
+                    }
+                    if side_coverage_stats.get("written") or side_coverage_stats.get("errors"):
+                        print(
+                            "[SIDE_COVERAGE_SHADOW] "
+                            f"written={side_coverage_stats.get('written', 0)} "
+                            f"errors={side_coverage_stats.get('errors', 0)} "
+                            f"reason={shadow_row.get('final_reason')} "
+                            f"ticker={shadow_row.get('ticker')}"
                         )
                 if BTC15M_SNAPSHOT_LOGGER_OK:
                     btc_price_snapshot = None

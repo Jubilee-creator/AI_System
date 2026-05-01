@@ -252,6 +252,21 @@ MAX_POSITIONS_PER_TICKER = 1
 
 
 # ═══════════════════════════════════════════════════════════════
+# SIDE-BALANCED RESEARCH MODE (SHADOW ONLY)
+# ═══════════════════════════════════════════════════════════════
+
+# Disabled-by-default research instrumentation for natural BET_NO coverage.
+# Phase 5M is shadow-only: it may log what natural BET_NO candidate would have
+# been selected, but it must not execute trades or affect scanner ranking.
+SIDE_BALANCED_RESEARCH_ENABLED = False
+SIDE_BALANCED_RESEARCH_SHADOW_ONLY = True
+SIDE_BALANCED_RESEARCH_EXECUTE = False
+SIDE_BALANCED_RESEARCH_REQUIRE_PAPER_ONLY = True
+SIDE_BALANCED_RESEARCH_MAX_TRADES_PER_DAY = 1
+SIDE_BALANCED_RESEARCH_PROOF_ELIGIBLE = False
+
+
+# ═══════════════════════════════════════════════════════════════
 # EDGE PROFILE TRUST GATES
 # ═══════════════════════════════════════════════════════════════
 
@@ -351,6 +366,21 @@ def validate_config() -> tuple[bool, list[str]]:
     # Kelly fraction should be conservative (< 0.5)
     if KELLY_FRACTION > 0.5:
         errors.append("KELLY_FRACTION > 0.5 is aggressive (recommended: 0.25)")
+
+    if SIDE_BALANCED_RESEARCH_EXECUTE and not SIDE_BALANCED_RESEARCH_ENABLED:
+        errors.append("SIDE_BALANCED_RESEARCH_EXECUTE requires SIDE_BALANCED_RESEARCH_ENABLED")
+    if SIDE_BALANCED_RESEARCH_EXECUTE and SIDE_BALANCED_RESEARCH_SHADOW_ONLY:
+        errors.append("SIDE_BALANCED_RESEARCH_EXECUTE requires SIDE_BALANCED_RESEARCH_SHADOW_ONLY=False")
+    if SIDE_BALANCED_RESEARCH_EXECUTE and SIDE_BALANCED_RESEARCH_PROOF_ELIGIBLE:
+        errors.append("SIDE_BALANCED_RESEARCH_EXECUTE cannot be proof eligible")
+    if SIDE_BALANCED_RESEARCH_EXECUTE and TRADING_MODE != "PAPER":
+        errors.append("SIDE_BALANCED_RESEARCH_EXECUTE is forbidden outside PAPER mode")
+    if SIDE_BALANCED_RESEARCH_EXECUTE and not SIDE_BALANCED_RESEARCH_REQUIRE_PAPER_ONLY:
+        errors.append("SIDE_BALANCED_RESEARCH_EXECUTE must require paper-only mode")
+    if SIDE_BALANCED_RESEARCH_EXECUTE and not GLOBAL_FORCED_LEARNING_MODE:
+        errors.append("SIDE_BALANCED_RESEARCH_EXECUTE cannot enable Kelly execution")
+    if SIDE_BALANCED_RESEARCH_MAX_TRADES_PER_DAY < 0:
+        errors.append("SIDE_BALANCED_RESEARCH_MAX_TRADES_PER_DAY cannot be negative")
     
     # Loss streak trigger must be positive
     if LOSS_STREAK_TRIGGER <= 0:
@@ -385,6 +415,10 @@ def get_config_summary() -> Dict[str, Any]:
         "kelly_fraction": KELLY_FRACTION,
         "global_forced_learning_mode": GLOBAL_FORCED_LEARNING_MODE,
         "data_collection_mode": DATA_COLLECTION_MODE,
+        "side_balanced_research_enabled": SIDE_BALANCED_RESEARCH_ENABLED,
+        "side_balanced_research_shadow_only": SIDE_BALANCED_RESEARCH_SHADOW_ONLY,
+        "side_balanced_research_execute": SIDE_BALANCED_RESEARCH_EXECUTE,
+        "side_balanced_research_proof_eligible": SIDE_BALANCED_RESEARCH_PROOF_ELIGIBLE,
         "kill_switch_active": KILL_SWITCH_ACTIVE,
         "trading_paused": TRADING_PAUSED,
     }
