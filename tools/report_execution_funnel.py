@@ -105,6 +105,112 @@ def group_reason_by_action(rows: List[Dict[str, Any]]) -> Dict[str, Counter]:
     return grouped
 
 
+def scan_join_rows(
+    scanner_rows: List[Dict[str, Any]],
+    funnel_rows: List[Dict[str, Any]],
+    limit: int = 12,
+) -> List[Dict[str, Any]]:
+    scanner_by_scan: Dict[str, Counter] = defaultdict(Counter)
+    funnel_by_scan: Dict[str, Counter] = defaultdict(Counter)
+    ordered_scan_ids: List[str] = []
+
+    for row in scanner_rows:
+        scan_id = str(row.get("scan_id") or "UNKNOWN")
+        if scan_id not in scanner_by_scan:
+            ordered_scan_ids.append(scan_id)
+        scanner_by_scan[scan_id][action(row, "scanner_action")] += 1
+        scanner_by_scan[scan_id]["_total"] += 1
+
+    for row in funnel_rows:
+        scan_id = str(row.get("scan_id") or "UNKNOWN")
+        funnel_by_scan[scan_id][action(row, "scanner_action")] += 1
+        funnel_by_scan[scan_id]["_total"] += 1
+        if row.get("paper_trade_opened"):
+            funnel_by_scan[scan_id]["_opened"] += 1
+        if row.get("final_reason") == "BLOCKED_MAX_OPEN_TRADES":
+            funnel_by_scan[scan_id]["_blocked_max_open"] += 1
+        if row.get("handoff_action_mismatch") is True:
+            funnel_by_scan[scan_id]["_mismatch"] += 1
+
+    rows: List[Dict[str, Any]] = []
+    for scan_id in ordered_scan_ids[-limit:]:
+        scanner_counts = scanner_by_scan.get(scan_id, Counter())
+        funnel_counts = funnel_by_scan.get(scan_id, Counter())
+        note = ""
+        if scanner_counts.get("BET_NO", 0) and not funnel_counts.get("BET_NO", 0):
+            note = "SCANNER_BET_NO_NOT_IN_FUNNEL"
+        elif funnel_counts.get("BET_NO", 0) and not funnel_counts.get("_opened", 0):
+            note = "FUNNEL_BET_NO_NO_OPEN"
+        rows.append({
+            "scan_id": scan_id,
+            "scanner_total": scanner_counts.get("_total", 0),
+            "scanner_yes": scanner_counts.get("BET_YES", 0),
+            "scanner_no": scanner_counts.get("BET_NO", 0),
+            "scanner_pass": scanner_counts.get("PASS", 0),
+            "funnel_total": funnel_counts.get("_total", 0),
+            "funnel_yes": funnel_counts.get("BET_YES", 0),
+            "funnel_no": funnel_counts.get("BET_NO", 0),
+            "opened": funnel_counts.get("_opened", 0),
+            "blocked_max_open": funnel_counts.get("_blocked_max_open", 0),
+            "mismatch": funnel_counts.get("_mismatch", 0),
+            "note": note,
+        })
+    return rows
+
+
+def print_scan_join_audit(scanner_rows: List[Dict[str, Any]], funnel_rows: List[Dict[str, Any]]) -> None:
+    print()
+    print("SCAN_ID JOIN AUDIT")
+    print("------------------")
+    rows = scan_join_rows(scanner_rows, funnel_rows)
+    if not rows:
+        print("(no scan rows)")
+        return
+    print(
+        "scan_id              "
+        "scan_total  scan_Y  scan_N  scan_PASS  "
+        "funnel_total  funnel_Y  funnel_N  opened  max_open  mismatch  note"
+    )
+    for row in rows:
+        print(
+            f"{row['scan_id']:<20} "
+            f"{row['scanner_total']:>10} "
+            f"{row['scanner_yes']:>7} "
+            f"{row['scanner_no']:>7} "
+            f"{row['scanner_pass']:>10} "
+            f"{row['funnel_total']:>13} "
+            f"{row['funnel_yes']:>9} "
+            f"{row['funnel_no']:>9} "
+            f"{row['opened']:>7} "
+            f"{row['blocked_max_open']:>9} "
+            f"{row['mismatch']:>9}  "
+            f"{row['note']}"
+        )
+
+
+def print_bet_no_sample(scanner_rows: List[Dict[str, Any]], limit: int = 10) -> None:
+    print()
+    print("BET_NO SCANNER SAMPLE")
+    print("---------------------")
+    no_rows = [row for row in scanner_rows if action(row, "scanner_action") == "BET_NO"]
+    if not no_rows:
+        print("(none)")
+        return
+    for row in no_rows[-limit:]:
+        reasoning = str(row.get("reasoning") or "")
+        if len(reasoning) > 90:
+            reasoning = reasoning[:87] + "..."
+        print(
+            f"{row.get('scan_id', 'UNKNOWN'):<18} "
+            f"{str(row.get('ticker')):<32} "
+            f"conf={row.get('confidence')} "
+            f"edge={row.get('edge')} "
+            f"yes_mid={row.get('yes_mid')} "
+            f"no_mid={row.get('no_mid')} "
+            f"{reasoning}"
+        )
+
+
 def main() -> None:
     funnel_rows = read_jsonl(FUNNEL_LOG)
     scanner_rows = read_jsonl(SCANNER_LOG)
@@ -137,6 +243,8 @@ def main() -> None:
 
     print_counts("FUNNEL FINAL REASONS", Counter(str(r.get("final_reason") or "UNKNOWN") for r in funnel_rows))
     print_counts("COUNCIL DECISIONS IN FUNNEL", Counter(str(r.get("council_decision") or "UNKNOWN") for r in funnel_rows))
+    print_scan_join_audit(scanner_rows, funnel_rows)
+    print_bet_no_sample(scanner_rows)
 
     print()
     print("FINAL REASON BY SCANNER ACTION")
