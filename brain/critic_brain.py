@@ -17,6 +17,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from brain.strategy_utils import normalize_strategy
+from brain.edge_profile_health import edge_profile_health
 
 DEFAULT_PROFILE_PATH = ROOT / "data" / "edge_profile.json"
 MIN_SAMPLE_SIZE = 5
@@ -163,11 +164,27 @@ def critique_signal(
         }
     """
     profile = load_edge_profile(profile_path)
+    health = edge_profile_health(profile, profile_path)
     if not profile:
         return {
             "decision": "BLOCK",
-            "reason": f"Edge profile not found or empty: {profile_path}",
-            "confidence_adjustment": -1.0,
+            "reason": (
+                "edge_profile_untrusted: "
+                f"{health['reason']}; no normal historical approval"
+            ),
+            "confidence_adjustment": 0.0,
+            "edge_profile_health": health,
+        }
+
+    if not health["edge_profile_trusted"]:
+        return {
+            "decision": "BLOCK",
+            "reason": (
+                "edge_profile_untrusted: "
+                f"{health['reason']}; no normal historical approval"
+            ),
+            "confidence_adjustment": 0.0,
+            "edge_profile_health": health,
         }
 
     confidence = _as_float(signal.get("confidence"))
@@ -253,12 +270,14 @@ def critique_signal(
             "decision": "BLOCK",
             "reason": _format_reason(block_reasons),
             "confidence_adjustment": round(confidence_adjustment, 4),
+            "edge_profile_health": health,
         }
 
     return {
         "decision": "ALLOW",
         "reason": _format_reason(caution_reasons),
         "confidence_adjustment": round(confidence_adjustment, 4),
+        "edge_profile_health": health,
     }
 
 

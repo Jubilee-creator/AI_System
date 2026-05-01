@@ -12,6 +12,7 @@ and active opens.
 from __future__ import annotations
 
 import sys
+import json
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from brain.strategy_utils import normalize_strategy
+from brain.edge_profile_health import edge_profile_health
 from tools.performance_report import (
     build_terminal_key_sets,
     classify_open_records,
@@ -33,6 +35,7 @@ from tools.performance_report import (
 
 
 SAMPLE_WARNING_THRESHOLD = 30
+EDGE_PROFILE_PATH = ROOT / "data" / "edge_profile.json"
 HORIZON_ORDER = [
     "SHORT_INTRADAY_15M",
     "DAILY_CRYPTO",
@@ -1473,6 +1476,11 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
 
     active_open_count   = len(active_opens)
     risk_override_count = sum(1 for r in evaluated if r.get("risk_override_used"))
+    try:
+        profile = json.loads(EDGE_PROFILE_PATH.read_text()) if EDGE_PROFILE_PATH.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        profile = {}
+    edge_health = edge_profile_health(profile, EDGE_PROFILE_PATH)
 
     warnings = []
     if active_open_count > 0:
@@ -1610,6 +1618,7 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
         "modern_profit_factor":       round(m_pf, 4) if m_pf is not None else None,
         "active_open_count":          active_open_count,
         "risk_override_count":        risk_override_count,
+        "edge_profile_health":        edge_health,
     }
 
 
@@ -1651,6 +1660,10 @@ def print_proof_gate_verdict(gate: dict) -> None:
           f"  (need > {_GATE_MIN_PROFIT_FACTOR:.2f} for scale)")
     print(f"  Active unresolved/open trades:    {gate['active_open_count']}")
     print(f"  Risk overrides used (evaluated):  {gate['risk_override_count']}")
+    health = gate.get("edge_profile_health") or {}
+    print(f"  Edge profile trusted:             {health.get('edge_profile_trusted')}")
+    print(f"  Edge profile age hours:           {health.get('edge_profile_age_hours')}")
+    print(f"  Edge profile reason:              {health.get('reason')}")
     print()
     print(f"  Scale allowed:                    {'YES' if gate['scale_allowed'] else 'NO'}")
     print(f"  Real money allowed:               NO  (paper trading only — hard rule)")

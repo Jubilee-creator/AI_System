@@ -32,6 +32,7 @@ OUTPUT_PATH = ROOT / "data" / "edge_profile.json"
 sys.path.insert(0, str(ROOT))
 
 from brain.strategy_utils import normalize_strategy
+from brain.edge_profile_health import edge_profile_health
 
 
 def _num(rec: dict, field: str) -> Optional[float]:
@@ -106,6 +107,20 @@ def _strategy(rec: dict) -> str:
     return normalize_strategy(rec.get("strategy"))
 
 
+def _has_quote_metadata(rec: dict) -> bool:
+    if rec.get("price_yes") is not None or rec.get("price_no") is not None:
+        return True
+    return any(rec.get(k) is not None for k in ("yes_bid", "yes_ask", "no_bid", "no_ask"))
+
+
+def _is_modern_full_metadata(rec: dict) -> bool:
+    return (
+        rec.get("risk_edge") is not None
+        and rec.get("model_probability") is not None
+        and _has_quote_metadata(rec)
+    )
+
+
 def _new_bucket() -> dict[str, Any]:
     return {
         "trades": 0,
@@ -122,6 +137,7 @@ def _new_bucket() -> dict[str, Any]:
 def _add_trade(bucket: dict[str, Any], rec: dict) -> None:
     pnl = get_pnl(rec)
     edge = _num(rec, "edge")
+    risk_edge = _num(rec, "risk_edge")
     confidence = _num(rec, "confidence")
 
     bucket["trades"] += 1
@@ -131,8 +147,9 @@ def _add_trade(bucket: dict[str, Any], rec: dict) -> None:
         bucket["losses"] += 1
     bucket["total_pnl"] += pnl
 
-    if edge is not None:
-        bucket["_edge_sum"] += edge
+    edge_for_profile = risk_edge if risk_edge is not None else edge
+    if edge_for_profile is not None:
+        bucket["_edge_sum"] += edge_for_profile
         bucket["_edge_count"] += 1
     if confidence is not None:
         bucket["_confidence_sum"] += confidence
@@ -186,10 +203,23 @@ def build_profile() -> dict[str, Any]:
     }
 
     overall = _new_bucket()
+    modern_full_metadata = [
+        rec for rec in clean_settled
+        if _is_modern_full_metadata(rec)
+    ]
+    data_collection_override_count = sum(
+        1 for rec in modern_full_metadata
+        if bool(rec.get("data_collection_override"))
+    )
+    normal_council_approved_modern = (
+        len(modern_full_metadata) - data_collection_override_count
+    )
 
     for rec in clean_settled:
         confidence = _num(rec, "confidence")
-        edge = _num(rec, "edge")
+        edge = _num(rec, "risk_edge")
+        if edge is None:
+            edge = _num(rec, "edge")
 
         _add_trade(overall, rec)
         _add_trade(groups["by_ticker"][str(rec.get("ticker") or "UNKNOWN")], rec)
@@ -199,10 +229,13 @@ def build_profile() -> dict[str, Any]:
         _add_trade(groups["by_action_type"][_action_type(rec)], rec)
         _add_trade(groups["by_strategy"][_strategy(rec)], rec)
 
-    return {
+    profile = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_log": str(TRADES_LOG),
         "clean_settled_trades": len(clean_settled),
+        "modern_full_metadata_trades": len(modern_full_metadata),
+        "normal_council_approved_modern_trades": normal_council_approved_modern,
+        "data_collection_override_count": data_collection_override_count,
         "conflicted_settled_trades_excluded": len(conflicted_settled),
         "overall": _finalize_bucket(overall),
         "profiles": {
@@ -210,6 +243,13 @@ def build_profile() -> dict[str, Any]:
             for name, group in groups.items()
         },
     }
+    profile["edge_profile_health"] = edge_profile_health(profile, OUTPUT_PATH)
+    profile["source_warning"] = (
+        "UNTRUSTED: " + profile["edge_profile_health"]["reason"]
+        if not profile["edge_profile_health"]["edge_profile_trusted"]
+        else "trusted"
+    )
+    return profile
 
 
 def main() -> None:
@@ -219,8 +259,25 @@ def main() -> None:
     print(f"[EDGE_PROFILE] wrote {OUTPUT_PATH}")
     print(f"[EDGE_PROFILE] clean_settled_trades={profile['clean_settled_trades']}")
     print(
+        "[EDGE_PROFILE] modern_full_metadata_trades="
+        f"{profile['modern_full_metadata_trades']}"
+    )
+    print(
+        "[EDGE_PROFILE] normal_council_approved_modern_trades="
+        f"{profile['normal_council_approved_modern_trades']}"
+    )
+    print(
+        "[EDGE_PROFILE] data_collection_override_count="
+        f"{profile['data_collection_override_count']}"
+    )
+    print(
         "[EDGE_PROFILE] conflicted_settled_trades_excluded="
         f"{profile['conflicted_settled_trades_excluded']}"
+    )
+    print(
+        "[EDGE_PROFILE] trusted="
+        f"{profile['edge_profile_health']['edge_profile_trusted']} "
+        f"reason={profile['edge_profile_health']['reason']}"
     )
 
 

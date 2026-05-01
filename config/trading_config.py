@@ -236,6 +236,18 @@ MAX_POSITIONS_PER_TICKER = 1
 
 
 # ═══════════════════════════════════════════════════════════════
+# EDGE PROFILE TRUST GATES
+# ═══════════════════════════════════════════════════════════════
+
+# Edge profiles are historical evidence, not proof.  These gates prevent tiny,
+# stale, or data-collection-only profiles from being treated as reliable.
+EDGE_PROFILE_MAX_AGE_HOURS = 48
+EDGE_PROFILE_MIN_CLEAN_SETTLED = 30
+EDGE_PROFILE_MIN_MODERN_FULL = 30
+EDGE_PROFILE_MIN_NORMAL_MODERN = 10
+
+
+# ═══════════════════════════════════════════════════════════════
 # LOGGING & PERSISTENCE
 # ═══════════════════════════════════════════════════════════════
 
@@ -390,4 +402,3 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("✅ Config loaded successfully")
     print("="*60 + "\n")
-

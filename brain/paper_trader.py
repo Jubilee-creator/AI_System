@@ -452,6 +452,7 @@ class PaperTrader:
         # Populated progressively below; all safe to read at record-creation time.
         council_decision = "UNKNOWN"
         council_reason = ""
+        edge_profile_health = {}
         net_confidence_adjustment = 0.0
         original_kelly_size = 0.0
         size_override_used = False
@@ -494,6 +495,12 @@ class PaperTrader:
             })
             council_decision = council_result.get("final_decision", "ALLOW")
             council_reason = council_result.get("reason", "")
+            edge_profile_health = council_result.get("edge_profile_health") or {}
+            if edge_profile_health and not edge_profile_health.get("edge_profile_trusted", False):
+                print(
+                    "[EDGE_PROFILE] UNTRUSTED: "
+                    f"{edge_profile_health.get('reason', 'unknown')}"
+                )
             if council_decision == "BLOCK":
                 if DATA_COLLECTION_MODE:
                     force_data_collection_learning = True
@@ -523,6 +530,7 @@ class PaperTrader:
             print(f"[COUNCIL] ERROR: {exc}")
             council_decision = "ERROR"
             council_reason = str(exc)
+            edge_profile_health = {}
             council_confidence = estimated_prob
             adjusted_edge = edge
         
@@ -704,6 +712,12 @@ class PaperTrader:
             # ── Execution-path audit fields ──────────────────────
             "council_decision": council_decision,
             "council_reason": council_reason,
+            "edge_profile_trusted": edge_profile_health.get("edge_profile_trusted"),
+            "edge_profile_reason": edge_profile_health.get("reason"),
+            "edge_profile_age_hours": edge_profile_health.get("edge_profile_age_hours"),
+            "edge_profile_clean_settled": edge_profile_health.get("clean_settled_trades"),
+            "edge_profile_modern_full": edge_profile_health.get("modern_full_metadata_trades"),
+            "edge_profile_normal_modern": edge_profile_health.get("normal_council_approved_modern_trades"),
             "net_confidence_adjustment": net_confidence_adjustment,
             "original_kelly_size": original_kelly_size,
             "size_override_used": size_override_used,

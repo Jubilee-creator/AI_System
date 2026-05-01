@@ -18,6 +18,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from brain.strategy_utils import normalize_strategy
+from brain.edge_profile_health import edge_profile_health
 
 DEFAULT_PROFILE_PATH = ROOT / "data" / "edge_profile.json"
 MAX_CONFIDENCE_BOOST = 0.10
@@ -161,10 +162,19 @@ def suggest_signal_improvement(
         }
     """
     profile = load_edge_profile(profile_path)
+    health = edge_profile_health(profile, profile_path)
     if not profile:
         return {
             "confidence_boost": 0.0,
-            "reason": f"No edge profile data available: {profile_path}",
+            "reason": f"edge_profile_untrusted: {health['reason']}; no Builder boost",
+            "edge_profile_health": health,
+        }
+
+    if not health["edge_profile_trusted"]:
+        return {
+            "confidence_boost": 0.0,
+            "reason": f"edge_profile_untrusted: {health['reason']}; no Builder boost",
+            "edge_profile_health": health,
         }
 
     confidence = _as_float(signal.get("confidence"))
@@ -200,11 +210,13 @@ def suggest_signal_improvement(
             "confidence_boost": 0.0,
             "reason": "; ".join(ignored_reasons)
             if ignored_reasons else "No historically strong matching pattern found",
+            "edge_profile_health": health,
         }
 
     return {
         "confidence_boost": round(boost, 4),
         "reason": "; ".join(reasons + ignored_reasons),
+        "edge_profile_health": health,
     }
 
 

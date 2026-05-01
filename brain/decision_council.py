@@ -135,6 +135,10 @@ def decide_signal(signal: dict) -> dict:
     return {
         "builder_view": builder_view,
         "critic_view": critic_view,
+        "edge_profile_health": (
+            critic_view.get("edge_profile_health")
+            or builder_view.get("edge_profile_health")
+        ),
         "agreement": bool(agreement),
         "final_decision": final_decision,
         "final_confidence": round(final_confidence, 6),
