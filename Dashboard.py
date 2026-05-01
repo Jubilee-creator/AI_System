@@ -118,6 +118,7 @@ RECENT_RISK_EVENT_LIMIT = 250
 MAX_DISPLAY_OPPORTUNITIES = 300
 LIVE_EVENT_LIMIT = 80
 MARKET_HISTORY_LIMIT = 36
+DASHBOARD_RUN_ID = f"dashboard_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 TRACKED_MARKET_SYMBOLS = ["BTC", "ETH", "DOGE", "SOL"]
 
 app = Flask(__name__)
@@ -1188,6 +1189,7 @@ def background_scan():
                     scanner_log_stats = log_scanner_opportunities(
                         opportunities,
                         scan_id=f"dashboard_scan_{state['total_scans']}",
+                        run_id=DASHBOARD_RUN_ID,
                         source="dashboard",
                     )
                     state["scanner_opportunity_stats"] = {
@@ -1364,6 +1366,7 @@ def background_scan():
                                 funnel_log_stats = log_execution_funnel(
                                     opportunity=opp,
                                     scan_id=f"dashboard_scan_{state['total_scans']}",
+                                    run_id=DASHBOARD_RUN_ID,
                                     trace_text=trace_text,
                                     trade=trade,
                                     trace_counts=trace_counts,

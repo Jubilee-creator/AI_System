@@ -12,7 +12,7 @@ import json
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -22,6 +22,7 @@ from tools.performance_report import load_trades  # noqa: E402
 
 FUNNEL_LOG = ROOT / "logs" / "execution_funnel.jsonl"
 SCANNER_LOG = ROOT / "logs" / "scanner_opportunities.jsonl"
+UNKNOWN_RUN = "UNKNOWN_RUN"
 
 
 def read_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -52,6 +53,23 @@ def pct(part: int, total: int) -> str:
 
 def action(row: Dict[str, Any], key: str) -> str:
     return str(row.get(key) or "UNKNOWN").upper()
+
+
+def row_run_id(row: Dict[str, Any]) -> str:
+    return str(row.get("run_id") or UNKNOWN_RUN)
+
+
+def row_scan_id(row: Dict[str, Any]) -> str:
+    return str(row.get("scan_id") or "UNKNOWN_SCAN")
+
+
+def scan_key(row: Dict[str, Any]) -> Tuple[str, str]:
+    return (row_run_id(row), row_scan_id(row))
+
+
+def format_scan_key(key: Tuple[str, str]) -> str:
+    run_id, scan_id = key
+    return f"{run_id}/{scan_id}"
 
 
 def as_float(value: Any) -> Optional[float]:
@@ -89,10 +107,10 @@ def fmt_num(value: Optional[float], digits: int = 3) -> str:
 def latest_scan(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not rows:
         return []
-    scan_ids = [row.get("scan_id") for row in rows if row.get("scan_id")]
-    if scan_ids:
-        latest = scan_ids[-1]
-        return [row for row in rows if row.get("scan_id") == latest]
+    keyed_rows = [row for row in rows if row.get("scan_id")]
+    if keyed_rows:
+        latest = scan_key(keyed_rows[-1])
+        return [row for row in rows if scan_key(row) == latest]
     ts = rows[-1].get("timestamp_utc")
     return [row for row in rows if row.get("timestamp_utc") == ts]
 
@@ -142,39 +160,41 @@ def scan_join_rows(
     funnel_rows: List[Dict[str, Any]],
     limit: int = 12,
 ) -> List[Dict[str, Any]]:
-    scanner_by_scan: Dict[str, Counter] = defaultdict(Counter)
-    funnel_by_scan: Dict[str, Counter] = defaultdict(Counter)
-    ordered_scan_ids: List[str] = []
+    scanner_by_scan: Dict[Tuple[str, str], Counter] = defaultdict(Counter)
+    funnel_by_scan: Dict[Tuple[str, str], Counter] = defaultdict(Counter)
+    ordered_scan_keys: List[Tuple[str, str]] = []
 
     for row in scanner_rows:
-        scan_id = str(row.get("scan_id") or "UNKNOWN")
-        if scan_id not in scanner_by_scan:
-            ordered_scan_ids.append(scan_id)
-        scanner_by_scan[scan_id][action(row, "scanner_action")] += 1
-        scanner_by_scan[scan_id]["_total"] += 1
+        key = scan_key(row)
+        if key not in scanner_by_scan:
+            ordered_scan_keys.append(key)
+        scanner_by_scan[key][action(row, "scanner_action")] += 1
+        scanner_by_scan[key]["_total"] += 1
 
     for row in funnel_rows:
-        scan_id = str(row.get("scan_id") or "UNKNOWN")
-        funnel_by_scan[scan_id][action(row, "scanner_action")] += 1
-        funnel_by_scan[scan_id]["_total"] += 1
+        key = scan_key(row)
+        funnel_by_scan[key][action(row, "scanner_action")] += 1
+        funnel_by_scan[key]["_total"] += 1
         if row.get("paper_trade_opened"):
-            funnel_by_scan[scan_id]["_opened"] += 1
+            funnel_by_scan[key]["_opened"] += 1
         if row.get("final_reason") == "BLOCKED_MAX_OPEN_TRADES":
-            funnel_by_scan[scan_id]["_blocked_max_open"] += 1
+            funnel_by_scan[key]["_blocked_max_open"] += 1
         if row.get("handoff_action_mismatch") is True:
-            funnel_by_scan[scan_id]["_mismatch"] += 1
+            funnel_by_scan[key]["_mismatch"] += 1
 
     rows: List[Dict[str, Any]] = []
-    for scan_id in ordered_scan_ids[-limit:]:
-        scanner_counts = scanner_by_scan.get(scan_id, Counter())
-        funnel_counts = funnel_by_scan.get(scan_id, Counter())
+    for key in ordered_scan_keys[-limit:]:
+        scanner_counts = scanner_by_scan.get(key, Counter())
+        funnel_counts = funnel_by_scan.get(key, Counter())
         note = ""
         if scanner_counts.get("BET_NO", 0) and not funnel_counts.get("BET_NO", 0):
             note = "SCANNER_BET_NO_NOT_IN_FUNNEL"
         elif funnel_counts.get("BET_NO", 0) and not funnel_counts.get("_opened", 0):
             note = "FUNNEL_BET_NO_NO_OPEN"
         rows.append({
-            "scan_id": scan_id,
+            "run_id": key[0],
+            "scan_id": key[1],
+            "scan_key": format_scan_key(key),
             "scanner_total": scanner_counts.get("_total", 0),
             "scanner_yes": scanner_counts.get("BET_YES", 0),
             "scanner_no": scanner_counts.get("BET_NO", 0),
@@ -192,19 +212,20 @@ def scan_join_rows(
 
 def print_scan_join_audit(scanner_rows: List[Dict[str, Any]], funnel_rows: List[Dict[str, Any]]) -> None:
     print()
-    print("SCAN_ID JOIN AUDIT")
-    print("------------------")
+    print("RUN / SCAN JOIN AUDIT")
+    print("---------------------")
     rows = scan_join_rows(scanner_rows, funnel_rows)
     if not rows:
         print("(no scan rows)")
         return
     print(
-        "scan_id              "
+        "run_id                  scan_id              "
         "scan_total  scan_Y  scan_N  scan_PASS  "
         "funnel_total  funnel_Y  funnel_N  opened  max_open  mismatch  note"
     )
     for row in rows:
         print(
+            f"{row['run_id']:<23} "
             f"{row['scan_id']:<20} "
             f"{row['scanner_total']:>10} "
             f"{row['scanner_yes']:>7} "
@@ -225,23 +246,22 @@ def rank_cap_rows(
     funnel_rows: List[Dict[str, Any]],
     limit: int = 20,
 ) -> List[Dict[str, Any]]:
-    scanner_by_scan: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    funnel_by_scan: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    ordered_scan_ids: List[str] = []
+    scanner_by_scan: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    funnel_by_scan: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    ordered_scan_keys: List[Tuple[str, str]] = []
 
     for row in scanner_rows:
-        scan_id = str(row.get("scan_id") or "UNKNOWN")
-        if scan_id not in scanner_by_scan:
-            ordered_scan_ids.append(scan_id)
-        scanner_by_scan[scan_id].append(row)
+        key = scan_key(row)
+        if key not in scanner_by_scan:
+            ordered_scan_keys.append(key)
+        scanner_by_scan[key].append(row)
 
     for row in funnel_rows:
-        scan_id = str(row.get("scan_id") or "UNKNOWN")
-        funnel_by_scan[scan_id].append(row)
+        funnel_by_scan[scan_key(row)].append(row)
 
     rows: List[Dict[str, Any]] = []
-    for scan_id in ordered_scan_ids:
-        scan_rows = scanner_by_scan[scan_id]
+    for key in ordered_scan_keys:
+        scan_rows = scanner_by_scan[key]
         non_pass = [row for row in scan_rows if action(row, "scanner_action") != "PASS"]
         if not non_pass:
             continue
@@ -273,7 +293,7 @@ def rank_cap_rows(
         if first_no_rank is None:
             continue
 
-        scan_funnel = funnel_by_scan.get(scan_id, [])
+        scan_funnel = funnel_by_scan.get(key, [])
         first_funnel_no_index = None
         for idx, row in enumerate(scan_funnel):
             if action(row, "scanner_action") == "BET_NO":
@@ -309,7 +329,9 @@ def rank_cap_rows(
         )
 
         rows.append({
-            "scan_id": scan_id,
+            "run_id": key[0],
+            "scan_id": key[1],
+            "scan_key": format_scan_key(key),
             "first_yes_rank": first_yes_rank,
             "first_no_rank": first_no_rank,
             "yes_before_first_no": yes_before_first_no,
@@ -338,12 +360,13 @@ def print_rank_cap_audit(scanner_rows: List[Dict[str, Any]], funnel_rows: List[D
         return
 
     print(
-        "scan_id              "
+        "run_id                  scan_id              "
         "first_Y  first_N  Y_before_N  opened_before_N  max_blocks_to_N  "
         "avg_rank_Y  avg_rank_N  avg_conf_Y  avg_conf_N  avg_edge_Y  avg_edge_N  likely_after_slots"
     )
     for row in rows:
         print(
+            f"{row['run_id']:<23} "
             f"{row['scan_id']:<20} "
             f"{str(row['first_yes_rank'] or '--'):>7} "
             f"{str(row['first_no_rank'] or '--'):>8} "
@@ -366,9 +389,9 @@ def print_rank_cap_audit(scanner_rows: List[Dict[str, Any]], funnel_rows: List[D
     all_no_edge: List[Any] = []
     all_yes_edge: List[Any] = []
 
-    scanner_by_scan: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    scanner_by_scan: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
     for row in scanner_rows:
-        scanner_by_scan[str(row.get("scan_id") or "UNKNOWN")].append(row)
+        scanner_by_scan[scan_key(row)].append(row)
     for scan_rows in scanner_by_scan.values():
         non_pass = [row for row in scan_rows if action(row, "scanner_action") != "PASS"]
         for rank, row in enumerate(non_pass, start=1):
@@ -395,7 +418,9 @@ def print_rank_cap_audit(scanner_rows: List[Dict[str, Any]], funnel_rows: List[D
         f"BET_NO conf={fmt_num(avg(all_no_conf), 3)} edge={fmt_num(avg(all_no_edge), 4)}"
     )
     print(f"recent BET_NO scans likely after slots filled: {likely_count}/{len(rows)}")
-    print("Historical scanner ranks are reconstructed from JSONL row order within each scan_id.")
+    print("Scanner ranks are reconstructed within run_id + scan_id groups.")
+    if any(row_run_id(row) == UNKNOWN_RUN for row in scanner_rows + funnel_rows):
+        print("Rows without run_id are labeled UNKNOWN_RUN; old restart boundaries cannot be proven.")
 
 
 def print_bet_no_sample(scanner_rows: List[Dict[str, Any]], limit: int = 10) -> None:
@@ -411,7 +436,8 @@ def print_bet_no_sample(scanner_rows: List[Dict[str, Any]], limit: int = 10) -> 
         if len(reasoning) > 90:
             reasoning = reasoning[:87] + "..."
         print(
-            f"{row.get('scan_id', 'UNKNOWN'):<18} "
+            f"{row_run_id(row):<23} "
+            f"{row_scan_id(row):<18} "
             f"{str(row.get('ticker')):<32} "
             f"conf={row.get('confidence')} "
             f"edge={row.get('edge')} "
@@ -441,7 +467,10 @@ def main() -> None:
     if funnel_rows:
         print(f"first row timestamp: {funnel_rows[0].get('timestamp_utc')}")
         print(f"latest row timestamp: {funnel_rows[-1].get('timestamp_utc')}")
+        print(f"latest run_id: {row_run_id(funnel_rows[-1])}")
         print(f"latest scan_id: {funnel_rows[-1].get('scan_id')}")
+        if any(row_run_id(row) == UNKNOWN_RUN for row in funnel_rows + scanner_rows):
+            print("legacy rows without run_id: present (reported as UNKNOWN_RUN)")
     else:
         print("No funnel rows yet. Restart/run Dashboard for future non-PASS opportunities.")
 

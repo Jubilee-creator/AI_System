@@ -78,6 +78,7 @@ def _council_decision(trace_text: str, trade: Optional[Dict[str, Any]]) -> Optio
 def log_execution_funnel(
     opportunity: Dict[str, Any],
     scan_id: Optional[str],
+    run_id: Optional[str],
     trace_text: str,
     trade: Optional[Dict[str, Any]],
     trace_counts: Optional[Dict[str, Any]] = None,
@@ -99,6 +100,7 @@ def log_execution_funnel(
 
     row = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id or "UNKNOWN_RUN",
         "scan_id": scan_id,
         "ticker": opportunity.get("ticker"),
         "opportunity_rank": rank_context.get("opportunity_rank"),

@@ -21,6 +21,7 @@ from tools.performance_report import load_trades  # noqa: E402
 
 
 SCANNER_LOG = ROOT / "logs" / "scanner_opportunities.jsonl"
+UNKNOWN_RUN = "UNKNOWN_RUN"
 SOURCE_FILES = {
     "market_scanner": ROOT / "brain" / "market_scanner.py",
     "decision_engine": ROOT / "engine" / "decision_engine.py",
@@ -66,6 +67,14 @@ def action_value(row: Dict[str, Any], field: str = "scanner_action") -> str:
     return str(row.get(field) or row.get("action") or "UNKNOWN").upper()
 
 
+def row_run_id(row: Dict[str, Any]) -> str:
+    return str(row.get("run_id") or UNKNOWN_RUN)
+
+
+def row_scan_id(row: Dict[str, Any]) -> str:
+    return str(row.get("scan_id") or "UNKNOWN_SCAN")
+
+
 def counter_by(rows: List[Dict[str, Any]], field: str) -> Counter:
     counts: Counter = Counter()
     for row in rows:
@@ -76,10 +85,13 @@ def counter_by(rows: List[Dict[str, Any]], field: str) -> Counter:
 def latest_scan_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not rows:
         return []
-    scan_ids = [row.get("scan_id") for row in rows if row.get("scan_id")]
-    if scan_ids:
-        latest_scan_id = scan_ids[-1]
-        return [row for row in rows if row.get("scan_id") == latest_scan_id]
+    keyed_rows = [row for row in rows if row.get("scan_id")]
+    if keyed_rows:
+        latest_key = (row_run_id(keyed_rows[-1]), row_scan_id(keyed_rows[-1]))
+        return [
+            row for row in rows
+            if (row_run_id(row), row_scan_id(row)) == latest_key
+        ]
     latest_ts = rows[-1].get("timestamp_utc")
     return [row for row in rows if row.get("timestamp_utc") == latest_ts]
 
@@ -227,7 +239,10 @@ def main() -> None:
     if scanner_rows:
         print(f"first row timestamp: {scanner_rows[0].get('timestamp_utc')}")
         print(f"latest row timestamp: {scanner_rows[-1].get('timestamp_utc')}")
+        print(f"latest run_id: {row_run_id(scanner_rows[-1])}")
         print(f"latest scan_id: {scanner_rows[-1].get('scan_id')}")
+        if any(row_run_id(row) == UNKNOWN_RUN for row in scanner_rows):
+            print("legacy rows without run_id: present (reported as UNKNOWN_RUN)")
     else:
         print("current scanner-side distribution cannot be proven yet from historical files")
 

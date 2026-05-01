@@ -53,6 +53,7 @@ def _row_from_opportunity(
     opportunity: Dict[str, Any],
     timestamp_utc: str,
     scan_id: Optional[str],
+    run_id: Optional[str],
     source: str,
 ) -> Dict[str, Any]:
     action = str(opportunity.get("action") or "UNKNOWN").upper()
@@ -64,6 +65,7 @@ def _row_from_opportunity(
     return {
         "timestamp_utc": timestamp_utc,
         "scanner_timestamp": opportunity.get("timestamp"),
+        "run_id": run_id or "UNKNOWN_RUN",
         "scan_id": scan_id,
         "source": source,
         "ticker": opportunity.get("ticker"),
@@ -96,6 +98,7 @@ def _row_from_opportunity(
 def log_scanner_opportunities(
     opportunities: Iterable[Dict[str, Any]],
     scan_id: Optional[str] = None,
+    run_id: Optional[str] = None,
     source: str = "unknown",
 ) -> Dict[str, Any]:
     """
@@ -120,6 +123,7 @@ def log_scanner_opportunities(
                         opportunity=opportunity,
                         timestamp_utc=timestamp_utc,
                         scan_id=scan_id,
+                        run_id=run_id,
                         source=source,
                     )
                     action_counts[row.get("scanner_action") or "UNKNOWN"] += 1
