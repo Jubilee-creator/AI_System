@@ -491,6 +491,9 @@ def build_market_visuals(active_trades: list[dict]) -> dict:
             "sparkline": [point["mid"] for point in series[-18:]],
             "action": opp.get("action"),
             "volume": opp.get("volume"),
+            "spread": _quote_spread(opp),
+            "last_update": series[-1]["timestamp"] if series else None,
+            "history_points": len(series),
         })
 
     selected_trade = active_trades[0] if active_trades else None
@@ -515,6 +518,7 @@ def build_market_visuals(active_trades: list[dict]) -> dict:
             "close_time": (selected_trade or {}).get("close_time") or (selected_quote or {}).get("close_time"),
             "result_time": (selected_trade or {}).get("result_time") or (selected_quote or {}).get("result_time"),
             "history": [point["mid"] for point in selected_history[-36:]],
+            "history_points": len(selected_history),
         }
 
     quote_pressure = []
@@ -688,6 +692,7 @@ def summarize_performance() -> dict:
         "clv_by_strategy": clv_strategy_rows,
         "proof_checklist": build_proof_checklist(evaluated_rows),
         "market_visuals": build_market_visuals(active_trade_cards),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -896,6 +901,22 @@ def build_live_events(limit: int = LIVE_EVENT_LIMIT) -> list:
                 f"Risk manager blocked {funnel.get('risk_blocked')} signal(s) in latest scan",
                 funnel.get("last_updated") or state.get("last_scan"),
             ))
+
+    snapshot_stats = state.get("btc15m_snapshot_stats") or {}
+    if snapshot_stats:
+        btc_ok = snapshot_stats.get("btc_price_present")
+        events.append(_live_event(
+            "snapshot",
+            "SUCCESS" if btc_ok else "WARN",
+            (
+                f"BTC15M snapshots seen={snapshot_stats.get('seen', 0)} "
+                f"matched={snapshot_stats.get('matched', 0)} "
+                f"written={snapshot_stats.get('written', 0)} "
+                f"btc_sync={'active' if btc_ok else 'missing'} "
+                f"latency={snapshot_stats.get('btc_price_latency_ms', 'n/a')}ms"
+            ),
+            snapshot_stats.get("last_updated"),
+        ))
 
     for event in read_recent_risk_events(60):
         events.append(_live_event(
@@ -1108,6 +1129,13 @@ def background_scan():
                         scan_id=f"dashboard_scan_{state['total_scans']}",
                         btc_price_snapshot=btc_price_snapshot,
                     )
+                    state["btc15m_snapshot_stats"] = {
+                        **snapshot_stats,
+                        "btc_price_present": bool((btc_price_snapshot or {}).get("price")),
+                        "btc_price_latency_ms": (btc_price_snapshot or {}).get("fetch_latency_ms"),
+                        "btc_price_error": (btc_price_snapshot or {}).get("error"),
+                        "last_updated": datetime.now(timezone.utc).isoformat(),
+                    }
                     if snapshot_stats.get("written") or snapshot_stats.get("errors"):
                         print(
                             "[BTC15M_SNAPSHOT] "
@@ -1507,6 +1535,10 @@ body::after {
   border-bottom: 1px solid rgba(13,40,13,0.45);
   font-size: 10px;
   line-height: 1.45;
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  gap: 7px;
+  align-items: start;
 }
 .event-row.info { border-left: 2px solid var(--green-dim); }
 .event-row.success { border-left: 2px solid var(--green2); background: rgba(0,255,65,0.025); }
@@ -1514,19 +1546,21 @@ body::after {
 .event-row.error { border-left: 2px solid var(--red); background: rgba(255,23,68,0.04); }
 .event-top {
   display: flex;
+  flex-direction: column;
   justify-content: space-between;
-  gap: 8px;
+  gap: 3px;
   color: var(--muted);
   font-size: 8px;
   letter-spacing: 1px;
   text-transform: uppercase;
 }
 .event-source { color: var(--cyan); }
+.event-time { color: var(--green-dim); }
 .event-level.info { color: var(--muted); }
 .event-level.success { color: var(--green2); }
 .event-level.warn { color: var(--yellow); }
 .event-level.error { color: var(--red); }
-.event-msg { color: var(--text); margin-top: 2px; }
+.event-msg { color: var(--text); }
 
 /* ── ALERT ROWS ── */
 .alert-row {
@@ -1558,6 +1592,16 @@ body::after {
   padding: 10px;
   background: var(--panel);
   text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.stat-cell::after {
+  content: '';
+  position: absolute;
+  inset: auto 10px 0 10px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(0,255,65,0.45), transparent);
+  opacity: 0.45;
 }
 
 .stat-val-big {
@@ -1579,6 +1623,27 @@ body::after {
   text-transform: uppercase;
   margin-top: 3px;
 }
+.metric-flash {
+  animation: metricFlash 0.7s ease-out;
+}
+@keyframes metricFlash {
+  0%   { background: rgba(0,255,65,0.16); box-shadow: inset 0 0 18px rgba(0,255,65,0.18); }
+  100% { background: var(--panel); box-shadow: none; }
+}
+.metric-section-label {
+  padding: 7px 10px;
+  font-size: 8px;
+  color: var(--cyan);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid rgba(13,40,13,0.6);
+  background: rgba(0,229,255,0.025);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.metric-section-label span:last-child { color: var(--muted); text-align: right; }
 
 .verdict-box {
   padding: 12px 10px;
@@ -1729,11 +1794,30 @@ body::after {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1px;
   background: var(--border);
+  min-height: 106px;
 }
 .market-tile {
   background: var(--panel);
-  padding: 7px 8px;
+  padding: 9px 9px;
   min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+.market-tile.live-fresh::before {
+  content: '';
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--green2);
+  box-shadow: 0 0 10px var(--green2);
+}
+.market-tile.changed { animation: tilePulse 0.75s ease-out; }
+@keyframes tilePulse {
+  0% { box-shadow: inset 0 0 22px rgba(0,229,255,0.22); }
+  100% { box-shadow: inset 0 0 0 rgba(0,229,255,0); }
 }
 .market-tile-top {
   display: flex;
@@ -1742,11 +1826,24 @@ body::after {
   align-items: center;
 }
 .market-symbol { color: var(--cyan); font-weight: 700; font-size: 10px; }
-.market-price { color: var(--green2); font-size: 10px; }
+.market-price {
+  color: var(--green2);
+  font-size: 14px;
+  font-family: 'Orbitron', monospace;
+  text-shadow: 0 0 10px rgba(0,255,65,0.4);
+}
 .market-change.good { color: var(--green2); }
 .market-change.bad { color: var(--red); }
+.market-meta-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 8px;
+  margin-top: 4px;
+}
 .sparkline {
-  height: 26px;
+  height: 34px;
   display: flex;
   align-items: end;
   gap: 2px;
@@ -1760,12 +1857,15 @@ body::after {
   box-shadow: 0 0 4px rgba(0,255,65,0.18);
 }
 .line-chart {
-  height: 88px;
+  height: 132px;
   display: flex;
   align-items: end;
   gap: 3px;
-  padding: 8px 0 4px;
+  padding: 10px 0 5px;
   border-bottom: 1px solid rgba(13,40,13,0.55);
+  background:
+    linear-gradient(180deg, rgba(0,255,65,0.035), transparent),
+    repeating-linear-gradient(0deg, transparent, transparent 21px, rgba(13,40,13,0.65) 22px);
 }
 .chartbar {
   flex: 1;
@@ -1779,6 +1879,40 @@ body::after {
   font-size: 8px;
   letter-spacing: 1px;
   margin-top: 4px;
+}
+.selected-market-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: rgba(13,40,13,0.65);
+  margin-bottom: 8px;
+}
+.selected-metric {
+  background: var(--panel);
+  padding: 7px 8px;
+}
+.selected-metric-label {
+  color: var(--muted);
+  font-size: 8px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.selected-metric-value {
+  color: var(--green2);
+  font-family: 'Orbitron', monospace;
+  font-size: 13px;
+  margin-top: 3px;
+}
+.time-progress-wrap {
+  height: 6px;
+  background: var(--dim);
+  margin: 7px 0 3px;
+  overflow: hidden;
+}
+.time-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--green-dim), var(--yellow));
+  box-shadow: 0 0 8px rgba(255,214,0,0.28);
 }
 .pressure-bar-wrap {
   height: 5px;
@@ -1909,37 +2043,42 @@ body::after {
     </div>
     <div class="pb" style="padding:0;min-height:0">
 
-      <!-- Stats Grid -->
+      <div class="metric-section-label">
+        <span>Settled Truth Metrics</span>
+        <span id="settled-metrics-updated">last report --</span>
+      </div>
+
+      <!-- Settled Truth Stats Grid -->
       <div class="stat-grid">
-        <div class="stat-cell">
+        <div class="stat-cell" data-watch="p-trades">
           <div class="stat-val-big" id="p-trades">0</div>
           <div class="stat-label-small">Total Records</div>
         </div>
-        <div class="stat-cell">
+        <div class="stat-cell" data-watch="p-settled">
           <div class="stat-val-big" id="p-settled">0</div>
           <div class="stat-label-small">Clean Settled</div>
         </div>
-        <div class="stat-cell">
+        <div class="stat-cell" data-watch="p-winrate">
           <div class="stat-val-big" id="p-winrate">--</div>
           <div class="stat-label-small">Win Rate</div>
         </div>
-        <div class="stat-cell">
+        <div class="stat-cell" data-watch="p-pnl">
           <div class="stat-val-big" id="p-pnl">$0</div>
           <div class="stat-label-small">Total P&L</div>
         </div>
-        <div class="stat-cell">
+        <div class="stat-cell" data-watch="p-edge">
           <div class="stat-val-big" id="p-edge">--</div>
           <div class="stat-label-small">Avg Edge</div>
         </div>
-        <div class="stat-cell">
+        <div class="stat-cell" data-watch="p-ev">
           <div class="stat-val-big" id="p-ev">--</div>
           <div class="stat-label-small">ROI</div>
         </div>
-        <div class="stat-cell">
+        <div class="stat-cell" data-watch="p-clv">
           <div class="stat-val-big" id="p-clv">--</div>
           <div class="stat-label-small">Avg CLV</div>
         </div>
-        <div class="stat-cell">
+        <div class="stat-cell" data-watch="p-sharpe">
           <div class="stat-val-big" id="p-sharpe">--</div>
           <div class="stat-label-small">Sharpe</div>
         </div>
@@ -1954,11 +2093,12 @@ body::after {
       </div>
 
       <div class="mini-section">
-        <div class="mini-title">Live Mark-to-Market P&amp;L</div>
+        <div class="mini-title">Live / Open Metrics</div>
         <div class="mini-row"><span class="mini-key">Realized P&amp;L</span><span id="live-realized-pnl" class="mini-val">--</span></div>
         <div class="mini-row"><span class="mini-key">Unrealized P&amp;L</span><span id="live-unrealized-pnl" class="mini-val">--</span></div>
         <div class="mini-row"><span class="mini-key">Live Total P&amp;L</span><span id="live-total-pnl" class="mini-val">--</span></div>
         <div class="mini-row"><span class="mini-key">Marked / Missing Quotes</span><span id="live-mark-count" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Live refreshed</span><span id="live-metrics-updated" class="mini-val">--</span></div>
       </div>
 
       <div class="mini-section">
@@ -2104,6 +2244,25 @@ body::after {
 <script>
 let scanInterval = 30; // matches server
 let progInterval;
+const prevMetricValues = {};
+const prevMarketValues = {};
+
+function setTextTracked(id, value) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const next = String(value);
+  const prev = prevMetricValues[id];
+  if (prev !== undefined && prev !== next) {
+    const cell = el.closest('[data-watch]') || el.parentElement;
+    if (cell) {
+      cell.classList.remove('metric-flash');
+      void cell.offsetWidth;
+      cell.classList.add('metric-flash');
+    }
+  }
+  prevMetricValues[id] = next;
+  el.textContent = next;
+}
 
 function startProgressBar() {
   clearInterval(progInterval);
@@ -2227,7 +2386,8 @@ function renderLiveEvents(events) {
     const message = escapeHtml(ev.message || '');
     return `<div class="event-row ${safeLevel}">
       <div class="event-top">
-        <span><span class="event-source">${source}</span> ${timestamp}</span>
+        <span class="event-source">${source}</span>
+        <span class="event-time">${timestamp}</span>
         <span class="event-level ${safeLevel}">${escapeHtml(ev.level || 'INFO')}</span>
       </div>
       <div class="event-msg">${message}</div>
@@ -2254,6 +2414,18 @@ function fmtAge(ts) {
   const minutes = Math.floor(seconds / 60);
   if (minutes < 90) return minutes + 'm';
   return Math.floor(minutes / 60) + 'h ' + (minutes % 60) + 'm';
+}
+
+function fmtFreshness(ts) {
+  if (!ts) return 'freshness --';
+  const d = new Date(ts);
+  if (!Number.isNaN(d.getTime())) return 'updated ' + fmtAge(ts) + ' ago';
+  return 'scan ' + String(ts).slice(0, 8);
+}
+
+function trendArrow(v) {
+  if (v == null || Number.isNaN(Number(v)) || Number(v) === 0) return '→';
+  return Number(v) > 0 ? '↗' : '↘';
 }
 
 function fmtCountdown(ts) {
@@ -2291,15 +2463,23 @@ function renderMarketVisuals(visuals) {
     stripEl.innerHTML = strip.length ? strip.map(m => {
       const change = m.change;
       const changeCls = change > 0 ? 'good' : change < 0 ? 'bad' : '';
-      const changeText = change == null ? '--' : (change > 0 ? '+' : '') + Number(change).toFixed(4);
-      return `<div class="market-tile" title="${escapeHtml(m.ticker || '')}">
+      const changeText = change == null ? '--' : `${trendArrow(change)} ${(change > 0 ? '+' : '')}${Number(change).toFixed(4)}`;
+      const key = m.symbol || m.ticker || 'UNKNOWN';
+      const priceText = fmtNum(m.market_mid);
+      const changed = prevMarketValues[key] !== undefined && prevMarketValues[key] !== priceText;
+      prevMarketValues[key] = priceText;
+      return `<div class="market-tile live-fresh ${changed ? 'changed' : ''}" title="${escapeHtml(m.ticker || '')}">
         <div class="market-tile-top">
           <span class="market-symbol">${escapeHtml(m.symbol || '--')}</span>
-          <span class="market-price">${fmtNum(m.market_mid)}</span>
+          <span class="market-price">${priceText}</span>
         </div>
         <div class="market-tile-top" style="margin-top:3px">
           <span class="mini-key">scanner: ${escapeHtml(m.action || '--')}</span>
           <span class="market-change ${changeCls}">${changeText}</span>
+        </div>
+        <div class="market-meta-line">
+          <span>spread ${fmtNum(m.spread)}</span>
+          <span>${fmtFreshness(m.last_update)}</span>
         </div>
         <div class="sparkline">${renderSparkline(m.sparkline || [])}</div>
       </div>`;
@@ -2315,15 +2495,29 @@ function renderMarketVisuals(visuals) {
       selectedEl.innerHTML = '<div class="empty">No selected market yet.</div>';
     } else {
       const noSelectedQuote = selected.market_mid == null && selected.yes_bid == null && selected.yes_ask == null;
+      const historyPoints = selected.history_points || (selected.history || []).length;
+      const closeLabel = fmtCountdown(selected.close_time);
+      const progressWidth = (() => {
+        const d = new Date(selected.close_time);
+        if (Number.isNaN(d.getTime())) return 0;
+        const seconds = Math.max(0, Math.floor((d.getTime() - Date.now()) / 1000));
+        return Math.max(0, Math.min(100, (300 - Math.min(300, seconds)) / 300 * 100));
+      })();
       selectedEl.innerHTML = `
-        <div class="mini-row"><span class="mini-key">Ticker / Side</span><span class="mini-val">${escapeHtml(selected.ticker || '--')} ${escapeHtml(selected.action || '')}</span></div>
-        <div class="mini-row"><span class="mini-key">Entry / Mid</span><span class="mini-val">${fmtNum(selected.entry_price)} / ${fmtNum(selected.market_mid)}</span></div>
+        <div class="selected-market-grid">
+          <div class="selected-metric"><div class="selected-metric-label">Ticker / Side</div><div class="selected-metric-value">${escapeHtml(selected.ticker || '--')} ${escapeHtml(selected.action || '')}</div></div>
+          <div class="selected-metric"><div class="selected-metric-label">Entry / Current Mid</div><div class="selected-metric-value">${fmtNum(selected.entry_price)} / ${fmtNum(selected.market_mid)}</div></div>
+          <div class="selected-metric"><div class="selected-metric-label">Spread</div><div class="selected-metric-value">${fmtNum(selected.spread)}</div></div>
+          <div class="selected-metric"><div class="selected-metric-label">History Points</div><div class="selected-metric-value">${historyPoints}</div></div>
+        </div>
         ${noSelectedQuote
           ? '<div class="mini-row"><span class="mini-key" style="color:var(--yellow,#f5c518);font-weight:700">QUOTE UNAVAILABLE</span><span class="mini-val" style="color:var(--yellow,#f5c518)">market not in scanner</span></div>'
           : `<div class="mini-row"><span class="mini-key">YES bid/ask</span><span class="mini-val">${fmtNum(selected.yes_bid)} / ${fmtNum(selected.yes_ask)}</span></div>
         <div class="mini-row"><span class="mini-key">NO bid/ask</span><span class="mini-val">${fmtNum(selected.no_bid)} / ${fmtNum(selected.no_ask)}</span></div>
         <div class="mini-row"><span class="mini-key">Spread</span><span class="mini-val">${fmtNum(selected.spread)}</span></div>`
         }
+        <div class="mini-row"><span class="mini-key">Close countdown</span><span class="mini-val">${closeLabel}</span></div>
+        <div class="time-progress-wrap"><div class="time-progress-bar" style="width:${progressWidth}%"></div></div>
         <div class="line-chart">${renderSparkline(selected.history || [], 'chartbar')}</div>
         <div class="entry-line-note">entry=${fmtNum(selected.entry_price)} | close=${fmtCountdown(selected.close_time)} | result=${fmtCountdown(selected.result_time)}</div>
       `;
@@ -2439,19 +2633,21 @@ function renderProofChecklist(proof) {
 
 function renderPaperStats(stats) {
   if (!stats || Object.keys(stats).length === 0) {
-    document.getElementById('p-trades').textContent = '0';
-    document.getElementById('p-settled').textContent = '0';
-    document.getElementById('p-winrate').textContent = '--';
-    document.getElementById('p-pnl').textContent = '$0';
-    document.getElementById('p-edge').textContent = '--';
-    document.getElementById('p-ev').textContent = '--';
-    document.getElementById('p-clv').textContent = '--';
-    document.getElementById('p-sharpe').textContent = '--';
+    setTextTracked('p-trades', '0');
+    setTextTracked('p-settled', '0');
+    setTextTracked('p-winrate', '--');
+    setTextTracked('p-pnl', '$0');
+    setTextTracked('p-edge', '--');
+    setTextTracked('p-ev', '--');
+    setTextTracked('p-clv', '--');
+    setTextTracked('p-sharpe', '--');
     document.getElementById('paper-progress').textContent = '0 / 100 trades';
     document.getElementById('live-realized-pnl').textContent = '--';
     document.getElementById('live-unrealized-pnl').textContent = '--';
     document.getElementById('live-total-pnl').textContent = '--';
     document.getElementById('live-mark-count').textContent = '--';
+    document.getElementById('settled-metrics-updated').textContent = 'last report --';
+    document.getElementById('live-metrics-updated').textContent = '--';
     renderProofChecklist({});
     renderMarketVisuals({});
     return;
@@ -2468,19 +2664,20 @@ function renderPaperStats(stats) {
   const clv = clean.avg_clv;
   const sharpe = stats.sharpe || 0;
 
-  document.getElementById('p-trades').textContent = total;
-  document.getElementById('p-settled').textContent = settled;
-  document.getElementById('p-winrate').textContent = settled > 0 ? (winRate * 100).toFixed(1) + '%' : '--';
+  setTextTracked('p-trades', total);
+  setTextTracked('p-settled', settled);
+  setTextTracked('p-winrate', settled > 0 ? (winRate * 100).toFixed(1) + '%' : '--');
   
   const pnlEl = document.getElementById('p-pnl');
-  pnlEl.textContent = pnl >= 0 ? '+$' + pnl.toFixed(2) : '-$' + Math.abs(pnl).toFixed(2);
+  setTextTracked('p-pnl', pnl >= 0 ? '+$' + pnl.toFixed(2) : '-$' + Math.abs(pnl).toFixed(2));
   pnlEl.className = 'stat-val-big ' + (pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');
 
-  document.getElementById('p-edge').textContent = settled > 0 ? (edge > 0 ? '+' : '') + (edge * 100).toFixed(2) + '%' : '--';
-  document.getElementById('p-ev').textContent = settled > 0 ? (ev > 0 ? '+' : '') + (ev * 100).toFixed(1) + '%' : '--';
-  document.getElementById('p-clv').textContent = (settled > 0 && clv != null) ? (clv > 0 ? '+' : '') + clv.toFixed(3) : '--';
-  document.getElementById('p-sharpe').textContent = settled > 1 ? sharpe.toFixed(2) : '--';
+  setTextTracked('p-edge', settled > 0 ? (edge > 0 ? '+' : '') + (edge * 100).toFixed(2) + '%' : '--');
+  setTextTracked('p-ev', settled > 0 ? (ev > 0 ? '+' : '') + (ev * 100).toFixed(1) + '%' : '--');
+  setTextTracked('p-clv', (settled > 0 && clv != null) ? (clv > 0 ? '+' : '') + clv.toFixed(3) : '--');
+  setTextTracked('p-sharpe', settled > 1 ? sharpe.toFixed(2) : '--');
   document.getElementById('paper-progress').textContent = settled + ' clean / 100 trades';
+  document.getElementById('settled-metrics-updated').textContent = 'last report ' + fmtFreshness(stats.generated_at).replace('updated ', '');
 
   document.getElementById('m-clean-settled').textContent = settled;
   document.getElementById('m-raw-settled').textContent = raw.settled_rows != null ? raw.settled_rows : '--';
@@ -2499,6 +2696,7 @@ function renderPaperStats(stats) {
   liveTotalEl.className = moneyClass(live.live_total_pnl || 0);
   document.getElementById('live-mark-count').textContent =
     `${live.marked_open_trades || 0} / ${live.unmarked_open_trades || 0}`;
+  document.getElementById('live-metrics-updated').textContent = fmtFreshness(stats.generated_at);
 
   document.getElementById('clv-dist').textContent =
     `${clean.clv_positive || 0} / ${clean.clv_negative || 0}` +
