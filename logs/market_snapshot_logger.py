@@ -113,7 +113,12 @@ def is_btc_15m_market(market: dict) -> tuple[bool, str]:
     return False, "not_safely_identified_as_btc15m"
 
 
-def _snapshot_from_market(market: dict, now: datetime, scan_id: Optional[str]) -> dict:
+def _snapshot_from_market(
+    market: dict,
+    now: datetime,
+    scan_id: Optional[str],
+    btc_price_snapshot: Optional[dict] = None,
+) -> dict:
     yes_bid = _as_float(market.get("yes_bid"))
     yes_ask = _as_float(market.get("yes_ask"))
     no_bid = _as_float(market.get("no_bid"))
@@ -168,9 +173,11 @@ def _snapshot_from_market(market: dict, now: datetime, scan_id: Optional[str]) -
         "scanner_edge": _as_float(market.get("edge")),
         "strategy": market.get("strategy") or market.get("raw_strategy"),
         "source": market.get("scanner_source") or market.get("source") or "kalshi_scanner",
-        "btc_price": None,
-        "btc_price_source": None,
-        "btc_price_timestamp": None,
+        "btc_price": _as_float((btc_price_snapshot or {}).get("price")),
+        "btc_price_source": (btc_price_snapshot or {}).get("source"),
+        "btc_price_timestamp": (btc_price_snapshot or {}).get("timestamp_utc"),
+        "btc_price_fetch_latency_ms": _as_float((btc_price_snapshot or {}).get("fetch_latency_ms")),
+        "btc_price_error": (btc_price_snapshot or {}).get("error"),
         "classification_reason": is_btc_15m_market(market)[1],
         "raw_time_fields_present": raw_time_fields_present,
     }
@@ -197,7 +204,8 @@ def _snapshot_from_market(market: dict, now: datetime, scan_id: Optional[str]) -
         reject_reasons.append("REJECT_FINAL_30S")
     elif seconds > 300 or seconds < 60:
         reject_reasons.append("REJECT_OUTSIDE_RESEARCH_WINDOW")
-    reject_reasons.append("REJECT_NO_SYNCED_BTC_PRICE")
+    if record["btc_price"] is None or record["btc_price_error"]:
+        reject_reasons.append("REJECT_NO_SYNCED_BTC_PRICE")
     record["research_gate_status"] = "PASS" if not reject_reasons else "REJECT"
     record["research_reject_reasons"] = reject_reasons
 
@@ -207,6 +215,7 @@ def _snapshot_from_market(market: dict, now: datetime, scan_id: Optional[str]) -
 def log_btc15m_snapshots(
     markets: list[dict],
     scan_id: Optional[str] = None,
+    btc_price_snapshot: Optional[dict] = None,
     log_path: Path | str = DEFAULT_LOG_PATH,
 ) -> dict:
     """
@@ -237,7 +246,12 @@ def log_btc15m_snapshots(
                         stats["skipped_not_btc15m"] += 1
                         continue
                     stats["matched"] += 1
-                    record = _snapshot_from_market(market, now, scan_id)
+                    record = _snapshot_from_market(
+                        market,
+                        now,
+                        scan_id,
+                        btc_price_snapshot=btc_price_snapshot,
+                    )
                     f.write(json.dumps(record, sort_keys=True) + "\n")
                     stats["written"] += 1
                 except Exception as exc:

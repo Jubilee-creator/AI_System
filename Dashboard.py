@@ -60,6 +60,13 @@ except ImportError as e:
     BTC15M_SNAPSHOT_LOGGER_OK = False
 
 try:
+    from brokers.underlying_price_client import fetch_btc_usd_price
+    BTC_PRICE_CLIENT_OK = True
+except ImportError as e:
+    print(f"[WARN] BTC price client not available: {e}")
+    BTC_PRICE_CLIENT_OK = False
+
+try:
     from tools.performance_report import (
         load_trades,
         get_pnl,
@@ -1083,9 +1090,23 @@ def background_scan():
                 state["total_scans"] += 1
                 update_market_history(opportunities, now)
                 if BTC15M_SNAPSHOT_LOGGER_OK:
+                    btc_price_snapshot = None
+                    if BTC_PRICE_CLIENT_OK:
+                        try:
+                            btc_price_snapshot = fetch_btc_usd_price()
+                        except Exception as e:
+                            btc_price_snapshot = {
+                                "symbol": "BTC-USD",
+                                "price": None,
+                                "source": "coinbase_exchange_public_ticker",
+                                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                "fetch_latency_ms": None,
+                                "error": e.__class__.__name__,
+                            }
                     snapshot_stats = log_btc15m_snapshots(
                         opportunities,
                         scan_id=f"dashboard_scan_{state['total_scans']}",
+                        btc_price_snapshot=btc_price_snapshot,
                     )
                     if snapshot_stats.get("written") or snapshot_stats.get("errors"):
                         print(

@@ -82,6 +82,10 @@ def summarize(rows: list[dict]) -> None:
     missing_counts = Counter()
     ticker_counts = Counter()
     gate_counts = Counter()
+    btc_source_counts = Counter()
+    no_synced_btc_count = 0
+    btc_price_rows = 0
+    btc_price_timestamps = []
     bucket_rows: dict[str, list[dict]] = defaultdict(list)
 
     for row in rows:
@@ -89,6 +93,13 @@ def summarize(rows: list[dict]) -> None:
         bucket_rows[bucket].append(row)
         ticker_counts[row.get("ticker") or "UNKNOWN"] += 1
         gate_counts[row.get("research_gate_status") or "UNKNOWN"] += 1
+        if _as_float(row.get("btc_price")) is not None:
+            btc_price_rows += 1
+        if row.get("btc_price_timestamp"):
+            btc_price_timestamps.append(row.get("btc_price_timestamp"))
+        btc_source_counts[row.get("btc_price_source") or "MISSING"] += 1
+        if "REJECT_NO_SYNCED_BTC_PRICE" in (row.get("research_reject_reasons") or []):
+            no_synced_btc_count += 1
         for field in row.get("missing_fields") or []:
             missing_counts[field] += 1
 
@@ -103,6 +114,9 @@ def summarize(rows: list[dict]) -> None:
     print(f"unknown_time_to_expiry_pct={(unknown_time / len(rows)):.1%}")
     print(f"final_1_to_5_minute_bucket_pct={(final_1_to_5 / len(rows)):.1%}")
     print(f"final_0_to_5_minute_bucket_pct={(final_0_to_5 / len(rows)):.1%}")
+    print(f"btc_price_present_pct={(btc_price_rows / len(rows)):.1%}")
+    print(f"reject_no_synced_btc_price_pct={(no_synced_btc_count / len(rows)):.1%}")
+    print(f"most_recent_btc_price_timestamp={max(btc_price_timestamps) if btc_price_timestamps else 'n/a'}")
 
     print("\nSNAPSHOTS BY ENTRY WINDOW")
     print("-" * 72)
@@ -113,15 +127,18 @@ def summarize(rows: list[dict]) -> None:
         spreads = [_as_float(r.get("spread")) for r in group]
         liquidity = [_as_float(r.get("liquidity")) for r in group]
         volume = [_as_float(r.get("volume")) for r in group]
+        btc_prices = [_as_float(r.get("btc_price")) for r in group]
         spreads = [v for v in spreads if v is not None]
         liquidity = [v for v in liquidity if v is not None]
         volume = [v for v in volume if v is not None]
+        btc_prices = [v for v in btc_prices if v is not None]
         print(
             f"{bucket:<16} "
             f"n={len(group):>5} "
             f"avg_spread={_fmt_num(_avg(spreads)):>8} "
             f"avg_liquidity={_fmt_num(_avg(liquidity), 2):>10} "
-            f"avg_volume={_fmt_num(_avg(volume), 2):>10}"
+            f"avg_volume={_fmt_num(_avg(volume), 2):>10} "
+            f"avg_btc={_fmt_num(_avg(btc_prices), 2):>10}"
         )
 
     extra_buckets = sorted(set(bucket_rows) - set(BUCKET_ORDER))
@@ -133,6 +150,11 @@ def summarize(rows: list[dict]) -> None:
     print("-" * 72)
     for status, count in gate_counts.most_common():
         print(f"{status:<24} {count}")
+
+    print("\nBTC PRICE SOURCES")
+    print("-" * 72)
+    for source, count in btc_source_counts.most_common():
+        print(f"{source:<40} {count}")
 
     print("\nMISSING FIELD COUNTS")
     print("-" * 72)
