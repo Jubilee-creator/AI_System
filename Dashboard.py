@@ -339,6 +339,42 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
         watch_reason,
     )
 
+    # ── Proof gate verdict (inline — same logic as clean_truth_report) ────────
+    _eval_wagered = sum(get_size(r) for r in evaluated_rows)
+    _eval_pnl     = sum(get_pnl(r)  for r in evaluated_rows)
+    _overall_roi  = _eval_pnl / _eval_wagered if _eval_wagered else 0.0
+    _m_wins_pnl   = sum(get_pnl(r) for r in modern_rows if get_pnl(r) > 0)
+    _m_loss_pnl   = sum(get_pnl(r) for r in modern_rows if get_pnl(r) < 0)
+    _modern_pf    = (
+        _m_wins_pnl / abs(_m_loss_pnl)
+        if _m_wins_pnl > 0 and _m_loss_pnl < 0 else None
+    )
+    if modern_count == 0:
+        _scale_verdict = "NOT_PROVEN"
+        _scale_reason  = "No modern full-metadata trades evaluated."
+    elif normal_trade_count == 0:
+        _scale_verdict = "NOT_PROVEN"
+        _scale_reason  = (f"All {data_collection_count} modern trades are council-REJECTED. "
+                          "Zero council-approved modern trades.")
+    elif modern_count < 30:
+        _scale_verdict = "DATA_COLLECTION_ONLY"
+        _scale_reason  = f"Modern sample {modern_count}/30 minimum."
+    elif normal_trade_count < 30:
+        _scale_verdict = "DATA_COLLECTION_ONLY"
+        _scale_reason  = f"Council-approved modern: {normal_trade_count}/30 minimum."
+    elif (modern_roi <= 0
+          or (modern_avg_clv or 0) <= 0
+          or _modern_pf is None or _modern_pf <= 1.10
+          or _overall_roi <= 0):
+        _scale_verdict = "WATCHLIST"
+        _scale_reason  = "Sample sufficient but performance gates not met."
+    elif modern_count >= 100 and normal_trade_count >= 30:
+        _scale_verdict = "SCALE_ELIGIBLE"
+        _scale_reason  = "All gates met. Requires explicit human approval."
+    else:
+        _scale_verdict = "PAPER_VALIDATION_READY"
+        _scale_reason  = f"Performance gates pass. Need {max(0, 100 - modern_count)} more modern trades."
+
     return {
         "modern_evaluated_rows": modern_count,
         "target_minimum": 30,
@@ -351,6 +387,9 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
         "modern_pnl": round(modern_pnl, 2),
         "modern_avg_risk_edge": modern_avg_risk_edge,
         "modern_avg_clv": modern_avg_clv,
+        "scale_verdict": _scale_verdict,
+        "scale_verdict_reason": _scale_reason,
+        "scale_allowed": False,
         "items": [
             {
                 "key": "profitability",
@@ -2336,15 +2375,17 @@ function renderProofChecklist(proof) {
 
   const msg = document.getElementById('verdict-msg');
   if (msg) {
-    if (modernRows < targetMin) {
-      msg.innerHTML = `<span style="color:var(--yellow);font-weight:700">WATCH / INSUFFICIENT DATA</span><br>Modern full-metadata rows are the proof source. Legacy rows are not proof.`;
-    } else if ((proof.items || []).some(i => i.state === 'FAIL')) {
-      msg.innerHTML = '<span style="color:var(--red);font-weight:700">FAIL</span><br>Modern evidence does not justify scaling.';
-    } else if ((proof.items || []).every(i => i.state === 'PASS')) {
-      msg.innerHTML = '<span style="color:var(--green2);font-weight:700">PASS</span><br>Modern evidence passes the minimum proof checklist.';
-    } else {
-      msg.innerHTML = '<span style="color:var(--yellow);font-weight:700">WATCH</span><br>Modern evidence is mixed or incomplete.';
-    }
+    const sv  = proof.scale_verdict || 'NOT_PROVEN';
+    const svr = proof.scale_verdict_reason || '';
+    const svColors = {
+      'NOT_PROVEN':            'var(--red)',
+      'DATA_COLLECTION_ONLY':  'var(--red)',
+      'WATCHLIST':             'var(--yellow)',
+      'PAPER_VALIDATION_READY':'var(--yellow)',
+      'SCALE_ELIGIBLE':        'var(--green2)',
+    };
+    const c = svColors[sv] || 'var(--muted)';
+    msg.innerHTML = `<span style="color:${c};font-weight:700">${sv}</span><br><span style="color:var(--muted);font-size:8px">${svr}</span>`;
   }
 }
 

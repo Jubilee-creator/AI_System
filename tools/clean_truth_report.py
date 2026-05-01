@@ -1424,6 +1424,246 @@ def classify_records(all_records: list[dict]) -> dict[str, list[dict]]:
     }
 
 
+# ── Proof Gate Thresholds ────────────────────────────────────────────────────
+_GATE_MIN_MODERN_WATCHLIST  = 30    # modern full-metadata trades needed for watchlist
+_GATE_MIN_NORMAL_WATCHLIST  = 30    # council-approved modern trades needed for watchlist
+_GATE_MIN_MODERN_SCALE      = 100   # modern full-metadata trades needed for scale eligibility
+_GATE_MIN_NORMAL_SCALE      = 30    # council-approved modern trades needed for scale eligibility
+_GATE_MIN_PROFIT_FACTOR     = 1.10  # minimum profit factor for scale eligibility
+
+
+def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
+    """
+    Read-only verdict: is the system proven enough to scale beyond learning mode?
+
+    Tiers (first failing hard gate wins):
+      NOT_PROVEN          — no council-approved modern trades at all
+      DATA_COLLECTION_ONLY — sample too small or normal-approved count too low
+      WATCHLIST           — enough samples but ROI/CLV/profit-factor not positive
+      PAPER_VALIDATION_READY — performance gates pass, scale volume not yet met
+      SCALE_ELIGIBLE      — all gates pass; still requires human sign-off
+
+    scale_allowed and real_money_allowed are always False in code.
+    """
+    clean_settled = buckets["clean_settled"]
+    active_opens  = buckets["active_open"]
+
+    modern_full = [r for r in evaluated if row_quality_group(r) == "MODERN_FULL_METADATA"]
+    modern_full_count  = len(modern_full)
+    dc_count           = sum(1 for r in modern_full if r.get("data_collection_override"))
+    normal_modern_count = modern_full_count - dc_count
+    dc_pct = round(dc_count / modern_full_count * 100, 1) if modern_full_count else 0.0
+
+    # Overall clean-settled performance (time exits excluded from this slice)
+    cs_asym   = calc_asymmetry(clean_settled)
+    cs_roi    = cs_asym["roi"]
+    cs_pf     = cs_asym["profit_factor"]
+    cs_clv_vals = [v for v in (get_clv(r) for r in clean_settled) if v is not None]
+    cs_avg_clv  = round(sum(cs_clv_vals) / len(cs_clv_vals), 4) if cs_clv_vals else None
+
+    # Modern full-metadata performance
+    if modern_full:
+        m_asym  = calc_asymmetry(modern_full)
+        m_roi   = m_asym["roi"]
+        m_pf    = m_asym["profit_factor"]
+        m_clv_vals = [v for v in (get_clv(r) for r in modern_full) if v is not None]
+        m_avg_clv  = round(sum(m_clv_vals) / len(m_clv_vals), 4) if m_clv_vals else None
+    else:
+        m_roi = m_pf = m_avg_clv = None
+
+    active_open_count   = len(active_opens)
+    risk_override_count = sum(1 for r in evaluated if r.get("risk_override_used"))
+
+    warnings = []
+    if active_open_count > 0:
+        warnings.append(
+            f"{active_open_count} active unresolved open trade(s) — settlement still pending"
+        )
+    if risk_override_count > 0:
+        warnings.append(
+            f"{risk_override_count} evaluated trade(s) used learning risk override"
+        )
+
+    # ── Hard gates (first matching gate wins) ────────────────────────────────
+    if modern_full_count == 0:
+        verdict = "NOT_PROVEN"
+        reason  = (
+            "No modern full-metadata trades evaluated "
+            "(requires risk_edge + model_probability + quote data)."
+        )
+        next_req = "Execute at least 1 modern full-metadata trade."
+
+    elif normal_modern_count == 0:
+        verdict = "NOT_PROVEN"
+        reason  = (
+            f"All {dc_count} modern full-metadata trade(s) are council-REJECTED "
+            "data_collection_override. Zero council-approved normal trades exist. "
+            "Data-collection evidence is NOT proof of normal model operation."
+        )
+        next_req = (
+            "Resolve critic deadlock: rebuild edge_profile with >= 5 settled trades per "
+            "bucket so council can approve at least 1 signal without data-collection override."
+        )
+
+    elif modern_full_count < _GATE_MIN_MODERN_WATCHLIST:
+        verdict = "DATA_COLLECTION_ONLY"
+        reason  = (
+            f"Modern full-metadata sample too small: "
+            f"{modern_full_count}/{_GATE_MIN_MODERN_WATCHLIST} minimum. "
+            f"Normal council-approved: {normal_modern_count}."
+        )
+        next_req = (
+            f"Accumulate {_GATE_MIN_MODERN_WATCHLIST - modern_full_count} more "
+            "modern full-metadata trades."
+        )
+
+    elif normal_modern_count < _GATE_MIN_NORMAL_WATCHLIST:
+        verdict = "DATA_COLLECTION_ONLY"
+        reason  = (
+            f"Normal council-approved modern trades: "
+            f"{normal_modern_count}/{_GATE_MIN_NORMAL_WATCHLIST} minimum. "
+            f"{dc_count} data_collection_override trades do NOT count as normal proof."
+        )
+        next_req = (
+            f"Accumulate {_GATE_MIN_NORMAL_WATCHLIST - normal_modern_count} more "
+            "council-approved (non-override) modern trades."
+        )
+
+    else:
+        # Sample size gates passed — now check performance
+        roi_ok = m_roi is not None and m_roi > 0
+        clv_ok = m_avg_clv is not None and m_avg_clv > 0
+        pf_ok  = m_pf is not None and m_pf > _GATE_MIN_PROFIT_FACTOR
+        cs_ok  = cs_roi > 0
+
+        perf_failures = []
+        if not roi_ok:
+            perf_failures.append(
+                f"modern ROI {m_roi * 100:+.1f}% (need > 0%)"
+                if m_roi is not None else "modern ROI unavailable"
+            )
+        if not clv_ok:
+            perf_failures.append(
+                f"avg CLV {m_avg_clv:+.4f} (need > 0)"
+                if m_avg_clv is not None else "avg CLV unavailable"
+            )
+        if not pf_ok:
+            perf_failures.append(
+                f"profit factor {m_pf:.2f} (need > {_GATE_MIN_PROFIT_FACTOR:.2f})"
+                if m_pf is not None else "profit factor unavailable"
+            )
+        if not cs_ok:
+            perf_failures.append(
+                f"clean-settled ROI {cs_roi * 100:+.1f}% (need > 0%)"
+            )
+
+        if perf_failures:
+            verdict  = "WATCHLIST"
+            reason   = (
+                "Sample size gates passed but performance gates not met: "
+                + "; ".join(perf_failures) + "."
+            )
+            next_req = (
+                "Achieve positive modern ROI, positive avg CLV, "
+                f"profit factor > {_GATE_MIN_PROFIT_FACTOR:.2f}, positive clean-settled ROI."
+            )
+        elif (modern_full_count >= _GATE_MIN_MODERN_SCALE
+              and normal_modern_count >= _GATE_MIN_NORMAL_SCALE):
+            verdict  = "SCALE_ELIGIBLE"
+            reason   = (
+                f"All gates met: {modern_full_count} modern full-metadata, "
+                f"{normal_modern_count} council-approved, "
+                f"modern ROI {m_roi * 100:+.1f}%, "
+                f"avg CLV {m_avg_clv:+.4f}, profit factor {m_pf:.2f}. "
+                "Explicit human approval required before any position size increase."
+            )
+            next_req = "Human review and explicit sign-off. System cannot self-authorize scaling."
+        else:
+            gap      = max(0, _GATE_MIN_MODERN_SCALE - modern_full_count)
+            verdict  = "PAPER_VALIDATION_READY"
+            reason   = (
+                f"Performance gates pass but scale volume not met: "
+                f"{modern_full_count}/{_GATE_MIN_MODERN_SCALE} modern full-metadata trades."
+            )
+            next_req = (
+                f"Accumulate {gap} more modern full-metadata trades "
+                "to reach SCALE_ELIGIBLE."
+            )
+
+    return {
+        "verdict":                    verdict,
+        "reason":                     reason,
+        "warnings":                   warnings,
+        "next_requirement":           next_req,
+        "scale_allowed":              False,   # never programmatic; always human sign-off
+        "real_money_allowed":         False,
+        "modern_full_count":          modern_full_count,
+        "normal_modern_count":        normal_modern_count,
+        "dc_count":                   dc_count,
+        "dc_pct":                     dc_pct,
+        "clean_settled_count":        len(clean_settled),
+        "clean_settled_roi_pct":      round(cs_roi * 100, 2),
+        "clean_settled_avg_clv":      cs_avg_clv,
+        "clean_settled_profit_factor": round(cs_pf, 4) if cs_pf is not None else None,
+        "modern_roi_pct":             round(m_roi * 100, 2) if m_roi is not None else None,
+        "modern_avg_clv":             m_avg_clv,
+        "modern_profit_factor":       round(m_pf, 4) if m_pf is not None else None,
+        "active_open_count":          active_open_count,
+        "risk_override_count":        risk_override_count,
+    }
+
+
+def print_proof_gate_verdict(gate: dict) -> None:
+    """Print the structured proof gate verdict section."""
+    v    = gate["verdict"]
+    sep  = "=" * 92
+
+    def _pct(val):
+        return f"{val:+.2f}%" if val is not None else "n/a"
+
+    def _clv(val):
+        return _fmt_num(val) if val is not None else "n/a"
+
+    def _pf(val):
+        return _fmt_ratio(val) if val is not None else "n/a"
+
+    print()
+    print(sep)
+    print("PROOF GATE VERDICT")
+    print(sep)
+    print(f"  Verdict:                          {v}")
+    print(f"  Reason:                           {gate['reason']}")
+    print()
+    print(f"  Modern full-metadata count:       {gate['modern_full_count']}"
+          f"  (watchlist >= {_GATE_MIN_MODERN_WATCHLIST}  |  scale >= {_GATE_MIN_MODERN_SCALE})")
+    print(f"  Normal council-approved modern:   {gate['normal_modern_count']}"
+          f"  (need >= {_GATE_MIN_NORMAL_WATCHLIST})")
+    print(f"  Data-collection override count:   {gate['dc_count']}"
+          f"  ({gate['dc_pct']:.1f}% of modern — NOT normal proof)")
+    print(f"  Clean settled count:              {gate['clean_settled_count']}")
+    print(f"  Clean settled ROI:                {_pct(gate['clean_settled_roi_pct'])}"
+          "  (overall; need > 0% for scale)")
+    print(f"  Clean settled avg CLV:            {_clv(gate['clean_settled_avg_clv'])}")
+    print(f"  Clean settled profit factor:      {_pf(gate['clean_settled_profit_factor'])}")
+    print(f"  Modern ROI:                       {_pct(gate['modern_roi_pct'])}")
+    print(f"  Modern avg CLV:                   {_clv(gate['modern_avg_clv'])}")
+    print(f"  Modern profit factor:             {_pf(gate['modern_profit_factor'])}"
+          f"  (need > {_GATE_MIN_PROFIT_FACTOR:.2f} for scale)")
+    print(f"  Active unresolved/open trades:    {gate['active_open_count']}")
+    print(f"  Risk overrides used (evaluated):  {gate['risk_override_count']}")
+    print()
+    print(f"  Scale allowed:                    {'YES' if gate['scale_allowed'] else 'NO'}")
+    print(f"  Real money allowed:               NO  (paper trading only — hard rule)")
+    print()
+    if gate["warnings"]:
+        print("  WARNINGS:")
+        for w in gate["warnings"]:
+            print(f"    [!] {w}")
+        print()
+    print(f"  Next requirement:                 {gate['next_requirement']}")
+    print(sep)
+
+
 def print_disagreement_note() -> None:
     print("AUDIT NOTE")
     print("----------")
@@ -1523,8 +1763,8 @@ def main() -> None:
     print_zone_report("DANGER ZONES", evaluated, "danger")
     print_zone_report("PROMISING ZONES", evaluated, "promising")
 
-    print()
-    print("=" * 92)
+    gate = evaluate_proof_gates(buckets, evaluated)
+    print_proof_gate_verdict(gate)
 
 
 if __name__ == "__main__":
