@@ -22,6 +22,7 @@ from config.trading_config import (
     BOOTSTRAP_PROVISIONAL_MODE,
     BOOTSTRAP_MIN_EDGE,
     BOOTSTRAP_MIN_CONFIDENCE,
+    BOOTSTRAP_ALLOW_ENABLED,
 )
 
 DEFAULT_PROFILE_PATH = ROOT / "data" / "edge_profile.json"
@@ -183,19 +184,39 @@ def critique_signal(
         }
 
     if not health["edge_profile_trusted"]:
-        # Bootstrap provisional path: when the system has zero normal-approved
-        # modern trades and the signal meets a higher quality bar, allow a
-        # PROVISIONAL decision instead of hard BLOCK.  These trades are NOT
-        # counted as normal proof — they exist only to escape the bootstrap
-        # deadlock and collect preliminary evidence.
         normal_modern = health.get("normal_council_approved_modern_trades", 0)
         signal_edge = _as_float(signal.get("edge"))
         signal_conf = _as_float(signal.get("confidence"))
+        meets_bootstrap = (
+            signal_edge is not None and signal_edge >= BOOTSTRAP_MIN_EDGE
+            and signal_conf is not None and signal_conf >= BOOTSTRAP_MIN_CONFIDENCE
+        )
+
+        # Phase 6B-2: bootstrap_era_allow path.  When BOOTSTRAP_ALLOW_ENABLED,
+        # signals that meet the quality bar return ALLOW (not PROVISIONAL).
+        # These trades count as normal_council_approved_modern and accumulate
+        # toward the 10-trade trust gate, breaking the circular deadlock.
+        if meets_bootstrap and BOOTSTRAP_ALLOW_ENABLED:
+            return {
+                "decision": "ALLOW",
+                "reason": (
+                    f"bootstrap_era_council_allow: edge_profile untrusted "
+                    f"(normal_modern={normal_modern}); "
+                    f"signal edge={signal_edge:.4f} >= {BOOTSTRAP_MIN_EDGE} "
+                    f"and confidence={signal_conf:.3f} >= {BOOTSTRAP_MIN_CONFIDENCE}; "
+                    "counted as normal council-approved for proof accumulation"
+                ),
+                "confidence_adjustment": BOOTSTRAP_CONFIDENCE_ADJUSTMENT,
+                "bootstrap_era_allow": True,
+                "edge_profile_health": health,
+            }
+
+        # Fallback provisional path (BOOTSTRAP_ALLOW_ENABLED=False): only fires
+        # when normal_modern == 0 to avoid permanently blocking the system.
         if (
             BOOTSTRAP_PROVISIONAL_MODE
             and normal_modern == 0
-            and signal_edge is not None and signal_edge >= BOOTSTRAP_MIN_EDGE
-            and signal_conf is not None and signal_conf >= BOOTSTRAP_MIN_CONFIDENCE
+            and meets_bootstrap
         ):
             return {
                 "decision": "PROVISIONAL",

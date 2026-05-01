@@ -252,12 +252,10 @@ DATA_COLLECTION_MODE = True
 # gates.  Set False to let council BLOCKs stay blocked so normal
 # council-approved trades can accumulate and proof gates can advance.
 #
-# TRUST DEADLOCK WARNING: while DATA_COLLECTION_OVERRIDE_ENABLED=True, the
-# council will never approve a trade (it always BLOCKs), and all trades will
-# be tagged data_collection_override.  normal_council_approved_modern stays 0
-# permanently and proof gates cannot advance.  Set this to False (Phase 6B-2)
-# once the plumbing is confirmed correct.
-DATA_COLLECTION_OVERRIDE_ENABLED = True
+# Set False (Phase 6B-2): BOOTSTRAP_ALLOW_ENABLED below now allows bootstrap-
+# quality signals through as ALLOW (with bootstrap_era_allow=True), which DO
+# count as normal_council_approved_modern and break the trust deadlock cleanly.
+DATA_COLLECTION_OVERRIDE_ENABLED = False
 
 # Maximum concurrent open positions per ticker (1 = no duplicate exposure)
 MAX_POSITIONS_PER_TICKER = 1
@@ -309,8 +307,21 @@ EDGE_PROFILE_MIN_NORMAL_MODERN = 10
 #   - do NOT make edge_profile trusted
 #   - do NOT unlock scaling or real money
 BOOTSTRAP_PROVISIONAL_MODE = True
-BOOTSTRAP_MIN_EDGE = 0.05          # original edge floor for provisional candidates
-BOOTSTRAP_MIN_CONFIDENCE = 0.65    # confidence floor for provisional candidates
+BOOTSTRAP_MIN_EDGE = 0.05          # edge floor for bootstrap candidates
+BOOTSTRAP_MIN_CONFIDENCE = 0.65    # confidence floor for bootstrap candidates
+
+# Bootstrap allow mode (Phase 6B-2): when True, signals that meet the bootstrap
+# quality threshold (edge >= BOOTSTRAP_MIN_EDGE, confidence >= BOOTSTRAP_MIN_CONFIDENCE)
+# are returned as ALLOW (not PROVISIONAL) by the Critic while edge_profile_trusted=False.
+#
+# These trades are tagged bootstrap_era_council_allow=True in the trade record.
+# They ARE counted as normal_council_approved_modern in build_edge_profile.py
+# (because they are neither data_collection_override nor bootstrap_provisional).
+# This lets normal_council_approved_modern accumulate toward the 10-trade trust
+# gate and breaks the trust deadlock without requiring DATA_COLLECTION_OVERRIDE.
+#
+# BOOTSTRAP_PROVISIONAL_MODE is kept as the fallback when BOOTSTRAP_ALLOW_ENABLED=False.
+BOOTSTRAP_ALLOW_ENABLED = True
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -215,6 +215,12 @@ def build_profile() -> dict[str, Any]:
         1 for rec in modern_full_metadata
         if bool(rec.get("bootstrap_provisional"))
     )
+    # bootstrap_era_allow trades (Phase 6B-2) are NOT excluded — they count as
+    # normal_council_approved_modern.  Track count separately for reporting only.
+    bootstrap_era_allow_count = sum(
+        1 for rec in modern_full_metadata
+        if bool(rec.get("bootstrap_era_council_allow"))
+    )
     normal_council_approved_modern = (
         len(modern_full_metadata) - data_collection_override_count - bootstrap_provisional_count
     )
@@ -242,6 +248,7 @@ def build_profile() -> dict[str, Any]:
         "normal_council_approved_modern_trades": normal_council_approved_modern,
         "data_collection_override_count": data_collection_override_count,
         "bootstrap_provisional_count": bootstrap_provisional_count,
+        "bootstrap_era_allow_count": bootstrap_era_allow_count,
         "conflicted_settled_trades_excluded": len(conflicted_settled),
         "overall": _finalize_bucket(overall),
         "profiles": {

@@ -499,6 +499,7 @@ class PaperTrader:
         market_volume_val = volume
         bootstrap_provisional_trade = False
         bootstrap_provisional_reason = None
+        bootstrap_era_allow_trade = False
 
         # DEBUG 3: Show calculated values
         print(f"[PAPER_DEBUG] action={action} price={price:.3f} estimated_prob={estimated_prob:.3f} edge={edge:.4f} min_edge={self.min_edge:.4f}")
@@ -582,6 +583,13 @@ class PaperTrader:
                     "allowed as $5 learning trade"
                 )
                 print(f"[COUNCIL] PROVISIONAL reason: {council_reason}")
+            elif council_decision == "ALLOW" and council_result.get("bootstrap_era_allow"):
+                bootstrap_era_allow_trade = True
+                print(
+                    "[COUNCIL] BOOTSTRAP_ERA_ALLOW: bootstrap-quality signal allowed "
+                    "as normal council-approved trade (counts toward proof accumulation)"
+                )
+                print(f"[COUNCIL] ALLOW reason: {council_reason}")
 
             estimated_prob = float(council_result.get("final_confidence", estimated_prob))
             estimated_prob = min(max(estimated_prob, 0.0), 1.0)
@@ -829,6 +837,7 @@ class PaperTrader:
             "market_quality_passed": market_quality_passed,
             "bootstrap_provisional": bootstrap_provisional_trade,
             "bootstrap_provisional_reason": bootstrap_provisional_reason,
+            "bootstrap_era_council_allow": bootstrap_era_allow_trade,
         }
         trade.update(_paper_trade_metadata(market_data, action, fee_estimate))
         

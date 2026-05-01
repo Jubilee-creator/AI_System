@@ -153,6 +153,7 @@ def decide_signal(signal: dict) -> dict:
         "net_confidence_adjustment": round(net_adjustment, 6),
         "reason": reason,
         "bootstrap_provisional": bool(critic_view.get("bootstrap_provisional", False)),
+        "bootstrap_era_allow": bool(critic_view.get("bootstrap_era_allow", False)),
     }
 
 
