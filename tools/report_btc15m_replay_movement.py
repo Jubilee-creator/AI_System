@@ -157,6 +157,11 @@ def build_transitions(rows: list[dict], exclude_final_30s: bool = EXCLUDE_FINAL_
                 "spread": cur.get("_spread"),
                 "liquidity": cur.get("_liquidity"),
                 "btc_price_fetch_latency_ms": cur.get("_latency"),
+                # M-48D: contract-line distance (None for pre-M-48D rows)
+                "btc_distance_to_line": _as_float(cur.get("btc_distance_to_line")),
+                "btc_distance_bps": _as_float(cur.get("btc_distance_bps")),
+                "is_above_line": cur.get("is_above_line"),
+                "near_line_zone": cur.get("near_line_zone"),
             })
 
     return transitions, excluded_final_30
@@ -198,7 +203,7 @@ def build_lag_checks(rows: list[dict], exclude_final_30s: bool = EXCLUDE_FINAL_3
 
 def summarize_transitions(transitions: list[dict]) -> None:
     print("\nMOVEMENT BY ENTRY WINDOW")
-    print("-" * 92)
+    print("-" * 110)
     by_bucket: dict[str, list[dict]] = defaultdict(list)
     for transition in transitions:
         by_bucket[transition["entry_window_bucket"]].append(transition)
@@ -209,6 +214,15 @@ def summarize_transitions(transitions: list[dict]) -> None:
             continue
         yes_agree = sum(1 for r in group if r["btc_yes_directional_agreement"])
         no_agree = sum(1 for r in group if r["btc_no_directional_agreement"])
+        # M-48D: distance-to-line stats (None for pre-M-48D rows)
+        dist_vals = [r["btc_distance_to_line"] for r in group if r.get("btc_distance_to_line") is not None]
+        bps_vals  = [r["btc_distance_bps"]     for r in group if r.get("btc_distance_bps")     is not None]
+        above_n   = sum(1 for r in group if r.get("is_above_line") is True)
+        near_n    = sum(1 for r in group if r.get("near_line_zone") is True)
+        dist_note = (
+            f"avg_dist_bps={_fmt(_avg(bps_vals), 1):>8} above={above_n}/{len(group)} near={near_n}/{len(group)}"
+            if dist_vals else "dist=n/a(pre-M48D)"
+        )
         print(
             f"{bucket:<16} "
             f"n={len(group):>4} "
@@ -216,11 +230,8 @@ def summarize_transitions(transitions: list[dict]) -> None:
             f"avg_btc_delta={_fmt(_avg([r['btc_price_delta'] for r in group]), 2):>9} "
             f"avg_btc_pct={_fmt_pct(_avg([r['btc_price_delta_pct'] for r in group])):>7} "
             f"avg_yes_delta={_fmt(_avg([r['yes_mid_delta'] for r in group])):>8} "
-            f"avg_no_delta={_fmt(_avg([r['no_mid_delta'] for r in group])):>8} "
             f"yes_agree={yes_agree}/{len(group)} "
-            f"no_inverse={no_agree}/{len(group)} "
-            f"avg_spread={_fmt(_avg([r['spread'] for r in group if r['spread'] is not None])):>7} "
-            f"avg_liq={_fmt(_avg([r['liquidity'] for r in group if r['liquidity'] is not None]), 1):>9}"
+            f"{dist_note}"
         )
 
 

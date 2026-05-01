@@ -181,6 +181,41 @@ def summarize(rows: list[dict]) -> None:
     else:
         print("No research reject reasons logged.")
 
+    print("\nCONTRACT LINE COVERAGE (M-48D)")
+    print("-" * 72)
+    with_line = [r for r in rows if _as_float(r.get("contract_line")) is not None]
+    without_line_n = len(rows) - len(with_line)
+    print(f"rows_with_contract_line={len(with_line)}/{len(rows)}")
+    print(f"rows_without_contract_line={without_line_n}/{len(rows)}")
+    parse_statuses: Counter = Counter(
+        r.get("contract_line_parse_status") or "not_logged" for r in rows
+    )
+    print("parse_status_breakdown:")
+    for status, count in parse_statuses.most_common():
+        print(f"  {status:<30} {count}")
+
+    if with_line:
+        print("\nDISTANCE TO CONTRACT LINE BY ENTRY WINDOW")
+        print("-" * 72)
+        for bucket in BUCKET_ORDER:
+            group = [r for r in with_line if r.get("entry_window_bucket") == bucket]
+            if not group:
+                continue
+            distances = [_as_float(r.get("btc_distance_to_line")) for r in group]
+            distances = [d for d in distances if d is not None]
+            bps_vals = [_as_float(r.get("btc_distance_bps")) for r in group]
+            bps_vals = [b for b in bps_vals if b is not None]
+            above = sum(1 for r in group if r.get("is_above_line") is True)
+            near = sum(1 for r in group if r.get("near_line_zone") is True)
+            print(
+                f"{bucket:<16} "
+                f"n={len(group):>4} "
+                f"avg_dist_usd={_fmt_num(_avg(distances), 2):>10} "
+                f"avg_dist_bps={_fmt_num(_avg(bps_vals), 2):>9} "
+                f"above_line={above}/{len(group)} "
+                f"near_zone(<=20bps)={near}/{len(group)}"
+            )
+
     print("\nVERDICT")
     print("-" * 72)
     print("Research-only. This report does not prove edge and does not affect trading.")

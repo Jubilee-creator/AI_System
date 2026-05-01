@@ -12,6 +12,7 @@ output.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -19,6 +20,11 @@ from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOG_PATH = ROOT / "logs" / "btc_15m_entry_window_snapshots.jsonl"
+
+# Per-ticker contract-reference cache (keyed by ticker string).
+# One Kalshi API call per BTC15M ticker per process lifetime.
+# Cache resets on dashboard/process restart, which is acceptable.
+_contract_ref_cache: dict[str, dict] = {}
 
 REQUIRED_FIELDS = (
     "yes_bid",
@@ -53,6 +59,146 @@ def _parse_ts(value: Any) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _parse_btc_price_from_text(text: str) -> Optional[float]:
+    """
+    Extract a BTC-range dollar price from a Kalshi subtitle string.
+
+    Handles formats like:
+      "Target Price: $76,983.36"
+      "Opening price $77,000"
+      "$94,200.50"
+
+    Returns None if no plausible BTC price (5,000–1,500,000) is found.
+    Never invents or estimates a value.
+    """
+    if not text:
+        return None
+    match = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    try:
+        price = float(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    if 5_000.0 <= price <= 1_500_000.0:
+        return price
+    return None
+
+
+def _fetch_contract_reference(ticker: str) -> dict:
+    """
+    Fetch BTC15M contract-line metadata from the Kalshi market detail endpoint.
+
+    Primary field:  floor_strike       (official Kalshi contract line)
+    Fallback field: yes_sub_title      (parsed, e.g. "Target Price: $76,983.36")
+    Also captures:  open_time          (official contract start)
+
+    Results are cached per ticker — one API call per 15-minute contract
+    per process lifetime.  Never invents or estimates the reference price.
+
+    Returns dict with keys:
+      contract_open_time          str | None
+      contract_line               float | None
+      contract_line_source        "floor_strike" | "yes_sub_title" | None
+      contract_line_parse_status  "ok" | "missing" | "fetch_failed"
+      contract_line_error         str | None
+    """
+    if ticker in _contract_ref_cache:
+        return _contract_ref_cache[ticker]
+
+    result: dict = {
+        "contract_open_time": None,
+        "contract_line": None,
+        "contract_line_source": None,
+        "contract_line_parse_status": "fetch_failed",
+        "contract_line_error": None,
+    }
+
+    try:
+        from brokers.kalshi_client import kalshi_get as _kalshi_get
+    except ImportError as exc:
+        result["contract_line_error"] = f"kalshi_client_unavailable: {exc}"
+        _contract_ref_cache[ticker] = result
+        return result
+
+    try:
+        detail = _kalshi_get(f"/markets/{ticker}", silent=True)
+    except Exception as exc:
+        result["contract_line_error"] = f"api_call_exception: {exc}"
+        _contract_ref_cache[ticker] = result
+        return result
+
+    if not detail:
+        result["contract_line_error"] = "no_detail_response"
+        _contract_ref_cache[ticker] = result
+        return result
+
+    market = detail.get("market") or detail
+
+    # Contract open time from official API field
+    result["contract_open_time"] = market.get("open_time") or None
+
+    # Primary: floor_strike (Kalshi's official contract reference price)
+    floor_strike_raw = market.get("floor_strike")
+    if floor_strike_raw is not None:
+        try:
+            price = float(floor_strike_raw)
+            if 5_000.0 <= price <= 1_500_000.0:
+                result["contract_line"] = price
+                result["contract_line_source"] = "floor_strike"
+                result["contract_line_parse_status"] = "ok"
+        except (TypeError, ValueError):
+            pass
+
+    # Fallback: parse yes_sub_title text
+    if result["contract_line"] is None:
+        yes_sub = str(market.get("yes_sub_title") or "")
+        parsed = _parse_btc_price_from_text(yes_sub)
+        if parsed is not None:
+            result["contract_line"] = parsed
+            result["contract_line_source"] = "yes_sub_title"
+            result["contract_line_parse_status"] = "ok"
+
+    if result["contract_line"] is None:
+        result["contract_line_parse_status"] = "missing"
+        result["contract_line_error"] = (
+            f"floor_strike={floor_strike_raw!r} "
+            f"yes_sub_title={market.get('yes_sub_title')!r}"
+        )
+
+    _contract_ref_cache[ticker] = result
+    return result
+
+
+def _compute_distance_fields(btc_price: Optional[float], ref: dict) -> dict:
+    """
+    Compute btc_distance_to_line and derived fields from a reference cache entry.
+
+    All fields are None when btc_price or contract_line is unavailable.
+    near_line_zone is True when |distance| <= 20 bps (≈ ±$15 at $77k BTC).
+    """
+    contract_line = ref.get("contract_line")
+    out: dict = {
+        "contract_open_time": ref.get("contract_open_time"),
+        "contract_line": contract_line,
+        "contract_line_source": ref.get("contract_line_source"),
+        "contract_line_parse_status": ref.get("contract_line_parse_status", "fetch_failed"),
+        "contract_line_error": ref.get("contract_line_error"),
+        "btc_distance_to_line": None,
+        "btc_distance_bps": None,
+        "is_above_line": None,
+        "near_line_zone": None,
+    }
+    if btc_price is not None and contract_line is not None and contract_line > 0.0:
+        dist = btc_price - contract_line
+        dist_bps = (dist / contract_line) * 10_000.0
+        out["btc_distance_to_line"] = round(dist, 4)
+        out["btc_distance_bps"] = round(dist_bps, 4)
+        out["is_above_line"] = bool(btc_price >= contract_line)
+        out["near_line_zone"] = bool(abs(dist_bps) <= 20.0)
+    return out
 
 
 def _time_to_expiry_seconds(market: dict, now: datetime) -> Optional[float]:
@@ -208,6 +354,27 @@ def _snapshot_from_market(
         reject_reasons.append("REJECT_NO_SYNCED_BTC_PRICE")
     record["research_gate_status"] = "PASS" if not reject_reasons else "REJECT"
     record["research_reject_reasons"] = reject_reasons
+
+    # M-48D: Contract-line and distance-to-line fields (read-only, additive).
+    # One Kalshi API call per ticker per process lifetime (cached).
+    # No trade approval, sizing, or risk logic depends on these fields.
+    ticker = record.get("ticker") or ""
+    if ticker:
+        ref = _fetch_contract_reference(ticker)
+        contract_fields = _compute_distance_fields(record.get("btc_price"), ref)
+        record.update(contract_fields)
+    else:
+        record.update({
+            "contract_open_time": None,
+            "contract_line": None,
+            "contract_line_source": None,
+            "contract_line_parse_status": "not_fetched",
+            "contract_line_error": "no_ticker",
+            "btc_distance_to_line": None,
+            "btc_distance_bps": None,
+            "is_above_line": None,
+            "near_line_zone": None,
+        })
 
     return record
 
