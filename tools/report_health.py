@@ -20,11 +20,22 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from config.trading_config import (
+    DATA_COLLECTION_MODE,
+    GLOBAL_FORCED_LEARNING_MODE,
+    MIN_CONFIDENCE,
+)
+from tools.clean_truth_report import classify_records, evaluate_proof_gates
+from tools.performance_report import load_trades
+
 HEARTBEAT_FILE = ROOT / "data" / "auto_settle_last_run.json"
 LOCK_FILE = ROOT / "data" / "auto_settle_loop.lock"
 SETTLE_LOG = ROOT / "logs" / "auto_settle_loop.log"
@@ -224,6 +235,38 @@ def check_btc_snapshots() -> dict:
         return {"last_snapshot_ts": None, "error": str(exc)}
 
 
+def check_research_truth() -> dict:
+    """Return compact proof/mode flags for the operator truth summary."""
+    try:
+        records = load_trades()
+        buckets = classify_records(records)
+        gate = evaluate_proof_gates(buckets, buckets["clean_settled"])
+    except Exception as exc:
+        return {"loaded": False, "error": str(exc)}
+
+    health = gate.get("edge_profile_health") or {}
+    return {
+        "loaded": True,
+        "system_mode": "RESEARCH_ONLY",
+        "proof_verdict": gate.get("verdict", "UNKNOWN"),
+        "proof_reason": gate.get("reason", ""),
+        "scale_allowed": bool(gate.get("scale_allowed")),
+        "real_money_allowed": bool(gate.get("real_money_allowed")),
+        "data_collection_mode": DATA_COLLECTION_MODE,
+        "global_forced_learning_mode": GLOBAL_FORCED_LEARNING_MODE,
+        "kelly_sizing_used": not GLOBAL_FORCED_LEARNING_MODE,
+        "min_confidence": MIN_CONFIDENCE,
+        "edge_profile_trusted": health.get("edge_profile_trusted", False),
+        "edge_profile_reason": health.get("reason", ""),
+        "clean_settled_count": gate.get("clean_settled_count", 0),
+        "modern_full_count": gate.get("modern_full_count", 0),
+        "normal_modern_count": gate.get("normal_modern_count", 0),
+        "data_collection_override_count": gate.get("dc_count", 0),
+        "bootstrap_provisional_count": gate.get("bootstrap_count", 0),
+        "time_exit_excluded_count": gate.get("time_exit_excluded_count", 0),
+    }
+
+
 def _status_line(ok: bool, label: str, detail: str) -> str:
     mark = "OK  " if ok else "WARN"
     return f"  [{mark}] {label:<30} {detail}"
@@ -235,12 +278,39 @@ def main() -> None:
     risk = check_risk_state()
     dashboard = check_dashboard_process()
     btc = check_btc_snapshots()
+    truth = check_research_truth()
     now = _now()
 
     print("=" * 72)
     print("AI_SYSTEM HEALTH CHECK")
     print(f"  as_of: {now.isoformat()}")
     print("=" * 72)
+
+    # ── Research / proof truth summary ───────────────────────────────────────
+    print("\nSYSTEM TRUTH SUMMARY")
+    print("-" * 72)
+    if not truth.get("loaded"):
+        print(_status_line(False, "truth_summary", truth.get("error", "unavailable")))
+    else:
+        print(_status_line(False, "system_mode", truth["system_mode"]))
+        print(_status_line(False, "proof_verdict", truth["proof_verdict"]))
+        print(_status_line(bool(truth["edge_profile_trusted"]), "edge_profile_trusted", str(truth["edge_profile_trusted"])))
+        print(_status_line(not truth["kelly_sizing_used"], "kelly_execution", "DISABLED" if not truth["kelly_sizing_used"] else "ENABLED"))
+        print(_status_line(not truth["data_collection_mode"], "data_collection_mode", str(truth["data_collection_mode"])))
+        print(_status_line(True, "min_confidence", f"{truth['min_confidence']:.2f}"))
+        print(_status_line(not truth["scale_allowed"], "scale_allowed", "NO" if not truth["scale_allowed"] else "YES"))
+        print(_status_line(not truth["real_money_allowed"], "real_money_allowed", "NO" if not truth["real_money_allowed"] else "YES"))
+        print(
+            "    samples: "
+            f"clean_settled={truth['clean_settled_count']}  "
+            f"modern_full={truth['modern_full_count']}  "
+            f"normal_modern={truth['normal_modern_count']}  "
+            f"data_collection={truth['data_collection_override_count']}  "
+            f"bootstrap={truth['bootstrap_provisional_count']}  "
+            f"time_exit_excluded={truth['time_exit_excluded_count']}"
+        )
+        reason = str(truth["proof_reason"])
+        print(f"    reason: {reason[:120]}{'...' if len(reason) > 120 else ''}")
 
     # ── Auto-settle loop ─────────────────────────────────────────────────────
     print("\nAUTO-SETTLE LOOP")
@@ -318,6 +388,11 @@ def main() -> None:
         alerts.append(f"COOLDOWN ACTIVE until {risk.get('cooldown_until')}")
     if not dashboard["running"]:
         alerts.append("DASHBOARD NOT RUNNING")
+    if truth.get("loaded") and truth.get("proof_verdict") != "SCALE_ELIGIBLE":
+        alerts.append(
+            f"RESEARCH ONLY — proof verdict {truth.get('proof_verdict')} "
+            "means no scaling or real money"
+        )
     if btc_age is not None and btc_age > 600:
         alerts.append(f"BTC SNAPSHOTS STALE ({_age_str(_parse_ts(btc.get('last_snapshot_ts')))}) — dashboard may not be scanning")
 

@@ -658,6 +658,14 @@ def summarize_performance() -> dict:
             "flat": row["flat"],
         })
 
+    proof_checklist = build_proof_checklist(clean_settled, time_exits)
+    try:
+        edge_profile = json.loads((ROOT / "data" / "edge_profile.json").read_text())
+        edge_health = edge_profile.get("edge_profile_health") or {}
+    except Exception:
+        edge_profile = {}
+        edge_health = {}
+
     return {
         "raw": {
             "total_records": total_lines,
@@ -713,6 +721,25 @@ def summarize_performance() -> dict:
                 else "Kelly-derived sizing path is enabled."
             ),
         },
+        "system_truth_summary": {
+            "system_mode": "RESEARCH_ONLY",
+            "proof_verdict": proof_checklist.get("scale_verdict", "UNKNOWN"),
+            "proof_reason": proof_checklist.get("scale_verdict_reason", ""),
+            "scale_allowed": False,
+            "real_money_allowed": False,
+            "edge_profile_trusted": edge_health.get("edge_profile_trusted", False),
+            "edge_profile_reason": edge_health.get("reason"),
+            "data_collection_mode": DATA_COLLECTION_MODE,
+            "global_forced_learning_mode": GLOBAL_FORCED_LEARNING_MODE,
+            "kelly_sizing_used": not GLOBAL_FORCED_LEARNING_MODE,
+            "clean_settled_count": len(clean_settled),
+            "modern_full_count": proof_checklist.get("modern_evaluated_rows", 0),
+            "normal_modern_count": proof_checklist.get("normal_trade_count", 0),
+            "data_collection_override_count": proof_checklist.get("data_collection_count", 0),
+            "bootstrap_provisional_count": proof_checklist.get("bootstrap_provisional_count", 0),
+            "time_exit_excluded_count": len(time_exits),
+            "warning": "Research-only. Current samples are not proof; no scaling or real money.",
+        },
         "live_pnl": {
             "realized_pnl": realized_pnl,
             "unrealized_pnl": round(sum(unrealized_vals), 2) if unrealized_vals else 0.0,
@@ -722,7 +749,7 @@ def summarize_performance() -> dict:
         },
         "active_trades": active_trade_cards,
         "clv_by_strategy": clv_strategy_rows,
-        "proof_checklist": build_proof_checklist(clean_settled, time_exits),
+        "proof_checklist": proof_checklist,
         "market_visuals": build_market_visuals(active_trade_cards),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
