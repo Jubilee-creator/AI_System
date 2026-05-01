@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from brain.strategy_utils import normalize_strategy
 from brain.edge_profile_health import edge_profile_health
+from config.trading_config import GLOBAL_FORCED_LEARNING_MODE
 from tools.performance_report import (
     build_terminal_key_sets,
     classify_open_records,
@@ -1845,6 +1846,18 @@ def print_disagreement_note() -> None:
     print("Use this report or performance_report.py as the validation truth source.")
 
 
+def print_sizing_mode_note() -> None:
+    print()
+    print("SIZING MODE TRUTH")
+    print("-----------------")
+    if GLOBAL_FORCED_LEARNING_MODE:
+        print("Kelly sizing: DISABLED for execution.")
+        print("original_kelly_size is diagnostic only; actual entries are forced to learning size.")
+        print("This system is not scaling based on Kelly while proof verdict is NOT_PROVEN.")
+    else:
+        print("Kelly sizing: ENABLED. Confirm proof gates and human sign-off before trusting sizes.")
+
+
 def main() -> None:
     all_records = load_trades()
     buckets = classify_records(all_records)
@@ -1857,6 +1870,7 @@ def main() -> None:
     print("=" * 92)
     print(f"Log records read: {len(all_records)}")
     print_disagreement_note()
+    print_sizing_mode_note()
 
     print()
     print("TERMINAL STATE SEPARATION")

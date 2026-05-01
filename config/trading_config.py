@@ -237,6 +237,11 @@ MIN_CLV_TO_GO_LIVE = 0.0
 PAPER_VALIDATION_MODE = True
 PAPER_VALIDATION_MAX_BET_SIZE = 10.00  # $ per trade while in validation mode
 
+# Phase 1-3 research mode: Kelly is calculated and logged for audit only.
+# Actual paper entries are forced to the minimum learning bet until edge,
+# calibration, and normal council-approved performance are proven.
+GLOBAL_FORCED_LEARNING_MODE = True
+
 # Maximum concurrent open positions per ticker (1 = no duplicate exposure)
 MAX_POSITIONS_PER_TICKER = 1
 
@@ -373,6 +378,7 @@ def get_config_summary() -> Dict[str, Any]:
         "min_edge": MIN_EDGE,
         "min_confidence": MIN_CONFIDENCE,
         "kelly_fraction": KELLY_FRACTION,
+        "global_forced_learning_mode": GLOBAL_FORCED_LEARNING_MODE,
         "kill_switch_active": KILL_SWITCH_ACTIVE,
         "trading_paused": TRADING_PAUSED,
     }

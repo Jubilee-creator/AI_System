@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dotenv import load_dotenv
 load_dotenv()
 
-from config.trading_config import MIN_CONFIDENCE
+from config.trading_config import GLOBAL_FORCED_LEARNING_MODE, MIN_CONFIDENCE
 
 try:
     from flask import Flask, jsonify, render_template_string
@@ -701,6 +701,15 @@ def summarize_performance() -> dict:
         "blended": {
             "settled_plus_time_exit_pnl": round(total_pnl + time_exit_pnl, 2),
             "warning": "Blended P&L mixes outcome-known SETTLED rows with TIME_EXIT marks.",
+        },
+        "sizing_mode": {
+            "global_forced_learning_mode": GLOBAL_FORCED_LEARNING_MODE,
+            "kelly_sizing_used": not GLOBAL_FORCED_LEARNING_MODE,
+            "message": (
+                "Kelly is calculated/logged for audit only; actual entries are forced to learning size."
+                if GLOBAL_FORCED_LEARNING_MODE
+                else "Kelly-derived sizing path is enabled."
+            ),
         },
         "live_pnl": {
             "realized_pnl": realized_pnl,

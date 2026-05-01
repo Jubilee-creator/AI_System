@@ -29,6 +29,7 @@ Usage:
 """
 
 import json
+import sys
 from pathlib import Path
 
 
@@ -36,6 +37,9 @@ from pathlib import Path
 
 ROOT       = Path(__file__).parent.parent
 TRADES_LOG = ROOT / "logs" / "paper_trades.jsonl"
+sys.path.insert(0, str(ROOT))
+
+from config.trading_config import GLOBAL_FORCED_LEARNING_MODE
 
 
 # ─── HELPERS ────────────────────────────────────────────────────────────────
@@ -277,6 +281,16 @@ def run() -> None:
             f"(positive={forced_pos}, negative={forced_neg}, flat={forced_flat})"
         )
     print(f"    no-status:    {no_status}   (excluded — old format)")
+    print()
+    print("── SIZING MODE ─────────────────────────────────────────────")
+    print(
+        "  Kelly sizing:   "
+        + ("DISABLED — calculated/logged for audit only" if GLOBAL_FORCED_LEARNING_MODE else "ENABLED")
+    )
+    print(
+        "  Actual sizing:  "
+        + ("forced minimum learning bet" if GLOBAL_FORCED_LEARNING_MODE else "Kelly/risk path")
+    )
 
     # ── Active open positions ────────────────────────────────────────────────
     print()

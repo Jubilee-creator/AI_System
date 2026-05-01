@@ -29,6 +29,7 @@ from engine.edge_calculator import MarketData
 from config.trading_config import (
     PAPER_VALIDATION_MODE,
     PAPER_VALIDATION_MAX_BET_SIZE,
+    GLOBAL_FORCED_LEARNING_MODE,
     MAX_POSITIONS_PER_TICKER,
     MAX_SPREAD,
     MIN_VOLUME,
@@ -639,15 +640,22 @@ class PaperTrader:
             f"learning_trade={is_learning_trade}"
         )
 
-        # Temporary global size override to stabilize exposure and collect data.
-        # Applies to ALL strategies before risk-manager checks.
-        if bet_size != MIN_LEARNING_BET or not is_learning_trade:
-            print("[SIZE_OVERRIDE] forced learning mode")
-            if not size_override_used:
-                size_override_used = True
-                final_bet_size_reason = "GLOBAL_FORCED_LEARNING_MODE"
-        bet_size = MIN_LEARNING_BET
-        is_learning_trade = True
+        # Global forced learning mode: Kelly is audit-only while edge is unproven.
+        # This intentionally forces every paper entry to MIN_LEARNING_BET before
+        # risk checks.  Set GLOBAL_FORCED_LEARNING_MODE=False only after proof
+        # gates and human review justify testing actual Kelly-derived sizing.
+        if GLOBAL_FORCED_LEARNING_MODE:
+            if bet_size != MIN_LEARNING_BET or not is_learning_trade:
+                print(
+                    "[SIZE_OVERRIDE] GLOBAL_FORCED_LEARNING_MODE "
+                    f"kelly_audit_size=${original_kelly_size:.2f} "
+                    f"final_size=${MIN_LEARNING_BET:.2f}"
+                )
+                if not size_override_used:
+                    size_override_used = True
+                    final_bet_size_reason = "GLOBAL_FORCED_LEARNING_MODE"
+            bet_size = MIN_LEARNING_BET
+            is_learning_trade = True
         
         # DEBUG 6: Check bet size is positive.  If the Council allowed but
         # Kelly sizes to zero, keep collecting paper data with a tiny bet.
@@ -776,6 +784,8 @@ class PaperTrader:
             "edge_profile_normal_modern": edge_profile_health.get("normal_council_approved_modern_trades"),
             "net_confidence_adjustment": net_confidence_adjustment,
             "original_kelly_size": original_kelly_size,
+            "kelly_sizing_used": not GLOBAL_FORCED_LEARNING_MODE,
+            "global_forced_learning_mode": GLOBAL_FORCED_LEARNING_MODE,
             "size_override_used": size_override_used,
             "final_bet_size_reason": final_bet_size_reason,
             "risk_manager_approved_initially": risk_manager_approved_initially,
