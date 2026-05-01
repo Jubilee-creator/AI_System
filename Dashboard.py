@@ -1292,7 +1292,8 @@ def background_scan():
                             trade, trace_text = call_paper_trader_with_trace(
                                 market_data=market_data,
                                 estimated_prob=estimated_prob,
-                                strategy=strategy_label
+                                strategy=strategy_label,
+                                intended_action=opp.get("action"),
                             )
                             trace_counts = classify_execution_trace(trace_text, trade)
                             for key, value in trace_counts.items():

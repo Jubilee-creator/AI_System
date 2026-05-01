@@ -96,6 +96,7 @@ def inspect_logs(records: list[dict]) -> dict[str, Any]:
             "scanner_action",
             "intended_action",
             "executed_action",
+            "handoff_action_mismatch",
             "paper_action",
             "action",
             "scanner_confidence",
@@ -141,6 +142,10 @@ def main() -> None:
     records = load_trades()
     source = inspect_source()
     logs = inspect_logs(records)
+    future_trace_fields_wired = (
+        source["dashboard_passes_action_to_paper_trader"]
+        and source["paper_trader_accepts_intended_action"]
+    )
     action_counts = Counter(logs["action_counts"])
     yes = action_counts.get("BET_YES", 0)
     no = action_counts.get("BET_NO", 0)
@@ -163,6 +168,7 @@ def main() -> None:
     print(f"PaperTrader accepts intended action:     {yn(source['paper_trader_accepts_intended_action'])}")
     print(f"PaperTrader re-derives side:             {yn(source['paper_trader_rederives_side'])}")
     print(f"PaperTrader flips NO probability:        {yn(source['paper_trader_flips_no_probability'])}")
+    print(f"future trace fields wired:               {yn(future_trace_fields_wired)}")
 
     print()
     print("LOG TRACEABILITY CHECK")
@@ -172,6 +178,7 @@ def main() -> None:
     print(f"rows with scanner_action:              {fields.get('scanner_action', 0)}")
     print(f"rows with intended_action:             {fields.get('intended_action', 0)}")
     print(f"rows with executed_action:             {fields.get('executed_action', 0)}")
+    print(f"rows with handoff_action_mismatch:      {fields.get('handoff_action_mismatch', 0)}")
     print(f"rows with action:                      {fields.get('action', 0)}")
     print(f"mismatch measurable from current logs: {yn(logs['mismatch_measurable'])}")
     print(f"measured mismatch count:               {logs['mismatch_count'] if logs['mismatch_count'] is not None else 'n/a'}")
@@ -191,7 +198,9 @@ def main() -> None:
         warnings.append("PAPER_TRADER_HAS_NO_INTENDED_ACTION_PARAMETER")
     if source["paper_trader_rederives_side"]:
         warnings.append("PAPER_TRADER_REDERIVES_SIDE_FROM_CONFIDENCE")
-    if not logs["mismatch_measurable"]:
+    if not logs["mismatch_measurable"] and future_trace_fields_wired:
+        warnings.append("NO_NEW_TRACE_ROWS_YET_RUN_SCANNER_TO_MEASURE")
+    elif not logs["mismatch_measurable"]:
         warnings.append("CURRENT_LOGS_CANNOT_MEASURE_INTENDED_VS_EXECUTED_MISMATCH")
     if no == 0:
         warnings.append("BET_NO_ZERO_IN_CURRENT_LOGS")
@@ -203,19 +212,26 @@ def main() -> None:
         print(f"[!] {warning}")
 
     print()
-    print("MINIMAL NEXT PATCH RECOMMENDATION")
-    print("---------------------------------")
-    print("Add future logging fields only, before changing execution:")
-    print("- scanner_action / intended_action from opportunity['action']")
-    print("- executed_action from PaperTrader's final action")
-    print("- handoff_action_mismatch boolean")
-    print("Then run at least one scanner cycle and audit whether mismatches occur live.")
+    print("MINIMAL NEXT STEP")
+    print("-----------------")
+    if future_trace_fields_wired:
+        print("Trace plumbing is present for future trades.")
+        print("Run one scanner cycle, then rerun this report to measure real mismatches.")
+    else:
+        print("Add future logging fields only, before changing execution:")
+        print("- scanner_action / intended_action from opportunity['action']")
+        print("- executed_action from PaperTrader's final action")
+        print("- handoff_action_mismatch boolean")
+        print("Then run at least one scanner cycle and audit whether mismatches occur live.")
 
     print()
     print("VERDICT")
     print("-------")
     if warnings:
-        print("Handoff is not auditable from current logs and source inspection shows action can be dropped.")
+        if future_trace_fields_wired and not logs["mismatch_measurable"]:
+            print("Future handoff rows will be auditable, but current logs still cannot prove mismatch.")
+        else:
+            print("Handoff is not auditable from current logs and source inspection shows action can be dropped.")
     else:
         print("No handoff issue detected by static/log inspection.")
     print("This report is diagnostic only. It does not prove edge and does not fix execution.")

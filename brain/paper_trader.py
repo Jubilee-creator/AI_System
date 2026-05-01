@@ -346,7 +346,8 @@ class PaperTrader:
         self,
         market_data: MarketData,
         estimated_prob: float,
-        strategy: str = "SIGNAL"
+        strategy: str = "SIGNAL",
+        intended_action: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Process trading signal through risk manager, then execute if approved.
@@ -358,12 +359,19 @@ class PaperTrader:
             market_data: Market data object
             estimated_prob: Model probability of YES outcome
             strategy: Strategy label (SIGNAL, ARB, TREND)
+            intended_action: Scanner-selected action for audit logging only.
+                PaperTrader does not trust or execute from this field yet.
         
         Returns:
             Trade dict if executed, None if skipped/blocked
         """
         raw_strategy = strategy
         strategy = normalize_strategy(strategy)
+        scanner_action = (
+            str(intended_action).strip().upper()
+            if intended_action is not None and str(intended_action).strip()
+            else None
+        )
         raw_strategy_text = str(raw_strategy or "").strip().upper()
         market_type = ""
         if "_" in raw_strategy_text:
@@ -432,6 +440,12 @@ class PaperTrader:
             action = "ARB"
             # For ARB, estimated_prob is near 1.0
             estimated_prob = 0.99
+
+        executed_action = action
+        handoff_action_mismatch = (
+            scanner_action is not None
+            and scanner_action != executed_action
+        )
 
         spread = _market_spread(market_data, action)
         volume = _market_volume(market_data)
@@ -754,6 +768,10 @@ class PaperTrader:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "ticker": market_data.ticker,
             "action": action,
+            "scanner_action": scanner_action,
+            "intended_action": scanner_action,
+            "executed_action": executed_action,
+            "handoff_action_mismatch": handoff_action_mismatch,
             "strategy": strategy,
             "entry_price": price,
             "size": bet_size,
