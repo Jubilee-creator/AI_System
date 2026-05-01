@@ -447,7 +447,23 @@ class PaperTrader:
         original_edge = edge
         council_confidence = original_confidence
         adjusted_edge = original_edge
-        
+
+        # ── Execution-path audit defaults ─────────────────────────────────────
+        # Populated progressively below; all safe to read at record-creation time.
+        council_decision = "UNKNOWN"
+        council_reason = ""
+        net_confidence_adjustment = 0.0
+        original_kelly_size = 0.0
+        size_override_used = False
+        final_bet_size_reason = "NORMAL_KELLY"
+        risk_manager_approved_initially = False
+        risk_manager_block_reason = None
+        risk_override_used = False
+        risk_override_reason = None
+        market_quality_passed = True   # only reachable here if filter already passed
+        market_spread_val = spread if spread != float("inf") else None
+        market_volume_val = volume
+
         # DEBUG 3: Show calculated values
         print(f"[PAPER_DEBUG] action={action} price={price:.3f} estimated_prob={estimated_prob:.3f} edge={edge:.4f} min_edge={self.min_edge:.4f}")
         
@@ -499,24 +515,29 @@ class PaperTrader:
             edge = estimated_prob - price - fee_estimate
             council_confidence = estimated_prob
             adjusted_edge = edge
-            net_adjustment = float(council_result.get("net_confidence_adjustment") or 0.0)
+            net_confidence_adjustment = float(council_result.get("net_confidence_adjustment") or 0.0)
             print(f"[COUNCIL] ALLOW: {council_reason}")
             print(f"[COUNCIL] confidence {old_prob:.3f} -> {estimated_prob:.3f}")
-            print(f"[COUNCIL] net_adjustment: {net_adjustment:+.4f}")
+            print(f"[COUNCIL] net_adjustment: {net_confidence_adjustment:+.4f}")
         except Exception as exc:
             print(f"[COUNCIL] ERROR: {exc}")
+            council_decision = "ERROR"
+            council_reason = str(exc)
             council_confidence = estimated_prob
             adjusted_edge = edge
         
         # Calculate bet size
         is_learning_trade = False
         bet_size = self._calculate_kelly_size(estimated_prob, price)
+        original_kelly_size = bet_size  # audit: true Kelly size before any override
 
         # Validation-mode cap: limit trade size while collecting edge data.
         # Daily loss limit, exposure check, min_edge, and min_confidence are unchanged.
         if PAPER_VALIDATION_MODE and bet_size > PAPER_VALIDATION_MAX_BET_SIZE:
             print(f"[PAPER_DEBUG] validation cap applied: original_size={bet_size:.2f} capped_size={PAPER_VALIDATION_MAX_BET_SIZE:.2f}")
             bet_size = PAPER_VALIDATION_MAX_BET_SIZE
+            size_override_used = True
+            final_bet_size_reason = "VALIDATION_CAP"
 
         # DEBUG 5: Show bet size calculation
         print(f"[PAPER_DEBUG] bet_size={bet_size:.2f} bankroll={self.bankroll:.2f} max_bet_size={self.max_bet_size:.2f}")
@@ -529,10 +550,13 @@ class PaperTrader:
         if force_data_collection_learning:
             bet_size = MIN_LEARNING_BET
             is_learning_trade = True
+            size_override_used = True
+            final_bet_size_reason = "DATA_COLLECTION_OVERRIDE"
         elif 0.50 <= estimated_prob < self.min_confidence:
-            original_kelly_size = bet_size
             bet_size = MIN_LEARNING_BET
             is_learning_trade = True
+            size_override_used = True
+            final_bet_size_reason = "MID_CONFIDENCE_LEARNING_OVERRIDE"
             print(
                 "[LEARNING] MID_CONFIDENCE_LEARNING_OVERRIDE "
                 f"original_confidence={estimated_prob:.3f} "
@@ -559,6 +583,9 @@ class PaperTrader:
         # Applies to ALL strategies before risk-manager checks.
         if bet_size != MIN_LEARNING_BET or not is_learning_trade:
             print("[SIZE_OVERRIDE] forced learning mode")
+            if not size_override_used:
+                size_override_used = True
+                final_bet_size_reason = "GLOBAL_FORCED_LEARNING_MODE"
         bet_size = MIN_LEARNING_BET
         is_learning_trade = True
         
@@ -568,6 +595,9 @@ class PaperTrader:
             if edge >= self.min_edge or strategy == "ARB":
                 bet_size = MIN_LEARNING_BET
                 is_learning_trade = True
+                if not size_override_used:
+                    size_override_used = True
+                    final_bet_size_reason = "KELLY_ZERO_MIN_LEARNING"
                 print(
                     "[LEARNING] Kelly size was 0; using minimum learning bet: "
                     f"${MIN_LEARNING_BET:.2f}"
@@ -612,7 +642,9 @@ class PaperTrader:
             "[TRACE] risk decision="
             f"{'ALLOW' if approved else 'BLOCK'} reason={block_reason}"
         )
-        
+        risk_manager_approved_initially = approved
+        risk_manager_block_reason = block_reason if not approved else None
+
         if not approved:
             can_override_learning_risk = (
                 is_learning_trade
@@ -621,6 +653,13 @@ class PaperTrader:
             )
             if can_override_learning_risk:
                 approved = True
+                risk_override_used = True
+                risk_override_reason = (
+                    f"LEARNING_EXPOSURE_WITHIN_LIMIT "
+                    f"(exposure=${self.risk_manager.total_exposure:.2f} "
+                    f"< max=${MAX_LEARNING_EXPOSURE:.2f}) "
+                    f"original_block={block_reason}"
+                )
                 print("[LEARNING] Risk override: allowing small learning trade")
                 print("[TRACE] risk decision=ALLOW reason=learning risk override")
             elif is_learning_trade:
@@ -661,7 +700,21 @@ class PaperTrader:
             "result": None,
             "pnl": 0.0,
             "exit_price": None,
-            "settled_at": None
+            "settled_at": None,
+            # ── Execution-path audit fields ──────────────────────
+            "council_decision": council_decision,
+            "council_reason": council_reason,
+            "net_confidence_adjustment": net_confidence_adjustment,
+            "original_kelly_size": original_kelly_size,
+            "size_override_used": size_override_used,
+            "final_bet_size_reason": final_bet_size_reason,
+            "risk_manager_approved_initially": risk_manager_approved_initially,
+            "risk_manager_block_reason": risk_manager_block_reason,
+            "risk_override_used": risk_override_used,
+            "risk_override_reason": risk_override_reason,
+            "market_spread": market_spread_val,
+            "market_volume": market_volume_val,
+            "market_quality_passed": market_quality_passed,
         }
         trade.update(_paper_trade_metadata(market_data, action, fee_estimate))
         
