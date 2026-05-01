@@ -16,6 +16,7 @@ import contextlib
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict, List, Optional
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -300,7 +301,7 @@ def _is_modern_full_metadata(rec: dict) -> bool:
     )
 
 
-def _avg_numeric(rows: list[dict], key: str):
+def _avg_numeric(rows: List[dict], key: str):
     values = [_safe_float(r.get(key), None) for r in rows if r.get(key) is not None]
     return round(sum(values) / len(values), 4) if values else None
 
@@ -315,7 +316,7 @@ def _proof_state(condition_pass: bool, condition_fail: bool, watch_reason: str) 
     return "WATCH"
 
 
-def build_proof_checklist(outcome_known_rows: list[dict], time_exit_rows: list[dict] | None = None) -> dict:
+def build_proof_checklist(outcome_known_rows: List[dict], time_exit_rows: Optional[List[dict]] = None) -> dict:
     """Build proof status from true outcome-known SETTLED rows only."""
     time_exit_rows = time_exit_rows or []
     modern_rows = [r for r in outcome_known_rows if _is_modern_full_metadata(r)]
@@ -464,7 +465,7 @@ def update_market_history(opportunities: list, timestamp: str) -> None:
         del series[:-MARKET_HISTORY_LIMIT]
 
 
-def build_market_visuals(active_trades: list[dict]) -> dict:
+def build_market_visuals(active_trades: List[dict]) -> dict:
     opportunities = state.get("opportunities", [])
     quote_index = _current_quote_index()
     history = state.get("market_history", {})

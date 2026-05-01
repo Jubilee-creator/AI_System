@@ -31,6 +31,7 @@ Usage:
 import json
 import sys
 from pathlib import Path
+from typing import List, Set, Tuple
 
 
 # ─── PATHS ──────────────────────────────────────────────────────────────────
@@ -44,7 +45,7 @@ from config.trading_config import DATA_COLLECTION_MODE, GLOBAL_FORCED_LEARNING_M
 
 # ─── HELPERS ────────────────────────────────────────────────────────────────
 
-def load_trades() -> list:
+def load_trades() -> List[dict]:
     if not TRADES_LOG.exists():
         return []
     records = []
@@ -95,7 +96,7 @@ def _trade_key(rec: dict):
     return (ts, ticker, action, size, ep)
 
 
-def classify_open_records(all_records: list) -> tuple[list, list]:
+def classify_open_records(all_records: List[dict]) -> Tuple[List[dict], List[dict]]:
     """
     Split all status=="OPEN" records into (active, stale).
 
@@ -104,7 +105,7 @@ def classify_open_records(all_records: list) -> tuple[list, list]:
     """
     _resolved_statuses = {"SETTLED", "FORCED_CLOSE", "VOID_LEGACY_DUPLICATE"}
 
-    resolved_keys: set = set()
+    resolved_keys: Set[tuple] = set()
     for rec in all_records:
         if rec.get("status") in _resolved_statuses:
             k = _trade_key(rec)
@@ -124,16 +125,16 @@ def classify_open_records(all_records: list) -> tuple[list, list]:
     return active, stale
 
 
-def build_terminal_key_sets(all_records: list) -> tuple[set, set, set]:
+def build_terminal_key_sets(all_records: List[dict]) -> Tuple[Set[tuple], Set[tuple], Set[tuple]]:
     """
     Build terminal-state identity sets for conflict-safe performance stats.
 
     A clean SETTLED trade cannot share its trade key with FORCED_CLOSE or
     VOID_LEGACY_DUPLICATE.  The report is read-only and never rewrites logs.
     """
-    settled_keys: set = set()
-    forced_close_keys: set = set()
-    void_keys: set = set()
+    settled_keys: Set[tuple] = set()
+    forced_close_keys: Set[tuple] = set()
+    void_keys: Set[tuple] = set()
 
     for rec in all_records:
         status = rec.get("status")
@@ -153,11 +154,11 @@ def build_terminal_key_sets(all_records: list) -> tuple[set, set, set]:
 
 
 def classify_settled_records(
-    all_records: list,
-    settled_keys: set,
-    forced_close_keys: set,
-    void_keys: set,
-) -> tuple[list, list]:
+    all_records: List[dict],
+    settled_keys: Set[tuple],
+    forced_close_keys: Set[tuple],
+    void_keys: Set[tuple],
+) -> Tuple[List[dict], List[dict]]:
     """
     Split SETTLED rows into (clean, conflicted).
 

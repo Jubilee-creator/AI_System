@@ -23,7 +23,7 @@ import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -126,7 +126,7 @@ def check_open_trades() -> dict:
     if not TRADES_LOG.exists():
         return {"open_count": 0, "overdue_count": 0, "exposure_dollars": 0.0, "trades": []}
 
-    by_ticker: dict[str, dict] = {}
+    by_ticker: Dict[str, dict] = {}
     try:
         for line in TRADES_LOG.read_text().splitlines():
             line = line.strip()

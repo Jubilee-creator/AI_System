@@ -14,7 +14,7 @@ import json
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -45,7 +45,7 @@ def _slice(text: str, start_token: str, end_token: str) -> str:
     return text[start:] if end < 0 else text[start:end]
 
 
-def inspect_source() -> dict[str, Any]:
+def inspect_source() -> Dict[str, Any]:
     scanner = _read(FILES["market_scanner"])
     dashboard = _read(FILES["dashboard"])
     trader = _read(FILES["paper_trader"])
@@ -87,7 +87,7 @@ def inspect_source() -> dict[str, Any]:
     }
 
 
-def inspect_logs(records: list[dict]) -> dict[str, Any]:
+def inspect_logs(records: List[dict]) -> Dict[str, Any]:
     fields = Counter()
     action_counts = Counter()
     status_counts = Counter()

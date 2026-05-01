@@ -16,7 +16,7 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import mean
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -38,7 +38,7 @@ SOURCE_FILES = {
 }
 
 
-def _as_float(value: Any) -> float | None:
+def _as_float(value: Any) -> Optional[float]:
     if value is None:
         return None
     try:
@@ -53,7 +53,7 @@ def _pct(part: int, total: int) -> str:
     return f"{part / total * 100:.1f}%"
 
 
-def _fmt_num(value: float | None, digits: int = 4) -> str:
+def _fmt_num(value: Optional[float], digits: int = 4) -> str:
     if value is None:
         return "n/a"
     return f"{value:+.{digits}f}"
@@ -92,14 +92,14 @@ def class_value(rec: dict) -> str:
     return "NORMAL_OR_LEGACY"
 
 
-def edge_value(rec: dict) -> float | None:
+def edge_value(rec: dict) -> Optional[float]:
     value = _as_float(rec.get("risk_edge"))
     if value is not None:
         return value
     return _as_float(rec.get("edge"))
 
 
-def confidence_value(rec: dict) -> float | None:
+def confidence_value(rec: dict) -> Optional[float]:
     for key in ("model_probability", "original_confidence", "confidence"):
         value = _as_float(rec.get(key))
         if value is not None:
@@ -107,14 +107,14 @@ def confidence_value(rec: dict) -> float | None:
     return None
 
 
-def group_actions(rows: list[dict], key_fn) -> dict[str, Counter]:
-    groups: dict[str, Counter] = defaultdict(Counter)
+def group_actions(rows: List[dict], key_fn) -> Dict[str, Counter]:
+    groups: Dict[str, Counter] = defaultdict(Counter)
     for row in rows:
         groups[str(key_fn(row))][action_value(row)] += 1
     return groups
 
 
-def print_action_distribution(title: str, rows: list[dict]) -> None:
+def print_action_distribution(title: str, rows: List[dict]) -> None:
     counts = Counter(action_value(r) for r in rows)
     total = sum(counts.values())
     yes = counts.get("BET_YES", 0)
@@ -131,7 +131,7 @@ def print_action_distribution(title: str, rows: list[dict]) -> None:
     )
 
 
-def print_group_table(title: str, groups: dict[str, Counter], limit: int = 20) -> None:
+def print_group_table(title: str, groups: Dict[str, Counter], limit: int = 20) -> None:
     print()
     print(title)
     print("-" * len(title))
@@ -152,7 +152,7 @@ def print_group_table(title: str, groups: dict[str, Counter], limit: int = 20) -
         )
 
 
-def print_action_metrics(rows: list[dict], clean_settled: list[dict]) -> None:
+def print_action_metrics(rows: List[dict], clean_settled: List[dict]) -> None:
     print()
     print("ACTION METRICS")
     print("--------------")
@@ -186,7 +186,7 @@ def print_action_metrics(rows: list[dict], clean_settled: list[dict]) -> None:
         )
 
 
-def inspect_source_path() -> dict[str, Any]:
+def inspect_source_path() -> Dict[str, Any]:
     """Return static source-level observations about YES/NO path capability."""
     sources = {
         name: path.read_text()
@@ -216,7 +216,7 @@ def inspect_source_path() -> dict[str, Any]:
     }
 
 
-def print_source_findings(findings: dict[str, Any]) -> None:
+def print_source_findings(findings: Dict[str, Any]) -> None:
     print()
     print("SOURCE PATH FINDINGS")
     print("--------------------")
@@ -236,7 +236,7 @@ def print_source_findings(findings: dict[str, Any]) -> None:
     print(f"Order book imbalance hardcoded to zero:      {findings['order_book_imbalance_hardcoded_zero']}")
 
 
-def print_warnings(rows: list[dict], source_findings: dict[str, Any]) -> None:
+def print_warnings(rows: List[dict], source_findings: Dict[str, Any]) -> None:
     counts = Counter(action_value(r) for r in rows)
     total = counts.get("BET_YES", 0) + counts.get("BET_NO", 0)
     yes = counts.get("BET_YES", 0)
