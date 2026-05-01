@@ -78,6 +78,10 @@ ROW_QUALITY_ORDER = [
 ]
 
 
+def _fmt_int(value: int) -> str:
+    return str(value)
+
+
 def _as_float(value: Any):
     if value is None:
         return None
@@ -883,6 +887,130 @@ def print_modern_vs_legacy_evidence(rows: list[dict]) -> None:
                 "modern trades are excluded from normal proof. "
                 f"Separate council-approved evidence: n={normal_count}."
             )
+
+
+def bootstrap_monitor_metrics(rows: list[dict]) -> dict:
+    metrics = calc_asymmetry(rows)
+    edge_vals = [v for v in (edge_value(r) for r in rows) if v is not None]
+    confidence_vals = [
+        v for v in (calibration_probability(r) for r in rows) if v is not None
+    ]
+    clv_vals = [v for v in (get_clv(r) for r in rows) if v is not None]
+    metrics.update({
+        "avg_edge": _avg(edge_vals),
+        "avg_confidence": _avg(confidence_vals),
+        "avg_clv": _avg(clv_vals),
+    })
+    return metrics
+
+
+def print_bootstrap_monitor_row(label: str, rows: list[dict]) -> None:
+    metrics = bootstrap_monitor_metrics(rows)
+    print(
+        f"{label:<31} "
+        f"n={metrics['count']:>3} "
+        f"W={metrics['wins']:>3} L={metrics['losses']:>3} P={metrics['pushes']:>3} "
+        f"WR={_fmt_pct(metrics['win_rate']):>6} "
+        f"PnL={_fmt_money(metrics['total_pnl']):>9} "
+        f"ROI={_fmt_pct(metrics['roi']):>8} "
+        f"avgCLV={_fmt_num(metrics['avg_clv']):>8} "
+        f"PF={_fmt_ratio(metrics['profit_factor']):>4} "
+        f"avg_edge={_fmt_num(metrics['avg_edge']):>8} "
+        f"avg_conf={_fmt_num(metrics['avg_confidence'], 3):>7}"
+    )
+
+
+def bootstrap_stop_warnings(active_bootstrap: list[dict],
+                            settled_bootstrap: list[dict],
+                            data_collection_rows: list[dict]) -> list[str]:
+    warnings = []
+    bootstrap_metrics = bootstrap_monitor_metrics(settled_bootstrap)
+    dc_metrics = bootstrap_monitor_metrics(data_collection_rows)
+
+    if len(settled_bootstrap) < 10:
+        warnings.append("SAMPLE_TOO_SMALL")
+    if settled_bootstrap and bootstrap_metrics["roi"] < 0:
+        warnings.append("BOOTSTRAP_NEGATIVE_ROI")
+    if (
+        settled_bootstrap
+        and bootstrap_metrics["avg_clv"] is not None
+        and bootstrap_metrics["avg_clv"] < 0
+    ):
+        warnings.append("BOOTSTRAP_NEGATIVE_CLV")
+    if (
+        settled_bootstrap
+        and bootstrap_metrics["profit_factor"] is not None
+        and bootstrap_metrics["profit_factor"] < 1.0
+    ):
+        warnings.append("BOOTSTRAP_BAD_PF")
+    if (
+        settled_bootstrap
+        and data_collection_rows
+        and bootstrap_metrics["roi"] < dc_metrics["roi"]
+    ):
+        warnings.append("BOOTSTRAP_WORSE_THAN_DC")
+    if active_bootstrap and not settled_bootstrap:
+        warnings.append("WAIT_FOR_SETTLEMENT")
+
+    return warnings
+
+
+def print_bootstrap_provisional_monitor(buckets: dict, evaluated: list[dict]) -> None:
+    print()
+    print("BOOTSTRAP PROVISIONAL MONITOR")
+    print("-----------------------------")
+    print("Reporting only. Bootstrap provisional rows do NOT count as normal proof.")
+
+    active_bootstrap = [
+        r for r in buckets["active_open"] if r.get("bootstrap_provisional")
+    ]
+    settled_bootstrap = [
+        r for r in evaluated if r.get("bootstrap_provisional")
+    ]
+    data_collection_rows = [
+        r for r in evaluated if r.get("data_collection_override")
+    ]
+    normal_modern_rows = [
+        r for r in evaluated
+        if row_quality_group(r) == "MODERN_FULL_METADATA"
+        and not r.get("data_collection_override")
+        and not r.get("bootstrap_provisional")
+    ]
+
+    print(f"Active bootstrap provisional trades:  {_fmt_int(len(active_bootstrap))}")
+    print(f"Settled bootstrap provisional trades: {_fmt_int(len(settled_bootstrap))}")
+    print()
+    print_bootstrap_monitor_row("bootstrap_provisional", settled_bootstrap)
+    print_bootstrap_monitor_row("data_collection_override", data_collection_rows)
+    print_bootstrap_monitor_row("normal_council_approved", normal_modern_rows)
+
+    warnings = bootstrap_stop_warnings(
+        active_bootstrap,
+        settled_bootstrap,
+        data_collection_rows,
+    )
+    print()
+    if warnings:
+        print("Stop-rule warnings:")
+        for warning in warnings:
+            print(f"  [!] {warning}")
+    else:
+        print("Stop-rule warnings: none yet")
+
+    if active_bootstrap:
+        print()
+        print("Active bootstrap provisional rows:")
+        for rec in active_bootstrap[:10]:
+            print(
+                f"  - {rec.get('ticker', 'n/a')} "
+                f"entry={_fmt_field(rec.get('entry_price'))} "
+                f"size={_fmt_field(rec.get('size'))} "
+                f"edge={_fmt_num(edge_value(rec))} "
+                f"conf={_fmt_num(calibration_probability(rec), 3)} "
+                f"reason={_fmt_field(rec.get('final_bet_size_reason'))}"
+            )
+        if len(active_bootstrap) > 10:
+            print(f"  ... {len(active_bootstrap) - 10} more")
 
 
 def print_modern_calibration_report(rows: list[dict]) -> None:
@@ -1754,6 +1882,7 @@ def main() -> None:
     evaluated = clean_settled + time_exits
     print_payout_asymmetry_report(evaluated)
     print_modern_vs_legacy_evidence(evaluated)
+    print_bootstrap_provisional_monitor(buckets, evaluated)
     print_modern_calibration_report(evaluated)
     print_true_ev_report(evaluated)
     print_edge_truth_audit(evaluated)
