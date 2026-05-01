@@ -863,20 +863,24 @@ def print_modern_vs_legacy_evidence(rows: list[dict]) -> None:
 
     if modern_full_rows:
         dc_count = sum(1 for r in modern_full_rows if r.get("data_collection_override"))
-        normal_count = len(modern_full_rows) - dc_count
+        bootstrap_count = sum(1 for r in modern_full_rows if r.get("bootstrap_provisional"))
+        normal_count = max(0, len(modern_full_rows) - dc_count - bootstrap_count)
         print()
         print(f"DATA_COLLECTION_OVERRIDE split (MODERN_FULL_METADATA n={len(modern_full_rows)}):")
         print(f"  council_approved (normal trades): n={normal_count}")
         print(f"  council_rejected (data_collection_override=True): n={dc_count}")
-        if dc_count > 0 and normal_count == 0:
+        print(f"  bootstrap_provisional: n={bootstrap_count}")
+        if (dc_count > 0 or bootstrap_count > 0) and normal_count == 0:
             print(
-                "  [WARNING] ALL modern evidence is from council-REJECTED data_collection_override trades. "
+                "  [WARNING] ALL modern evidence is from non-normal rows "
+                "(data_collection_override and/or bootstrap_provisional). "
                 "This is NOT evidence of normal operation edge. "
                 "The system has zero evaluated council-approved modern trades."
             )
-        elif dc_count > 0:
+        elif dc_count > 0 or bootstrap_count > 0:
             print(
-                f"  [NOTE] {dc_count}/{len(modern_full_rows)} modern trades are council-rejected data_collection. "
+                f"  [NOTE] {dc_count} data_collection and {bootstrap_count} bootstrap provisional "
+                "modern trades are excluded from normal proof. "
                 f"Separate council-approved evidence: n={normal_count}."
             )
 
@@ -1454,8 +1458,10 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
     modern_full = [r for r in evaluated if row_quality_group(r) == "MODERN_FULL_METADATA"]
     modern_full_count  = len(modern_full)
     dc_count           = sum(1 for r in modern_full if r.get("data_collection_override"))
-    normal_modern_count = modern_full_count - dc_count
+    bootstrap_count    = sum(1 for r in modern_full if r.get("bootstrap_provisional"))
+    normal_modern_count = max(0, modern_full_count - dc_count - bootstrap_count)
     dc_pct = round(dc_count / modern_full_count * 100, 1) if modern_full_count else 0.0
+    bootstrap_pct = round(bootstrap_count / modern_full_count * 100, 1) if modern_full_count else 0.0
 
     # Overall clean-settled performance (time exits excluded from this slice)
     cs_asym   = calc_asymmetry(clean_settled)
@@ -1491,6 +1497,10 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
         warnings.append(
             f"{risk_override_count} evaluated trade(s) used learning risk override"
         )
+    if bootstrap_count > 0:
+        warnings.append(
+            f"{bootstrap_count} evaluated trade(s) are bootstrap_provisional and do NOT count as normal proof"
+        )
 
     # ── Hard gates (first matching gate wins) ────────────────────────────────
     if modern_full_count == 0:
@@ -1504,13 +1514,15 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
     elif normal_modern_count == 0:
         verdict = "NOT_PROVEN"
         reason  = (
-            f"All {dc_count} modern full-metadata trade(s) are council-REJECTED "
-            "data_collection_override. Zero council-approved normal trades exist. "
-            "Data-collection evidence is NOT proof of normal model operation."
+            f"All {modern_full_count} modern full-metadata trade(s) are non-normal "
+            f"proof rows ({dc_count} data_collection_override, "
+            f"{bootstrap_count} bootstrap_provisional). "
+            "Zero council-approved normal trades exist. Non-normal evidence is NOT "
+            "proof of normal model operation."
         )
         next_req = (
-            "Resolve critic deadlock: rebuild edge_profile with >= 5 settled trades per "
-            "bucket so council can approve at least 1 signal without data-collection override."
+            "Resolve critic deadlock: collect normal council-approved modern trades. "
+            "Bootstrap provisional rows do not advance proof gates."
         )
 
     elif modern_full_count < _GATE_MIN_MODERN_WATCHLIST:
@@ -1530,7 +1542,8 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
         reason  = (
             f"Normal council-approved modern trades: "
             f"{normal_modern_count}/{_GATE_MIN_NORMAL_WATCHLIST} minimum. "
-            f"{dc_count} data_collection_override trades do NOT count as normal proof."
+            f"{dc_count} data_collection_override and {bootstrap_count} bootstrap_provisional "
+            "trades do NOT count as normal proof."
         )
         next_req = (
             f"Accumulate {_GATE_MIN_NORMAL_WATCHLIST - normal_modern_count} more "
@@ -1609,6 +1622,8 @@ def evaluate_proof_gates(buckets: dict, evaluated: list) -> dict:
         "normal_modern_count":        normal_modern_count,
         "dc_count":                   dc_count,
         "dc_pct":                     dc_pct,
+        "bootstrap_count":            bootstrap_count,
+        "bootstrap_pct":              bootstrap_pct,
         "clean_settled_count":        len(clean_settled),
         "clean_settled_roi_pct":      round(cs_roi * 100, 2),
         "clean_settled_avg_clv":      cs_avg_clv,
@@ -1649,6 +1664,8 @@ def print_proof_gate_verdict(gate: dict) -> None:
           f"  (need >= {_GATE_MIN_NORMAL_WATCHLIST})")
     print(f"  Data-collection override count:   {gate['dc_count']}"
           f"  ({gate['dc_pct']:.1f}% of modern — NOT normal proof)")
+    print(f"  Bootstrap provisional count:      {gate['bootstrap_count']}"
+          f"  ({gate['bootstrap_pct']:.1f}% of modern — NOT normal proof)")
     print(f"  Clean settled count:              {gate['clean_settled_count']}")
     print(f"  Clean settled ROI:                {_pct(gate['clean_settled_roi_pct'])}"
           "  (overall; need > 0% for scale)")

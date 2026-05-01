@@ -248,6 +248,29 @@ EDGE_PROFILE_MIN_NORMAL_MODERN = 10
 
 
 # ═══════════════════════════════════════════════════════════════
+# BOOTSTRAP PROVISIONAL MODE
+# ═══════════════════════════════════════════════════════════════
+
+# When the system is in a bootstrap deadlock (normal_modern == 0, edge profile
+# untrusted), the Critic cannot normally approve any signal.  Bootstrap
+# provisional mode allows the Critic to return a PROVISIONAL decision for
+# signals that meet a higher quality bar.  These trades are logged with
+# bootstrap_provisional=True and are explicitly excluded from normal proof
+# counts, proof gate advancement, and edge profile trust evaluation.
+#
+# bootstrap_provisional trades:
+#   - are allowed only when the system has zero normal-approved modern trades
+#   - execute at MIN_LEARNING_BET ($5) — same as data_collection_override
+#   - do NOT count as council-approved normal proof
+#   - do NOT advance proof gates
+#   - do NOT make edge_profile trusted
+#   - do NOT unlock scaling or real money
+BOOTSTRAP_PROVISIONAL_MODE = True
+BOOTSTRAP_MIN_EDGE = 0.05          # original edge floor for provisional candidates
+BOOTSTRAP_MIN_CONFIDENCE = 0.65    # confidence floor for provisional candidates
+
+
+# ═══════════════════════════════════════════════════════════════
 # LOGGING & PERSISTENCE
 # ═══════════════════════════════════════════════════════════════
 

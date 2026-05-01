@@ -211,9 +211,14 @@ def build_profile() -> dict[str, Any]:
         1 for rec in modern_full_metadata
         if bool(rec.get("data_collection_override"))
     )
-    normal_council_approved_modern = (
-        len(modern_full_metadata) - data_collection_override_count
+    bootstrap_provisional_count = sum(
+        1 for rec in modern_full_metadata
+        if bool(rec.get("bootstrap_provisional"))
     )
+    normal_council_approved_modern = (
+        len(modern_full_metadata) - data_collection_override_count - bootstrap_provisional_count
+    )
+    normal_council_approved_modern = max(0, normal_council_approved_modern)
 
     for rec in clean_settled:
         confidence = _num(rec, "confidence")
@@ -236,6 +241,7 @@ def build_profile() -> dict[str, Any]:
         "modern_full_metadata_trades": len(modern_full_metadata),
         "normal_council_approved_modern_trades": normal_council_approved_modern,
         "data_collection_override_count": data_collection_override_count,
+        "bootstrap_provisional_count": bootstrap_provisional_count,
         "conflicted_settled_trades_excluded": len(conflicted_settled),
         "overall": _finalize_bucket(overall),
         "profiles": {
@@ -269,6 +275,10 @@ def main() -> None:
     print(
         "[EDGE_PROFILE] data_collection_override_count="
         f"{profile['data_collection_override_count']}"
+    )
+    print(
+        "[EDGE_PROFILE] bootstrap_provisional_count="
+        f"{profile['bootstrap_provisional_count']}"
     )
     print(
         "[EDGE_PROFILE] conflicted_settled_trades_excluded="

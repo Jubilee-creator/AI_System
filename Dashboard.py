@@ -304,7 +304,8 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
     legacy_rows = [r for r in evaluated_rows if not _is_modern_full_metadata(r)]
     modern_count = len(modern_rows)
     data_collection_count = sum(1 for r in modern_rows if r.get("data_collection_override"))
-    normal_trade_count = modern_count - data_collection_count
+    bootstrap_provisional_count = sum(1 for r in modern_rows if r.get("bootstrap_provisional"))
+    normal_trade_count = max(0, modern_count - data_collection_count - bootstrap_provisional_count)
     modern_pnl = sum(get_pnl(r) for r in modern_rows)
     modern_wagered = sum(get_size(r) for r in modern_rows)
     modern_roi = round(modern_pnl / modern_wagered, 4) if modern_wagered else 0.0
@@ -354,8 +355,12 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
         _scale_reason  = "No modern full-metadata trades evaluated."
     elif normal_trade_count == 0:
         _scale_verdict = "NOT_PROVEN"
-        _scale_reason  = (f"All {data_collection_count} modern trades are council-REJECTED. "
-                          "Zero council-approved modern trades.")
+        _scale_reason  = (
+            f"All {modern_count} modern trades are non-normal proof rows "
+            f"({data_collection_count} data_collection, "
+            f"{bootstrap_provisional_count} bootstrap provisional). "
+            "Zero council-approved modern trades."
+        )
     elif modern_count < 30:
         _scale_verdict = "DATA_COLLECTION_ONLY"
         _scale_reason  = f"Modern sample {modern_count}/30 minimum."
@@ -382,6 +387,7 @@ def build_proof_checklist(evaluated_rows: list[dict]) -> dict:
         "data_quality": quality,
         "legacy_evaluated_rows": len(legacy_rows),
         "data_collection_count": data_collection_count,
+        "bootstrap_provisional_count": bootstrap_provisional_count,
         "normal_trade_count": normal_trade_count,
         "modern_roi": modern_roi,
         "modern_pnl": round(modern_pnl, 2),
@@ -2338,16 +2344,17 @@ function renderProofChecklist(proof) {
   const dcEl = document.getElementById('v-data-collection');
   if (dcEl) {
     const dc = proof.data_collection_count != null ? proof.data_collection_count : 0;
+    const bp = proof.bootstrap_provisional_count != null ? proof.bootstrap_provisional_count : 0;
     const norm = proof.normal_trade_count != null ? proof.normal_trade_count : 0;
-    const total = dc + norm;
+    const total = dc + bp + norm;
     if (total === 0) {
       dcEl.textContent = 'no modern trades yet';
       dcEl.className = 'mini-val';
-    } else if (dc === total) {
-      dcEl.textContent = `${dc}/${total} council-REJECTED data_collection — 0 normal trades`;
+    } else if (norm === 0) {
+      dcEl.textContent = `${dc} data_collection | ${bp} bootstrap | 0 normal`;
       dcEl.className = 'mini-val bad';
     } else {
-      dcEl.textContent = `${dc}/${total} data_collection | ${norm}/${total} council-approved`;
+      dcEl.textContent = `${dc} data_collection | ${bp} bootstrap | ${norm} normal`;
       dcEl.className = 'mini-val ' + (norm > 0 ? 'good' : 'warn');
     }
   }

@@ -18,11 +18,17 @@ sys.path.insert(0, str(ROOT))
 
 from brain.strategy_utils import normalize_strategy
 from brain.edge_profile_health import edge_profile_health
+from config.trading_config import (
+    BOOTSTRAP_PROVISIONAL_MODE,
+    BOOTSTRAP_MIN_EDGE,
+    BOOTSTRAP_MIN_CONFIDENCE,
+)
 
 DEFAULT_PROFILE_PATH = ROOT / "data" / "edge_profile.json"
 MIN_SAMPLE_SIZE = 5
 MIN_NORMAL_EDGE = 0.03
 MAX_SMALL_SAMPLE_ADJUSTMENT = -0.15
+BOOTSTRAP_CONFIDENCE_ADJUSTMENT = -0.05  # conservative penalty for provisional mode
 
 
 def confidence_bucket(confidence: Optional[float]) -> str:
@@ -177,6 +183,33 @@ def critique_signal(
         }
 
     if not health["edge_profile_trusted"]:
+        # Bootstrap provisional path: when the system has zero normal-approved
+        # modern trades and the signal meets a higher quality bar, allow a
+        # PROVISIONAL decision instead of hard BLOCK.  These trades are NOT
+        # counted as normal proof — they exist only to escape the bootstrap
+        # deadlock and collect preliminary evidence.
+        normal_modern = health.get("normal_council_approved_modern_trades", 0)
+        signal_edge = _as_float(signal.get("edge"))
+        signal_conf = _as_float(signal.get("confidence"))
+        if (
+            BOOTSTRAP_PROVISIONAL_MODE
+            and normal_modern == 0
+            and signal_edge is not None and signal_edge >= BOOTSTRAP_MIN_EDGE
+            and signal_conf is not None and signal_conf >= BOOTSTRAP_MIN_CONFIDENCE
+        ):
+            return {
+                "decision": "PROVISIONAL",
+                "reason": (
+                    f"edge_profile_untrusted_bootstrap_candidate: "
+                    f"profile has 0 normal-approved modern trades; "
+                    f"signal edge={signal_edge:.4f} >= {BOOTSTRAP_MIN_EDGE} "
+                    f"and confidence={signal_conf:.3f} >= {BOOTSTRAP_MIN_CONFIDENCE}; "
+                    "provisional for bootstrap data collection — NOT normal proof"
+                ),
+                "confidence_adjustment": BOOTSTRAP_CONFIDENCE_ADJUSTMENT,
+                "bootstrap_provisional": True,
+                "edge_profile_health": health,
+            }
         return {
             "decision": "BLOCK",
             "reason": (

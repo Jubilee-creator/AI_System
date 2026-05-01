@@ -89,6 +89,14 @@ def decide_signal(signal: dict) -> dict:
             f"Builder: {builder_view.get('reason', '')}. "
             f"Critic: {critic_view.get('reason', '')}"
         )
+    elif critic_decision == "PROVISIONAL":
+        final_decision = "PROVISIONAL"
+        reason = (
+            "Critic bootstrap provisional: edge_profile untrusted but signal "
+            "meets bootstrap quality threshold (edge and confidence floor). "
+            f"Builder: {builder_view.get('reason', '')}. "
+            f"Critic: {critic_view.get('reason', '')}"
+        )
     elif critic_decision == "ALLOW":
         final_decision = "ALLOW"
         if builder_boost > 0:
@@ -144,6 +152,7 @@ def decide_signal(signal: dict) -> dict:
         "final_confidence": round(final_confidence, 6),
         "net_confidence_adjustment": round(net_adjustment, 6),
         "reason": reason,
+        "bootstrap_provisional": bool(critic_view.get("bootstrap_provisional", False)),
     }
 
 

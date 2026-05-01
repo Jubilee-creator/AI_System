@@ -464,6 +464,8 @@ class PaperTrader:
         market_quality_passed = True   # only reachable here if filter already passed
         market_spread_val = spread if spread != float("inf") else None
         market_volume_val = volume
+        bootstrap_provisional_trade = False
+        bootstrap_provisional_reason = None
 
         # DEBUG 3: Show calculated values
         print(f"[PAPER_DEBUG] action={action} price={price:.3f} estimated_prob={estimated_prob:.3f} edge={edge:.4f} min_edge={self.min_edge:.4f}")
@@ -516,6 +518,14 @@ class PaperTrader:
                     )
                     print(f"[COUNCIL] BLOCKED: {council_reason}")
                     return None
+            elif council_decision == "PROVISIONAL":
+                bootstrap_provisional_trade = True
+                bootstrap_provisional_reason = council_reason
+                print(
+                    "[COUNCIL] BOOTSTRAP_PROVISIONAL: bootstrap candidate "
+                    "allowed as $5 learning trade"
+                )
+                print(f"[COUNCIL] PROVISIONAL reason: {council_reason}")
 
             estimated_prob = float(council_result.get("final_confidence", estimated_prob))
             estimated_prob = min(max(estimated_prob, 0.0), 1.0)
@@ -523,7 +533,10 @@ class PaperTrader:
             council_confidence = estimated_prob
             adjusted_edge = edge
             net_confidence_adjustment = float(council_result.get("net_confidence_adjustment") or 0.0)
-            print(f"[COUNCIL] ALLOW: {council_reason}")
+            if council_decision == "PROVISIONAL":
+                print(f"[COUNCIL] PROVISIONAL: {council_reason}")
+            else:
+                print(f"[COUNCIL] ALLOW: {council_reason}")
             print(f"[COUNCIL] confidence {old_prob:.3f} -> {estimated_prob:.3f}")
             print(f"[COUNCIL] net_adjustment: {net_confidence_adjustment:+.4f}")
         except Exception as exc:
@@ -560,6 +573,16 @@ class PaperTrader:
             is_learning_trade = True
             size_override_used = True
             final_bet_size_reason = "DATA_COLLECTION_OVERRIDE"
+        elif bootstrap_provisional_trade:
+            bet_size = MIN_LEARNING_BET
+            is_learning_trade = True
+            size_override_used = True
+            final_bet_size_reason = "BOOTSTRAP_PROVISIONAL_LEARNING"
+            print(
+                "[BOOTSTRAP] provisional learning trade "
+                f"orig_edge={original_edge:.4f} "
+                f"size=${MIN_LEARNING_BET:.2f}"
+            )
         elif 0.50 <= estimated_prob < self.min_confidence:
             bet_size = MIN_LEARNING_BET
             is_learning_trade = True
@@ -615,7 +638,11 @@ class PaperTrader:
                 print(f"[PAPER_DEBUG] blocked: bet size <= 0")
                 return None
 
-        risk_edge = original_edge if force_data_collection_learning else edge
+        risk_edge = (
+            original_edge
+            if (force_data_collection_learning or bootstrap_provisional_trade)
+            else edge
+        )
         if force_data_collection_learning:
             print(
                 "[COUNCIL] DATA_COLLECTION_OVERRIDE preserving original edge "
@@ -729,6 +756,8 @@ class PaperTrader:
             "market_spread": market_spread_val,
             "market_volume": market_volume_val,
             "market_quality_passed": market_quality_passed,
+            "bootstrap_provisional": bootstrap_provisional_trade,
+            "bootstrap_provisional_reason": bootstrap_provisional_reason,
         }
         trade.update(_paper_trade_metadata(market_data, action, fee_estimate))
         

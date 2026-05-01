@@ -63,6 +63,7 @@ def edge_profile_health(profile: dict[str, Any] | None, path: Path) -> dict[str,
     modern_full = int(profile.get("modern_full_metadata_trades") or 0)
     normal_modern = int(profile.get("normal_council_approved_modern_trades") or 0)
     data_collection = int(profile.get("data_collection_override_count") or 0)
+    bootstrap_provisional = int(profile.get("bootstrap_provisional_count") or 0)
 
     if clean_settled < EDGE_PROFILE_MIN_CLEAN_SETTLED:
         reasons.append(
@@ -84,6 +85,11 @@ def edge_profile_health(profile: dict[str, Any] | None, path: Path) -> dict[str,
             "modern profile is data_collection_override only "
             f"data_collection={data_collection}/{modern_full}"
         )
+    if modern_full > 0 and normal_modern <= 0 and bootstrap_provisional > 0:
+        reasons.append(
+            "modern profile has bootstrap provisional trades but no normal proof "
+            f"bootstrap_provisional={bootstrap_provisional}/{modern_full}"
+        )
 
     sample_ok = (
         clean_settled >= EDGE_PROFILE_MIN_CLEAN_SETTLED
@@ -102,6 +108,7 @@ def edge_profile_health(profile: dict[str, Any] | None, path: Path) -> dict[str,
         "modern_full_metadata_trades": modern_full,
         "normal_council_approved_modern_trades": normal_modern,
         "data_collection_override_count": data_collection,
+        "bootstrap_provisional_count": bootstrap_provisional,
         "thresholds": {
             "max_age_hours": EDGE_PROFILE_MAX_AGE_HOURS,
             "min_clean_settled": EDGE_PROFILE_MIN_CLEAN_SETTLED,
