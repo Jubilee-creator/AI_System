@@ -138,6 +138,10 @@ def inspect_source() -> Dict[str, Any]:
         and "continue" in dashboard,
         "dashboard_passes_intended_action": "intended_action=opp.get(\"action\")" in dashboard,
         "paper_trader_accepts_intended_action": "intended_action: Optional[str] = None" in trader,
+        "paper_trader_honors_intended_action": (
+            'scanner_action in ("BET_YES", "BET_NO")' in trader
+            and "action = scanner_action" in trader
+        ),
         "paper_trader_rederives_side": "if estimated_prob >= 0.5:" in trader
         and 'action = "BET_YES"' in trader
         and 'action = "BET_NO"' in trader,
@@ -225,7 +229,8 @@ def main() -> None:
     print(f"Dashboard skips PASS before PaperTrader:     {source['dashboard_skips_pass_before_paper']}")
     print(f"Dashboard passes intended action:            {source['dashboard_passes_intended_action']}")
     print(f"PaperTrader accepts intended action:         {source['paper_trader_accepts_intended_action']}")
-    print(f"PaperTrader re-derives side:                 {source['paper_trader_rederives_side']}")
+    print(f"PaperTrader honors intended action:          {source['paper_trader_honors_intended_action']}")
+    print(f"PaperTrader legacy probability fallback:     {source['paper_trader_rederives_side']}")
     print(f"model probability uses YES prior:            {source['model_probability_uses_yes_prior']}")
     print(f"scanner price history uses YES mid:          {source['scanner_uses_yes_mid_price_history']}")
     print(f"order book imbalance hardcoded zero:         {source['order_book_imbalance_hardcoded_zero']}")
@@ -275,7 +280,7 @@ def main() -> None:
         warnings.append("EXECUTED_BET_NO_ZERO_IN_TRADE_LOG")
     if scanner_total_side and scanner_counts.get("BET_YES", 0) / scanner_total_side > 0.80:
         warnings.append("SCANNER_SIDE_DISTRIBUTION_OVER_80_PERCENT_YES")
-    if source["paper_trader_rederives_side"]:
+    if source["paper_trader_rederives_side"] and not source["paper_trader_honors_intended_action"]:
         warnings.append("PAPER_TRADER_STILL_REDERIVES_SIDE")
     if source["model_probability_uses_yes_prior"] and source["scanner_uses_yes_mid_price_history"]:
         warnings.append("YES_MID_USED_AS_BOTH_PRIOR_AND_SIGNAL_HISTORY")
