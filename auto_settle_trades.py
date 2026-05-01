@@ -330,6 +330,35 @@ def _compute_expected_pnl(trade: dict, outcome: str) -> float:
     return round((1.0 - entry) * size if won else -size, 2)
 
 
+_HEARTBEAT_PATH = Path(__file__).parent / "data" / "auto_settle_last_run.json"
+
+
+def _write_settle_heartbeat(
+    mode: str,
+    checked: int,
+    settled: int,
+    forced_closed: int,
+    errors: int,
+    pnl_delta: float,
+    remaining_open: int,
+) -> None:
+    try:
+        _HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "mode": mode,
+            "checked": checked,
+            "settled": settled,
+            "forced_closed": forced_closed,
+            "errors": errors,
+            "pnl_delta_dollars": round(pnl_delta, 4),
+            "remaining_open": remaining_open,
+        }
+        _HEARTBEAT_PATH.write_text(json.dumps(payload, indent=2) + "\n")
+    except Exception as exc:
+        print(f"[AUTO-SETTLE] heartbeat write failed: {exc}")
+
+
 def run(dry_run: bool) -> None:
     mode_label = "DRY-RUN" if dry_run else "EXECUTE"
     print(f"\n[AUTO-SETTLE] Mode: {mode_label}")
@@ -343,6 +372,10 @@ def run(dry_run: bool) -> None:
 
     if not open_trades:
         print("[AUTO-SETTLE] No open paper trades found in logs/paper_trades.jsonl")
+        _write_settle_heartbeat(
+            mode="dry_run" if dry_run else "execute",
+            checked=0, settled=0, forced_closed=0, errors=0, pnl_delta=0.0, remaining_open=0,
+        )
         return
 
     print(f"\n[AUTO-SETTLE] {total_open} open trade(s) — querying Kalshi...\n")
@@ -450,12 +483,14 @@ def run(dry_run: bool) -> None:
         print(f"  Errors             : {errors}")
     print(f"  P&L change         : ${pnl_delta:+.2f}")
 
+    remaining_open_count = 0
     if not dry_run:
         remaining_exposure = sum(
             float(t.get("size", 0.0)) for t in trader.open_trades
         )
         stats = trader.get_stats()
-        print(f"  Remaining open     : {len(trader.open_trades)}")
+        remaining_open_count = len(trader.open_trades)
+        print(f"  Remaining open     : {remaining_open_count}")
         print(f"  Open exposure      : ${remaining_exposure:.2f}")
         print(f"  Total P&L          : ${trader.total_pnl:+.2f}")
         print(f"  Total settled      : {stats['settled_trades']}"
@@ -464,8 +499,18 @@ def run(dry_run: bool) -> None:
             settled=settled,
             forced_closed=forced_closed,
             pnl_delta=pnl_delta,
-            remaining_open=len(trader.open_trades),
+            remaining_open=remaining_open_count,
         )
+
+    _write_settle_heartbeat(
+        mode="dry_run" if dry_run else "execute",
+        checked=checked,
+        settled=settled,
+        forced_closed=forced_closed,
+        errors=errors,
+        pnl_delta=pnl_delta,
+        remaining_open=remaining_open_count,
+    )
 
     print()
 
