@@ -108,6 +108,18 @@ except ImportError as e:
     print(f"[WARN] Performance report helpers not found: {e}")
     PERFORMANCE_REPORT_OK = False
 
+try:
+    from tools.clean_truth_report import (
+        classify_records as _classify_records,
+        row_quality_group as _row_quality_group,
+        evaluate_proof_gates as _evaluate_proof_gates,
+        calc_asymmetry as _calc_asymmetry,
+        _avg as _truth_avg,
+    )
+    CLEAN_TRUTH_OK = True
+except ImportError:
+    CLEAN_TRUTH_OK = False
+
 # Fallback: use existing kalshi_arb if brain not available
 try:
     from brain.kalshi_arb import fetch_markets as fetch_all_markets
@@ -475,6 +487,365 @@ def build_proof_checklist(outcome_known_rows: List[dict], time_exit_rows: Option
     }
 
 
+# ─────────────────────────────────────────
+# TRUTH STATE HELPERS (Phase 6F — Control Room)
+# ─────────────────────────────────────────
+
+def classify_trade_proof_bucket(rec: dict) -> str:
+    """Return proof bucket label for a single trade record."""
+    if not CLEAN_TRUTH_OK:
+        return "UNKNOWN"
+    qg = _row_quality_group(rec)
+    if qg == "LEGACY_EDGE_ONLY":
+        return "LEGACY"
+    if rec.get("data_collection_override"):
+        return "DC_OVERRIDE"
+    if rec.get("bootstrap_provisional"):
+        return "PROVISIONAL"
+    if rec.get("bootstrap_era_council_allow"):
+        return "ERA_ALLOW"
+    if qg == "MODERN_FULL_METADATA":
+        return "NORMAL"
+    return "PARTIAL"
+
+
+def compute_bootstrap_path_state(all_records: list) -> dict:
+    """Bootstrap path health assessment."""
+    try:
+        from config.trading_config import (
+            BOOTSTRAP_ALLOW_ENABLED,
+            BOOTSTRAP_MIN_EDGE,
+            BOOTSTRAP_MIN_CONFIDENCE,
+        )
+    except ImportError:
+        BOOTSTRAP_ALLOW_ENABLED = False
+        BOOTSTRAP_MIN_EDGE = 0.05
+        BOOTSTRAP_MIN_CONFIDENCE = 0.65
+
+    era_allow_count = sum(1 for r in all_records if r.get("bootstrap_era_council_allow"))
+    provisional_count = sum(1 for r in all_records if r.get("bootstrap_provisional"))
+    recent = all_records[-20:] if len(all_records) >= 20 else all_records
+    recent_era = sum(1 for r in recent if r.get("bootstrap_era_council_allow"))
+    recent_prov = sum(1 for r in recent if r.get("bootstrap_provisional"))
+
+    if not BOOTSTRAP_ALLOW_ENABLED:
+        status = "DISABLED"
+        detail = "BOOTSTRAP_ALLOW_ENABLED=False — era_allow path not active"
+        action = "Set BOOTSTRAP_ALLOW_ENABLED=True in config/trading_config.py"
+    elif era_allow_count > 0:
+        status = "ALIVE"
+        detail = f"{era_allow_count} era_allow trades confirmed (recent: {recent_era})"
+        action = "Normal operation — era_allow trades counting toward proof"
+    elif provisional_count > 0:
+        status = "DEADLOCK"
+        detail = (
+            f"All {provisional_count} modern trades tagged PROVISIONAL — "
+            "Dashboard running stale module cache"
+        )
+        action = "RESTART Dashboard: kill process, re-run python3 Dashboard.py"
+    else:
+        status = "NO_TRADES"
+        detail = "No modern trades yet"
+        action = "Waiting for first modern trade to flow through"
+
+    return {
+        "status": status,
+        "enabled": BOOTSTRAP_ALLOW_ENABLED,
+        "era_allow_count": era_allow_count,
+        "provisional_count": provisional_count,
+        "recent_era_allow": recent_era,
+        "recent_provisional": recent_prov,
+        "detail": detail,
+        "action": action,
+        "min_edge": BOOTSTRAP_MIN_EDGE,
+        "min_confidence": BOOTSTRAP_MIN_CONFIDENCE,
+    }
+
+
+def compute_profitability_reality(clean_settled: list) -> dict:
+    """Compute profitability reality panel data."""
+    if not clean_settled or not PERFORMANCE_REPORT_OK:
+        return {
+            "verdict": "INSUFFICIENT_DATA",
+            "roi": None, "avg_clv": None, "win_rate": None,
+            "breakeven_wr": None, "payoff_ratio": None,
+            "avg_win": None, "avg_loss": None,
+            "total_pnl": 0.0, "total_wagered": 0.0,
+            "n": 0, "gates_passed": 0, "gates_total": 3,
+            "gate_roi": False, "gate_clv": False, "gate_pf": False,
+            "plain_english": "No settled trades yet.",
+        }
+
+    total_wagered = sum(get_size(r) for r in clean_settled)
+    total_pnl = sum(get_pnl(r) for r in clean_settled)
+    roi = total_pnl / total_wagered if total_wagered else None
+
+    wins = [r for r in clean_settled if get_pnl(r) > 0]
+    losses = [r for r in clean_settled if get_pnl(r) < 0]
+    n = len(clean_settled)
+    win_rate = len(wins) / n if n else None
+
+    clv_vals = [v for v in (get_clv(r) for r in clean_settled) if v is not None]
+    avg_clv = round(sum(clv_vals) / len(clv_vals), 4) if clv_vals else None
+
+    win_pnls = [get_pnl(r) for r in wins]
+    loss_pnls = [get_pnl(r) for r in losses]
+    avg_win = sum(win_pnls) / len(win_pnls) if win_pnls else None
+    avg_loss = sum(loss_pnls) / len(loss_pnls) if loss_pnls else None
+    payoff_ratio = None
+    if avg_win is not None and avg_loss is not None and avg_loss < 0:
+        payoff_ratio = round(abs(avg_win / avg_loss), 4)
+
+    breakeven_wr = None
+    if avg_win is not None and avg_loss is not None and avg_loss < 0:
+        breakeven_wr = round(abs(avg_loss) / (abs(avg_loss) + avg_win), 4)
+
+    gate_roi = roi is not None and roi > 0
+    gate_clv = avg_clv is not None and avg_clv > 0
+    gate_pf = payoff_ratio is not None and payoff_ratio > 1.0
+    gates_passed = sum([gate_roi, gate_clv, gate_pf])
+
+    if n < 10:
+        verdict = "INSUFFICIENT_DATA"
+        plain = f"Only {n} settled trades. Need 30+ normal_modern for meaningful proof."
+    elif gates_passed == 3:
+        verdict = "POTENTIALLY_PROFITABLE"
+        plain = f"All 3 gates pass at n={n}. Need 30+ clean normal_modern to confirm."
+    elif gates_passed == 0:
+        roi_str = f"{roi * 100:+.1f}%" if roi is not None else "n/a"
+        clv_str = f"{avg_clv:+.4f}" if avg_clv is not None else "n/a"
+        verdict = "NOT_PROFITABLE"
+        plain = f"0/3 profitability gates pass. ROI={roi_str} CLV={clv_str}"
+    else:
+        verdict = "MIXED_SIGNALS"
+        plain = f"{gates_passed}/3 gates pass. More normal_modern data needed."
+
+    return {
+        "verdict": verdict,
+        "roi": round(roi, 4) if roi is not None else None,
+        "avg_clv": avg_clv,
+        "win_rate": round(win_rate, 4) if win_rate is not None else None,
+        "breakeven_wr": breakeven_wr,
+        "payoff_ratio": payoff_ratio,
+        "avg_win": round(avg_win, 4) if avg_win is not None else None,
+        "avg_loss": round(avg_loss, 4) if avg_loss is not None else None,
+        "total_pnl": round(total_pnl, 2),
+        "total_wagered": round(total_wagered, 2),
+        "n": n,
+        "gates_passed": gates_passed,
+        "gates_total": 3,
+        "gate_roi": gate_roi,
+        "gate_clv": gate_clv,
+        "gate_pf": gate_pf,
+        "plain_english": plain,
+    }
+
+
+def _compute_next_bottleneck(bootstrap: dict, proof_progress: dict, profitability: dict) -> dict:
+    """Single most critical next action card."""
+    nm = proof_progress.get("normal_modern", 0)
+    bs = bootstrap.get("status", "UNKNOWN")
+
+    if bs == "DEADLOCK":
+        return {
+            "priority": "CRITICAL",
+            "action": "RESTART DASHBOARD",
+            "reason": "Bootstrap path deadlocked — all trades going PROVISIONAL, zero count toward proof",
+            "command": "Kill Dashboard (Ctrl+C) then: python3 Dashboard.py",
+            "impact": "Future trades will get council_decision=ALLOW and count toward normal_modern",
+        }
+    if bs == "DISABLED":
+        return {
+            "priority": "HIGH",
+            "action": "ENABLE BOOTSTRAP PATH",
+            "reason": "BOOTSTRAP_ALLOW_ENABLED=False — era_allow path inactive",
+            "command": "Set BOOTSTRAP_ALLOW_ENABLED=True in config/trading_config.py",
+            "impact": "Enables signals to route through era_allow path toward proof",
+        }
+    if nm == 0 and bs in ("ALIVE", "NO_TRADES"):
+        return {
+            "priority": "HIGH",
+            "action": "WAIT FOR ERA_ALLOW SETTLEMENTS",
+            "reason": f"Bootstrap is active but 0 era_allow trades have settled",
+            "command": "python3 tools/test_modern_only_proof.py",
+            "impact": "Each settled era_allow trade increments normal_modern toward 10 (trust gate)",
+        }
+    if nm < 10:
+        return {
+            "priority": "HIGH",
+            "action": f"COLLECT {10 - nm} MORE NORMAL TRADES (trust gate)",
+            "reason": f"edge_profile_trusted requires 10 normal_modern (have {nm})",
+            "command": "python3 tools/report_modern_only_proof.py",
+            "impact": "Reaching 10 enables edge_profile_trusted=True, unlocks better council decisions",
+        }
+    if nm < 30:
+        return {
+            "priority": "MEDIUM",
+            "action": f"COLLECT {30 - nm} MORE NORMAL TRADES (scale gate)",
+            "reason": f"Proof gate requires 30 normal_modern (have {nm})",
+            "command": "python3 tools/report_health.py",
+            "impact": "Reaching 30 enables proof gate evaluation for scale readiness",
+        }
+    if profitability.get("gates_passed", 0) < 3:
+        gp = profitability.get("gates_passed", 0)
+        return {
+            "priority": "MEDIUM",
+            "action": "DIAGNOSE MODEL UNDERPERFORMANCE",
+            "reason": f"Have {nm} normal trades but only {gp}/3 profitability gates pass",
+            "command": "python3 tools/report_asymmetry_edge_inversion.py",
+            "impact": "Identifies specific model/edge issues to fix before scale readiness",
+        }
+    return {
+        "priority": "LOW",
+        "action": "CONTINUE COLLECTING DATA",
+        "reason": f"All 3 gates pass at n={nm}. Build statistical confidence.",
+        "command": "python3 tools/report_health.py",
+        "impact": "More data = higher confidence. Target 100 normal_modern for full proof.",
+    }
+
+
+def compute_dashboard_truth_state(all_records: list) -> dict:
+    """Central truth state computation for the Control Room. Receives all_records to avoid double IO."""
+    if not CLEAN_TRUTH_OK or not PERFORMANCE_REPORT_OK:
+        return {"error": "required modules not available (clean_truth_report or performance_report)"}
+    try:
+        buckets = _classify_records(all_records)
+        clean_settled = buckets.get("clean_settled", [])
+        modern_full = [r for r in clean_settled if _row_quality_group(r) == "MODERN_FULL_METADATA"]
+        legacy = [r for r in clean_settled if _row_quality_group(r) == "LEGACY_EDGE_ONLY"]
+        dc_override = [r for r in modern_full if r.get("data_collection_override")]
+        provisional_rows = [
+            r for r in modern_full
+            if r.get("bootstrap_provisional") and not r.get("data_collection_override")
+        ]
+        era_allow = [r for r in modern_full if r.get("bootstrap_era_council_allow")]
+        normal_modern = [
+            r for r in modern_full
+            if not r.get("data_collection_override") and not r.get("bootstrap_provisional")
+        ]
+
+        proof_progress = {
+            "clean_settled": len(clean_settled),
+            "legacy": len(legacy),
+            "modern_full": len(modern_full),
+            "dc_override": len(dc_override),
+            "provisional": len(provisional_rows),
+            "era_allow": len(era_allow),
+            "normal_modern": len(normal_modern),
+            "target_trust": 10,
+            "target_scale": 30,
+            "target_proof": 100,
+        }
+
+        recent = all_records[-15:] if len(all_records) >= 15 else all_records
+        trade_feed = []
+        for rec in reversed(recent):
+            pnl_val = get_pnl(rec)
+            clv_val = get_clv(rec)
+            trade_feed.append({
+                "ticker": (rec.get("ticker") or "?")[:16],
+                "status": rec.get("status", "?"),
+                "bucket": classify_trade_proof_bucket(rec),
+                "era_allow": bool(rec.get("bootstrap_era_council_allow")),
+                "provisional": bool(rec.get("bootstrap_provisional")),
+                "pnl": round(pnl_val, 2) if pnl_val is not None else None,
+                "clv": round(clv_val, 4) if clv_val is not None else None,
+            })
+
+        bootstrap = compute_bootstrap_path_state(all_records)
+        profitability = compute_profitability_reality(clean_settled)
+
+        nm = len(normal_modern)
+        avg_clv = profitability.get("avg_clv")
+        pr = profitability.get("payoff_ratio")
+        clv_str = f"{avg_clv:.4f}" if avg_clv is not None else "n/a"
+        pr_str = f"{pr:.3f}" if pr is not None else "n/a"
+
+        lockdown_reasons = [
+            f"normal_modern={nm}/30 — proof base not established",
+        ]
+        if avg_clv is None or avg_clv <= 0:
+            lockdown_reasons.append(f"avg_CLV={clv_str} — model does not show positive value")
+        if pr is None or pr < 1.0:
+            lockdown_reasons.append(f"payoff_ratio={pr_str} — structural asymmetry unresolved")
+        lockdown_reasons.append("scale_allowed=False (hardcoded)")
+        lockdown_reasons.append("real_money_allowed=False (hardcoded)")
+
+        funnel = state.get("execution_funnel", {})
+        machine_map = [
+            {
+                "key": "scanner",
+                "label": "SCANNER",
+                "icon": "📡",
+                "active": BRAIN_OK,
+                "detail": f"{len(state.get('opportunities', []))} opps",
+            },
+            {
+                "key": "council",
+                "label": "COUNCIL",
+                "icon": "⚖️",
+                "active": True,
+                "detail": f"blocked={funnel.get('council_blocked', 0)}",
+            },
+            {
+                "key": "trader",
+                "label": "TRADER",
+                "icon": "📝",
+                "active": PAPER_TRADER_OK,
+                "detail": f"opened={funnel.get('trade_opened', 0)}",
+            },
+            {
+                "key": "proof",
+                "label": "PROOF",
+                "icon": "🔬",
+                "active": True,
+                "detail": f"n={nm}",
+            },
+            {
+                "key": "readiness",
+                "label": "READY",
+                "icon": "🔒",
+                "active": False,
+                "detail": f"{nm}/30",
+            },
+        ]
+
+        if bootstrap.get("status") == "DEADLOCK":
+            system_verdict = "DEADLOCK"
+        elif nm == 0 and bootstrap.get("status") == "NO_TRADES":
+            system_verdict = "COLLECTING"
+        elif nm == 0:
+            system_verdict = "BOOTSTRAP_PENDING"
+        elif nm < 10:
+            system_verdict = "EARLY_DATA"
+        elif nm < 30:
+            system_verdict = "BUILDING_PROOF"
+        elif profitability.get("gates_passed", 0) == 3:
+            system_verdict = "PROOF_CANDIDATE"
+        else:
+            system_verdict = "WATCHLIST"
+
+        bottleneck = _compute_next_bottleneck(bootstrap, proof_progress, profitability)
+
+        return {
+            "system_verdict": system_verdict,
+            "proof_progress": proof_progress,
+            "bootstrap_path": bootstrap,
+            "trade_feed": trade_feed,
+            "profitability": profitability,
+            "lockdown_reasons": lockdown_reasons,
+            "machine_map": machine_map,
+            "next_bottleneck": bottleneck,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        import traceback
+        return {
+            "error": str(exc)[:200],
+            "traceback": traceback.format_exc()[-500:],
+        }
+
+
 def update_market_history(opportunities: list, timestamp: str) -> None:
     history = state.setdefault("market_history", {})
     for opp in opportunities:
@@ -777,6 +1148,7 @@ def summarize_performance() -> dict:
         "clv_by_strategy": clv_strategy_rows,
         "proof_checklist": proof_checklist,
         "market_visuals": build_market_visuals(active_trade_cards),
+        "truth_state": compute_dashboard_truth_state(all_records),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -2107,6 +2479,233 @@ body::after {
   background: var(--green2);
 }
 .pressure-bar.bad { background: var(--red); }
+
+/* ── CONTROL ROOM SECTIONS ── */
+.cr-section {
+  border-top: 1px solid var(--border);
+  padding: 7px 10px;
+}
+.cr-section-title {
+  font-family: 'Orbitron', monospace;
+  font-size: 7px;
+  letter-spacing: 2px;
+  color: var(--cyan);
+  text-transform: uppercase;
+  margin-bottom: 5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cr-section-title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.cr-locked { background: rgba(255,23,68,0.02); }
+.cr-warn-bg { background: rgba(255,214,0,0.02); }
+.cr-bottleneck { background: rgba(255,214,0,0.025); }
+
+/* Verdict pills */
+.verdict-pills { display: flex; flex-wrap: wrap; gap: 3px; padding: 3px 0; }
+.verdict-pill {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px 7px 3px;
+  border-radius: 3px;
+  font-size: 8px;
+  font-family: 'Orbitron', monospace;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  min-width: 54px;
+  text-align: center;
+}
+.vp-val { font-size: 9px; line-height: 1.2; }
+.vp-key { font-size: 6px; opacity: 0.6; letter-spacing: 1px; margin-top: 1px; }
+.vp-locked { background: rgba(255,23,68,0.14); border: 1px solid rgba(255,23,68,0.5); color: var(--red); }
+.vp-ok     { background: rgba(0,255,65,0.09);  border: 1px solid rgba(0,255,65,0.4);  color: var(--green2); }
+.vp-warn   { background: rgba(255,214,0,0.1);  border: 1px solid rgba(255,214,0,0.4); color: var(--yellow); }
+.vp-info   { background: rgba(0,229,255,0.07); border: 1px solid rgba(0,229,255,0.3); color: var(--cyan); }
+
+/* Machine map */
+.machine-map {
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  padding: 3px 0;
+  gap: 0;
+}
+.machine-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 48px;
+  padding: 4px 2px;
+}
+.mn-icon { font-size: 13px; line-height: 1; }
+.mn-label {
+  font-size: 6px;
+  color: var(--muted);
+  letter-spacing: 1px;
+  margin-top: 2px;
+  text-transform: uppercase;
+  font-family: 'Orbitron', monospace;
+}
+.mn-detail { font-size: 7px; margin-top: 1px; }
+.mn-active { color: var(--green2); }
+.mn-locked { color: var(--red); }
+.mn-warn   { color: var(--yellow); }
+.mn-off    { color: var(--muted); }
+.machine-arrow { color: var(--border); font-size: 10px; margin: 0 1px; padding-bottom: 10px; flex-shrink: 0; }
+
+/* Gate progress bars */
+.gate-row { padding: 3px 0; }
+.gate-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 8px;
+  margin-bottom: 2px;
+}
+.gate-name { color: var(--muted); }
+.gate-val  { color: var(--text); }
+.gate-track {
+  height: 4px;
+  background: var(--dim);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.gate-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--green2);
+  transition: width 0.6s ease;
+}
+.gate-fill.yellow { background: var(--yellow); }
+.gate-fill.red    { background: var(--red); }
+
+/* Bootstrap status */
+.bs-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 2px;
+  font-family: 'Orbitron', monospace;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.bs-alive    { background: rgba(0,255,65,0.1);  color: var(--green2); border: 1px solid var(--green2); }
+.bs-deadlock { background: rgba(255,23,68,0.13); color: var(--red);    border: 1px solid var(--red); }
+.bs-disabled { background: rgba(13,40,13,0.5);  color: var(--muted);  border: 1px solid var(--border); }
+.bs-pending  { background: rgba(255,214,0,0.1); color: var(--yellow); border: 1px solid var(--yellow); }
+.bs-detail   { font-size: 8px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
+.bs-action {
+  font-size: 9px;
+  color: var(--text);
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: rgba(255,214,0,0.04);
+  border-left: 2px solid var(--yellow);
+  line-height: 1.5;
+}
+
+/* Trade truth feed */
+.tth { display: grid; grid-template-columns: 88px 68px 50px 48px; gap: 0; padding: 2px 0; }
+.tth-head { font-size: 7px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; border-bottom: 1px solid var(--border); margin-bottom: 2px; }
+.ttr { border-bottom: 1px solid rgba(13,40,13,0.35); }
+.ttr-ticker { color: var(--cyan); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ttr-bucket { font-family: 'Orbitron', monospace; font-size: 7px; }
+.bkt-LEGACY      { color: var(--red); }
+.bkt-DC_OVERRIDE { color: var(--yellow); }
+.bkt-PROVISIONAL { color: var(--yellow); }
+.bkt-ERA_ALLOW   { color: var(--green2); }
+.bkt-NORMAL      { color: var(--green2); }
+.bkt-PARTIAL     { color: var(--muted); }
+.bkt-UNKNOWN     { color: var(--muted); }
+.ttr-status { color: var(--muted); font-size: 8px; }
+.ttr-pnl    { font-size: 9px; text-align: right; }
+
+/* Profitability */
+.prof-gate { display: flex; align-items: center; gap: 7px; padding: 3px 0; font-size: 9px; border-bottom: 1px solid rgba(13,40,13,0.3); }
+.pg-icon   { width: 12px; text-align: center; font-size: 10px; }
+.pg-icon.pass { color: var(--green2); }
+.pg-icon.fail { color: var(--red); }
+.pg-label  { color: var(--muted); flex: 1; font-size: 8px; }
+.pg-val    { color: var(--text); text-align: right; font-size: 9px; }
+.prof-verdict {
+  margin-top: 5px;
+  padding: 5px 6px;
+  font-size: 9px;
+  line-height: 1.5;
+  border-left: 2px solid var(--red);
+  background: rgba(255,23,68,0.03);
+}
+.prof-verdict.ok { border-left-color: var(--green2); background: rgba(0,255,65,0.03); }
+.prof-verdict.warn { border-left-color: var(--yellow); background: rgba(255,214,0,0.03); }
+
+/* Asymmetry equation */
+.asym-eq { font-size: 9px; padding: 4px 0; line-height: 2; }
+.asym-pos { color: var(--green2); }
+.asym-neg { color: var(--red); }
+.asym-dim { color: var(--muted); font-size: 8px; }
+.asym-gap { color: var(--yellow); font-weight: 700; }
+
+/* Lockdown */
+.lock-header {
+  font-family: 'Orbitron', monospace;
+  font-size: 13px;
+  font-weight: 900;
+  color: var(--red);
+  text-shadow: 0 0 12px rgba(255,23,68,0.45);
+  text-align: center;
+  padding: 5px 0 3px;
+  letter-spacing: 2px;
+}
+.lock-reason {
+  font-size: 8px;
+  color: var(--muted);
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255,23,68,0.12);
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.lock-reason::before { content: '⛔'; font-size: 8px; color: var(--red); flex-shrink: 0; }
+
+/* Scale readiness */
+.scale-no {
+  font-family: 'Orbitron', monospace;
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--red);
+  padding: 2px 0 4px;
+  letter-spacing: 1px;
+}
+.scale-blocker {
+  font-size: 8px;
+  color: var(--muted);
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(13,40,13,0.4);
+}
+.scale-blocker::before { content: '▸ '; color: var(--red); }
+
+/* Bottleneck card */
+.bn-card {
+  padding: 7px 8px;
+  border: 1px solid rgba(255,214,0,0.4);
+  background: rgba(255,214,0,0.035);
+  border-radius: 2px;
+}
+.bn-priority {
+  font-family: 'Orbitron', monospace;
+  font-size: 7px;
+  color: var(--yellow);
+  letter-spacing: 2px;
+}
+.bn-action { font-size: 10px; color: var(--text); font-weight: 700; margin: 3px 0 2px; }
+.bn-reason { font-size: 8px; color: var(--muted); }
+.bn-command { font-size: 8px; color: var(--cyan); margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
+.bn-impact  { font-size: 8px; color: var(--green2); margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -2217,202 +2816,204 @@ body::after {
     </div>
   </div>
 
-  <!-- COL 3: PAPER TRADE STATS -->
-  <div class="col">
+  <!-- COL 3: TRADING RESEARCH CONTROL ROOM -->
+  <div class="col" id="control-room">
     <div class="ph">
-      <span class="ph-title">📊 Paper Trade Performance</span>
-      <span class="ph-sub" id="paper-progress">0 / 100 trades</span>
+      <span class="ph-title">🔬 RESEARCH CONTROL ROOM</span>
+      <span class="ph-sub" id="cr-verdict-label" style="color:var(--yellow)">COLLECTING</span>
     </div>
+
     <div class="pb" style="padding:0;min-height:0">
 
-      <div class="metric-section-label">
-        <span>Settled Truth Metrics</span>
-        <span id="settled-metrics-updated">last report --</span>
-      </div>
-
-      <!-- Settled Truth Stats Grid -->
-      <div class="stat-grid">
-        <div class="stat-cell" data-watch="p-trades">
-          <div class="stat-val-big" id="p-trades">0</div>
-          <div class="stat-label-small">Total Records</div>
-        </div>
-        <div class="stat-cell" data-watch="p-settled">
-          <div class="stat-val-big" id="p-settled">0</div>
-          <div class="stat-label-small">Clean Settled</div>
-        </div>
-        <div class="stat-cell" data-watch="p-winrate">
-          <div class="stat-val-big" id="p-winrate">--</div>
-          <div class="stat-label-small">Win Rate</div>
-        </div>
-        <div class="stat-cell" data-watch="p-pnl">
-          <div class="stat-val-big" id="p-pnl">$0</div>
-          <div class="stat-label-small">Total P&L</div>
-        </div>
-        <div class="stat-cell" data-watch="p-edge">
-          <div class="stat-val-big" id="p-edge">--</div>
-          <div class="stat-label-small">Avg Edge</div>
-        </div>
-        <div class="stat-cell" data-watch="p-ev">
-          <div class="stat-val-big" id="p-ev">--</div>
-          <div class="stat-label-small">ROI</div>
-        </div>
-        <div class="stat-cell" data-watch="p-clv">
-          <div class="stat-val-big" id="p-clv">--</div>
-          <div class="stat-label-small">Avg CLV</div>
-        </div>
-        <div class="stat-cell" data-watch="p-sharpe">
-          <div class="stat-val-big" id="p-sharpe">--</div>
-          <div class="stat-label-small">Sharpe</div>
+      <!-- 1. SYSTEM VERDICT HEADER -->
+      <div class="cr-section">
+        <div class="cr-section-title">System Verdict</div>
+        <div class="verdict-pills" id="cr-verdict-pills">
+          <span class="verdict-pill vp-locked"><span class="vp-val">🔒 LOCKED</span><span class="vp-key">REAL $</span></span>
+          <span class="verdict-pill vp-locked"><span class="vp-val">❌ 0/30</span><span class="vp-key">SCALE</span></span>
+          <span class="verdict-pill vp-locked"><span class="vp-val">❌ 0/3</span><span class="vp-key">PROFIT</span></span>
+          <span class="verdict-pill vp-warn"><span class="vp-val">⚠️ PENDING</span><span class="vp-key">BOOTSTRAP</span></span>
+          <span class="verdict-pill vp-info"><span class="vp-val">📊 n=0</span><span class="vp-key">PROOF</span></span>
         </div>
       </div>
 
-      <div class="mini-section">
-        <div class="mini-title">Clean vs Raw Truth</div>
-        <div class="mini-row"><span class="mini-key">Clean Settled</span><span id="m-clean-settled" class="mini-val">--</span></div>
-        <div class="mini-row"><span class="mini-key">Raw Settled Rows</span><span id="m-raw-settled" class="mini-val">--</span></div>
-        <div class="mini-row"><span class="mini-key">Conflicted Settled</span><span id="m-conflicted" class="mini-val warn">--</span></div>
-        <div class="mini-row"><span class="mini-key">Stale Open Rows</span><span id="m-stale-open" class="mini-val warn">--</span></div>
+      <!-- 2. 5-LEVEL MACHINE MAP -->
+      <div class="cr-section">
+        <div class="cr-section-title">5-Level Machine Map</div>
+        <div class="machine-map" id="cr-machine-map">
+          <div class="machine-node"><div class="mn-icon">📡</div><div class="mn-label">SCANNER</div><div class="mn-detail mn-active">--</div></div>
+          <div class="machine-arrow">→</div>
+          <div class="machine-node"><div class="mn-icon">⚖️</div><div class="mn-label">COUNCIL</div><div class="mn-detail mn-active">--</div></div>
+          <div class="machine-arrow">→</div>
+          <div class="machine-node"><div class="mn-icon">📝</div><div class="mn-label">TRADER</div><div class="mn-detail mn-active">--</div></div>
+          <div class="machine-arrow">→</div>
+          <div class="machine-node"><div class="mn-icon">🔬</div><div class="mn-label">PROOF</div><div class="mn-detail mn-active">--</div></div>
+          <div class="machine-arrow">→</div>
+          <div class="machine-node"><div class="mn-icon">🔒</div><div class="mn-label">READY</div><div class="mn-detail mn-locked">LOCKED</div></div>
+        </div>
       </div>
 
-      <div class="mini-section">
-        <div class="mini-title">Live / Open Metrics</div>
-        <div class="mini-row"><span class="mini-key">Realized P&amp;L</span><span id="live-realized-pnl" class="mini-val">--</span></div>
-        <div class="mini-row"><span class="mini-key">Unrealized P&amp;L</span><span id="live-unrealized-pnl" class="mini-val">--</span></div>
-        <div class="mini-row"><span class="mini-key">Live Total P&amp;L</span><span id="live-total-pnl" class="mini-val">--</span></div>
-        <div class="mini-row"><span class="mini-key">Marked / Missing Quotes</span><span id="live-mark-count" class="mini-val">--</span></div>
-        <div class="mini-row"><span class="mini-key">Live refreshed</span><span id="live-metrics-updated" class="mini-val">--</span></div>
+      <!-- 3. PROOF PATH PANEL -->
+      <div class="cr-section">
+        <div class="cr-section-title">Proof Path</div>
+        <div id="cr-proof-path">
+          <div class="gate-row">
+            <div class="gate-meta"><span class="gate-name">clean_settled</span><span class="gate-val" id="pp-settled">0 / 100</span></div>
+            <div class="gate-track"><div class="gate-fill" id="pp-settled-bar" style="width:0%"></div></div>
+          </div>
+          <div class="gate-row">
+            <div class="gate-meta"><span class="gate-name">modern_full_metadata</span><span class="gate-val" id="pp-modern">0 / 100</span></div>
+            <div class="gate-track"><div class="gate-fill yellow" id="pp-modern-bar" style="width:0%"></div></div>
+          </div>
+          <div class="gate-row">
+            <div class="gate-meta"><span class="gate-name">normal_modern (proof base)</span><span class="gate-val" id="pp-normal">0 / 30</span></div>
+            <div class="gate-track"><div class="gate-fill red" id="pp-normal-bar" style="width:0%"></div></div>
+          </div>
+          <div style="margin-top:5px;font-size:8px;color:var(--muted)" id="pp-bucket-detail">
+            dc_override=? | provisional=? | era_allow=? | legacy=? [excluded]
+          </div>
+        </div>
       </div>
 
-      <div class="mini-section">
-        <div class="mini-title">Execution Funnel</div>
+      <!-- 4. BOOTSTRAP PATH MONITOR -->
+      <div class="cr-section" id="cr-bootstrap-section">
+        <div class="cr-section-title">Bootstrap Path Monitor</div>
+        <div id="cr-bootstrap">
+          <span class="bs-badge bs-pending">LOADING...</span>
+          <div class="bs-detail">Checking bootstrap path state...</div>
+        </div>
+      </div>
+
+      <!-- 5. LIVE TRADE TRUTH FEED -->
+      <div class="cr-section">
+        <div class="cr-section-title">Live Trade Truth Feed <span style="color:var(--muted);font-size:7px" id="cr-feed-count"></span></div>
+        <div class="tth tth-head">
+          <span>TICKER</span><span>BUCKET</span><span>STATUS</span><span style="text-align:right">P&amp;L</span>
+        </div>
+        <div id="cr-trade-feed">
+          <div class="empty">No trades loaded yet.</div>
+        </div>
+      </div>
+
+      <!-- 6. PROFITABILITY REALITY -->
+      <div class="cr-section">
+        <div class="cr-section-title">Profitability Reality</div>
+        <div id="cr-profitability">
+          <div class="prof-gate">
+            <span class="pg-icon fail" id="pg-roi-icon">✗</span>
+            <span class="pg-label">ROI &gt; 0%</span>
+            <span class="pg-val" id="pg-roi-val">--</span>
+          </div>
+          <div class="prof-gate">
+            <span class="pg-icon fail" id="pg-clv-icon">✗</span>
+            <span class="pg-label">avg_CLV &gt; 0</span>
+            <span class="pg-val" id="pg-clv-val">--</span>
+          </div>
+          <div class="prof-gate">
+            <span class="pg-icon fail" id="pg-pf-icon">✗</span>
+            <span class="pg-label">payoff_ratio &gt; 1.0</span>
+            <span class="pg-val" id="pg-pf-val">--</span>
+          </div>
+          <div class="prof-verdict" id="prof-verdict-box">
+            Waiting for settled trades...
+          </div>
+        </div>
+      </div>
+
+      <!-- 7. ASYMMETRY PANEL -->
+      <div class="cr-section">
+        <div class="cr-section-title">Payoff Asymmetry</div>
+        <div class="asym-eq" id="cr-asymmetry">
+          <div><span class="asym-dim">Expected win  = </span><span class="asym-pos" id="asym-win-eq">WR × avg_win = ?</span></div>
+          <div><span class="asym-dim">Expected loss = </span><span class="asym-neg" id="asym-loss-eq">LR × avg_loss = ?</span></div>
+          <div style="border-top:1px solid var(--border);margin-top:3px;padding-top:3px">
+            <span class="asym-dim">WR needed to break even: </span><span class="asym-gap" id="asym-be-wr">?</span>
+            <span class="asym-dim"> | actual WR: </span><span id="asym-actual-wr">?</span>
+          </div>
+          <div><span class="asym-dim">gap (actual − breakeven): </span><span class="asym-gap" id="asym-gap">?</span></div>
+        </div>
+      </div>
+
+      <!-- 8. REAL MONEY LOCKDOWN -->
+      <div class="cr-section cr-locked">
+        <div class="cr-section-title">Real Money Lockdown</div>
+        <div class="lock-header">🔒 LOCKED</div>
+        <div id="cr-lockdown">
+          <div class="lock-reason">Initializing...</div>
+        </div>
+      </div>
+
+      <!-- 9. SCALE READINESS -->
+      <div class="cr-section">
+        <div class="cr-section-title">Scale Readiness</div>
+        <div class="scale-no">❌ NOT READY</div>
+        <div id="cr-scale">
+          <div class="scale-blocker">Loading blockers...</div>
+        </div>
+      </div>
+
+      <!-- 10. NEXT BOTTLENECK -->
+      <div class="cr-section cr-bottleneck">
+        <div class="cr-section-title">⚡ Next Bottleneck</div>
+        <div id="cr-bottleneck">
+          <div class="bn-card">
+            <div class="bn-priority">LOADING...</div>
+            <div class="bn-action">Analyzing system state...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- EXECUTION FUNNEL (compact) -->
+      <div class="cr-section">
+        <div class="cr-section-title">Execution Funnel</div>
         <div id="funnel-box"></div>
       </div>
 
-      <div class="mini-section">
-        <div class="mini-title">Recent Blocked Reasons</div>
+      <!-- CLEAN VS RAW (compact) -->
+      <div class="cr-section">
+        <div class="cr-section-title">Record Counts</div>
+        <div class="mini-row"><span class="mini-key">Total Records</span><span id="p-trades" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Clean Settled</span><span id="p-settled" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Raw Settled</span><span id="m-raw-settled" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Conflicted</span><span id="m-conflicted" class="mini-val warn">--</span></div>
+        <div class="mini-row"><span class="mini-key">Stale Open</span><span id="m-stale-open" class="mini-val warn">--</span></div>
+        <div class="mini-row"><span class="mini-key">Realized P&amp;L</span><span id="live-realized-pnl" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Unrealized P&amp;L</span><span id="live-unrealized-pnl" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Win Rate</span><span id="p-winrate" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">Avg CLV</span><span id="p-clv" class="mini-val">--</span></div>
+        <div class="mini-row"><span class="mini-key">last report</span><span id="settled-metrics-updated" class="mini-val">--</span></div>
+      </div>
+
+      <!-- BLOCKED REASONS -->
+      <div class="cr-section">
+        <div class="cr-section-title">Recent Blocked Reasons</div>
         <div id="blocked-reasons-box"></div>
-      </div>
-
-      <div class="mini-section">
-        <div class="mini-title">CLV</div>
-        <div class="mini-row"><span class="mini-key">Positive / Negative</span><span id="clv-dist" class="mini-val">--</span></div>
-        <div id="clv-strategy-box"></div>
-      </div>
-
-      <div class="mini-section">
-        <div class="mini-title">Active Trade Cards</div>
-        <div id="active-trades-box"></div>
-      </div>
-
-      <div class="mini-section">
-        <div class="mini-title">Quote / Pressure Panel</div>
-        <div id="quote-pressure-box"></div>
-      </div>
-
-      <!-- Verdict -->
-      <div class="verdict-box">
-        <div style="font-size:8px;color:var(--muted);letter-spacing:2px;margin-bottom:8px">PROOF CHECKLIST — MODERN EVIDENCE</div>
-        <div class="mini-row" style="border-bottom:1px solid rgba(13,40,13,0.5);margin-bottom:6px">
-          <span class="mini-key">Sample Progress</span>
-          <span id="v-sample-progress" class="mini-val warn">--</span>
-        </div>
-        <div class="mini-row" style="border-bottom:1px solid rgba(13,40,13,0.5);margin-bottom:6px">
-          <span class="mini-key">Proof Source</span>
-          <span id="v-data-quality" class="mini-val warn">--</span>
-        </div>
-        <div class="mini-row" style="border-bottom:1px solid rgba(13,40,13,0.5);margin-bottom:6px">
-          <span class="mini-key">Council Override</span>
-          <span id="v-data-collection" class="mini-val warn">--</span>
-        </div>
-        <div class="verdict-line">
-          <span class="verdict-icon" id="v-profitable">—</span>
-          <span id="v-profitable-text">Profitable?</span>
-          <span class="verdict-value" id="v-profitable-value">--</span>
-        </div>
-        <div class="verdict-line">
-          <span class="verdict-icon" id="v-edge">—</span>
-          <span id="v-edge-text">Model edge vs realized outcome</span>
-          <span class="verdict-value" id="v-edge-value">--</span>
-        </div>
-        <div class="verdict-line">
-          <span class="verdict-icon" id="v-clv">—</span>
-          <span id="v-clv-text">Beat closing line?</span>
-          <span class="verdict-value" id="v-clv-value">--</span>
-        </div>
-        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:9px;color:var(--text)" id="verdict-msg">
-          Waiting for modern full-metadata evaluated rows.
-        </div>
       </div>
 
     </div>
 
-    <!-- RISK STATUS — outside .pb so it's always visible (M-18) -->
+    <!-- RISK STATUS — always visible at bottom -->
     <div id="risk-status-box">
       <div class="risk-ph">
         <span class="risk-ph-title">🛡 Risk Status</span>
         <span id="r-status-pill" class="status-pill sp-normal">🟢 NORMAL</span>
       </div>
       <div class="risk-body">
-        <div class="risk-row">
-          <span class="risk-label">CAN OPEN NEW TRADES</span>
-          <span id="r-can-trade" class="can-trade-yes">YES</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Daily P&amp;L</span>
-          <span id="r-daily-pnl" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Weekly P&amp;L</span>
-          <span id="r-weekly-pnl" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Open Positions</span>
-          <span id="r-open-pos" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Open Slots</span>
-          <span id="r-open-slots" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Full Exposure</span>
-          <span id="r-exposure" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Weighted Exposure</span>
-          <span id="r-weighted-exposure" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Effective Daily Risk</span>
-          <span id="r-eff-risk" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Daily Loss Limit</span>
-          <span id="r-loss-limit" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Remaining Room</span>
-          <span id="r-room" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Risk Used</span>
-          <span id="r-risk-pct" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Loss Streak</span>
-          <span id="r-streak" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Kill Switch</span>
-          <span id="r-kill" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Cooldown</span>
-          <span id="r-cooldown" class="risk-val">--</span>
-        </div>
-        <div class="risk-row">
-          <span class="risk-label">Last Trade</span>
-          <span id="r-last-trade" class="risk-val">--</span>
-        </div>
+        <div class="risk-row"><span class="risk-label">CAN OPEN NEW TRADES</span><span id="r-can-trade" class="can-trade-yes">YES</span></div>
+        <div class="risk-row"><span class="risk-label">Daily P&amp;L</span><span id="r-daily-pnl" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Weekly P&amp;L</span><span id="r-weekly-pnl" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Open Positions</span><span id="r-open-pos" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Open Slots</span><span id="r-open-slots" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Full Exposure</span><span id="r-exposure" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Weighted Exposure</span><span id="r-weighted-exposure" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Effective Daily Risk</span><span id="r-eff-risk" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Daily Loss Limit</span><span id="r-loss-limit" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Remaining Room</span><span id="r-room" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Risk Used</span><span id="r-risk-pct" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Loss Streak</span><span id="r-streak" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Kill Switch</span><span id="r-kill" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Cooldown</span><span id="r-cooldown" class="risk-val">--</span></div>
+        <div class="risk-row"><span class="risk-label">Last Trade</span><span id="r-last-trade" class="risk-val">--</span></div>
         <div id="r-exp-section" style="display:none">
           <div class="exp-section-hdr">Open Exposure Breakdown</div>
           <div id="r-exp-list"></div>
@@ -2818,23 +3419,27 @@ function renderProofChecklist(proof) {
   }
 }
 
+function _setEl(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+function _setElCls(id, text, cls) {
+  const el = document.getElementById(id);
+  if (el) { el.textContent = text; el.className = cls; }
+}
+
 function renderPaperStats(stats) {
   if (!stats || Object.keys(stats).length === 0) {
     setTextTracked('p-trades', '0');
     setTextTracked('p-settled', '0');
     setTextTracked('p-winrate', '--');
-    setTextTracked('p-pnl', '$0');
-    setTextTracked('p-edge', '--');
-    setTextTracked('p-ev', '--');
     setTextTracked('p-clv', '--');
-    setTextTracked('p-sharpe', '--');
-    document.getElementById('paper-progress').textContent = '0 / 100 trades';
-    document.getElementById('live-realized-pnl').textContent = '--';
-    document.getElementById('live-unrealized-pnl').textContent = '--';
-    document.getElementById('live-total-pnl').textContent = '--';
-    document.getElementById('live-mark-count').textContent = '--';
-    document.getElementById('settled-metrics-updated').textContent = 'last report --';
-    document.getElementById('live-metrics-updated').textContent = '--';
+    _setEl('live-realized-pnl', '--');
+    _setEl('live-unrealized-pnl', '--');
+    _setEl('settled-metrics-updated', 'last report --');
+    _setEl('m-raw-settled', '--');
+    _setEl('m-conflicted', '--');
+    _setEl('m-stale-open', '--');
     renderProofChecklist({});
     renderMarketVisuals({});
     return;
@@ -2845,86 +3450,23 @@ function renderPaperStats(stats) {
   const total = raw.total_records || stats.total_trades || 0;
   const settled = clean.settled_trades || 0;
   const winRate = clean.win_rate || 0;
-  const pnl = clean.total_pnl || 0;
-  const edge = clean.avg_edge || 0;
-  const ev = clean.roi || 0;
   const clv = clean.avg_clv;
-  const sharpe = stats.sharpe || 0;
 
   setTextTracked('p-trades', total);
   setTextTracked('p-settled', settled);
   setTextTracked('p-winrate', settled > 0 ? (winRate * 100).toFixed(1) + '%' : '--');
-  
-  const pnlEl = document.getElementById('p-pnl');
-  setTextTracked('p-pnl', pnl >= 0 ? '+$' + pnl.toFixed(2) : '-$' + Math.abs(pnl).toFixed(2), pnl);
-  pnlEl.className = 'stat-val-big ' + (pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'neutral');
-
-  setTextTracked('p-edge', settled > 0 ? (edge > 0 ? '+' : '') + (edge * 100).toFixed(2) + '%' : '--');
-  setTextTracked('p-ev', settled > 0 ? (ev > 0 ? '+' : '') + (ev * 100).toFixed(1) + '%' : '--');
   setTextTracked('p-clv', (settled > 0 && clv != null) ? (clv > 0 ? '+' : '') + clv.toFixed(3) : '--');
-  setTextTracked('p-sharpe', settled > 1 ? sharpe.toFixed(2) : '--');
-  document.getElementById('paper-progress').textContent = settled + ' clean / 100 trades';
-  document.getElementById('settled-metrics-updated').textContent = 'last report ' + fmtFreshness(stats.generated_at).replace('updated ', '');
 
-  document.getElementById('m-clean-settled').textContent = settled;
-  document.getElementById('m-raw-settled').textContent = raw.settled_rows != null ? raw.settled_rows : '--';
-  document.getElementById('m-conflicted').textContent = clean.conflicted_settled != null ? clean.conflicted_settled : '--';
-  document.getElementById('m-stale-open').textContent = clean.stale_open != null ? clean.stale_open : '--';
+  _setEl('settled-metrics-updated', 'last report ' + fmtFreshness(stats.generated_at).replace('updated ', ''));
+  _setEl('m-raw-settled', raw.settled_rows != null ? raw.settled_rows : '--');
+  _setEl('m-conflicted', clean.conflicted_settled != null ? clean.conflicted_settled : '--');
+  _setEl('m-stale-open', clean.stale_open != null ? clean.stale_open : '--');
 
   const live = stats.live_pnl || {};
   const realizedEl = document.getElementById('live-realized-pnl');
   const unrealizedEl = document.getElementById('live-unrealized-pnl');
-  const liveTotalEl = document.getElementById('live-total-pnl');
-  realizedEl.textContent = fmtMoney(live.realized_pnl);
-  unrealizedEl.textContent = fmtMoney(live.unrealized_pnl);
-  liveTotalEl.textContent = fmtMoney(live.live_total_pnl);
-  realizedEl.className = moneyClass(live.realized_pnl || 0);
-  unrealizedEl.className = moneyClass(live.unrealized_pnl || 0);
-  liveTotalEl.className = moneyClass(live.live_total_pnl || 0);
-  document.getElementById('live-mark-count').textContent =
-    `${live.marked_open_trades || 0} / ${live.unmarked_open_trades || 0}`;
-  document.getElementById('live-metrics-updated').textContent = fmtFreshness(stats.generated_at);
-
-  document.getElementById('clv-dist').textContent =
-    `${clean.clv_positive || 0} / ${clean.clv_negative || 0}` +
-    (clean.clv_flat ? ` / flat ${clean.clv_flat}` : '');
-
-  const clvStrategyBox = document.getElementById('clv-strategy-box');
-  const clvRows = stats.clv_by_strategy || [];
-  clvStrategyBox.innerHTML = clvRows.length ? clvRows.map(r => `
-    <div class="mini-row">
-      <span class="mini-key">${r.strategy}</span>
-      <span class="mini-val ${r.avg_clv > 0 ? 'good' : r.avg_clv < 0 ? 'bad' : ''}">
-        n=${r.count} avg=${r.avg_clv > 0 ? '+' : ''}${r.avg_clv.toFixed(4)}
-      </span>
-    </div>`).join('') : '<div class="mini-row"><span class="mini-key">No CLV by strategy yet</span><span class="mini-val">--</span></div>';
-
-  const activeBox = document.getElementById('active-trades-box');
-  const active = stats.active_trades || [];
-  activeBox.innerHTML = active.length ? active.map(t => `
-    <div class="active-card">
-      <div class="active-card-top">
-        <span>${t.ticker || 'UNKNOWN'}</span>
-        <span>$${Number(t.size || 0).toFixed(2)} @ ${Number(t.entry_price || 0).toFixed(4)}</span>
-      </div>
-      <div class="active-card-meta">
-        ${t.action || '--'} | strategy=${t.strategy || '--'} | raw=${t.raw_strategy || '--'}<br>
-        conf raw=${t.original_confidence != null ? Number(t.original_confidence).toFixed(3) : '--'}
-        council=${t.council_confidence != null ? Number(t.council_confidence).toFixed(3) : '--'}<br>
-        edge raw=${t.original_edge != null ? Number(t.original_edge).toFixed(4) : '--'}
-        adjusted=${t.adjusted_edge != null ? Number(t.adjusted_edge).toFixed(4) : '--'}
-        risk=${t.risk_edge != null ? Number(t.risk_edge).toFixed(4) : '--'}<br>
-        mark=${t.open_trade_mark_price != null ? Number(t.open_trade_mark_price).toFixed(4) : '--'}
-        unrealized=${t.open_trade_unrealized_pnl != null ? fmtMoney(Number(t.open_trade_unrealized_pnl)) : '--'}<br>
-        mid=${t.current_market_mid != null ? Number(t.current_market_mid).toFixed(4) : '--'}
-        spread=${t.spread != null ? Number(t.spread).toFixed(4) : '--'}
-        age=${fmtAge(t.timestamp)}
-        close=${fmtCountdown(t.close_time)}
-        result=${fmtCountdown(t.result_time)}
-        ${t.current_market_mid == null ? '<span style="color:var(--yellow,#f5c518);font-weight:700"> NO LIVE QUOTE</span>' : ''}
-        ${t.overdue_minutes != null ? '<span style="color:var(--red,#e74c3c);font-weight:700"> NEEDS_SETTLEMENT_CHECK (overdue ' + t.overdue_minutes.toFixed(0) + 'm)</span>' : ''}
-      </div>
-    </div>`).join('') : '<div class="empty">No active trades.</div>';
+  if (realizedEl)  { realizedEl.textContent  = fmtMoney(live.realized_pnl);  realizedEl.className  = moneyClass(live.realized_pnl  || 0); }
+  if (unrealizedEl){ unrealizedEl.textContent = fmtMoney(live.unrealized_pnl); unrealizedEl.className = moneyClass(live.unrealized_pnl || 0); }
 
   renderProofChecklist(stats.proof_checklist || {});
   renderMarketVisuals(stats.market_visuals || {});
@@ -3064,6 +3606,262 @@ function renderRiskStatus(risk) {
   }
 }
 
+// ── CONTROL ROOM RENDER FUNCTIONS ─────────────────────────────────────────────
+
+function renderControlRoom(stats) {
+  if (!stats) return;
+  const truth = stats.truth_state || {};
+  if (truth.error) return; // don't blank out the panel on error
+
+  renderVerdictHeader(truth);
+  renderMachineMap(truth.machine_map || []);
+  renderProofPath(truth.proof_progress || {});
+  renderBootstrapMonitor(truth.bootstrap_path || {});
+  renderTradeTruthFeed(truth.trade_feed || []);
+  renderProfitabilityReality(truth.profitability || {});
+  renderAsymmetryPanel(truth.profitability || {});
+  renderLockdownPanel(truth.lockdown_reasons || []);
+  renderScaleReadiness(truth.proof_progress || {}, stats.proof_checklist || {});
+  renderNextBottleneck(truth.next_bottleneck || {});
+
+  const lbl = document.getElementById('cr-verdict-label');
+  if (lbl) {
+    const v = truth.system_verdict || 'UNKNOWN';
+    const colors = {
+      DEADLOCK: 'var(--red)', COLLECTING: 'var(--yellow)',
+      BOOTSTRAP_PENDING: 'var(--yellow)', EARLY_DATA: 'var(--yellow)',
+      BUILDING_PROOF: 'var(--cyan)', PROOF_CANDIDATE: 'var(--green2)',
+      WATCHLIST: 'var(--yellow)',
+    };
+    lbl.textContent = v;
+    lbl.style.color = colors[v] || 'var(--muted)';
+  }
+}
+
+function renderVerdictHeader(truth) {
+  const el = document.getElementById('cr-verdict-pills');
+  if (!el) return;
+  const proof = truth.proof_progress || {};
+  const bootstrap = truth.bootstrap_path || {};
+  const profit = truth.profitability || {};
+  const nm = proof.normal_modern || 0;
+  const gp = profit.gates_passed || 0;
+  const bs = bootstrap.status || 'UNKNOWN';
+  const bsCls = bs === 'ALIVE' ? 'vp-ok' : bs === 'DEADLOCK' ? 'vp-locked' : 'vp-warn';
+  const bsIcon = bs === 'ALIVE' ? '✅' : bs === 'DEADLOCK' ? '⚠️' : '🔄';
+  el.innerHTML = `
+    <span class="verdict-pill vp-locked"><span class="vp-val">🔒 LOCKED</span><span class="vp-key">REAL $</span></span>
+    <span class="verdict-pill vp-locked"><span class="vp-val">❌ ${nm}/30</span><span class="vp-key">SCALE</span></span>
+    <span class="verdict-pill ${gp === 3 ? 'vp-ok' : 'vp-locked'}"><span class="vp-val">${gp === 3 ? '✅' : '❌'} ${gp}/3</span><span class="vp-key">PROFIT</span></span>
+    <span class="verdict-pill ${bsCls}"><span class="vp-val">${bsIcon} ${bs}</span><span class="vp-key">BOOT</span></span>
+    <span class="verdict-pill ${nm >= 30 ? 'vp-ok' : nm >= 10 ? 'vp-warn' : 'vp-info'}"><span class="vp-val">📊 n=${nm}</span><span class="vp-key">PROOF</span></span>
+  `;
+}
+
+function renderMachineMap(nodes) {
+  const el = document.getElementById('cr-machine-map');
+  if (!el || !nodes.length) return;
+  const statusMap = {
+    scanner:   n => n.active ? ['mn-active', n.detail] : ['mn-off', 'OFFLINE'],
+    council:   n => ['mn-active', n.detail],
+    trader:    n => n.active ? ['mn-active', n.detail] : ['mn-off', 'OFFLINE'],
+    proof:     n => ['mn-active', n.detail],
+    readiness: n => ['mn-locked', n.detail],
+  };
+  el.innerHTML = nodes.map((n, i) => {
+    const [cls, detail] = (statusMap[n.key] || (() => ['mn-off', '--']))(n);
+    return (i > 0 ? '<div class="machine-arrow">→</div>' : '') +
+      `<div class="machine-node">
+        <div class="mn-icon">${escapeHtml(n.icon || '?')}</div>
+        <div class="mn-label">${escapeHtml(n.label)}</div>
+        <div class="mn-detail ${cls}">${escapeHtml(detail || '--')}</div>
+      </div>`;
+  }).join('');
+}
+
+function renderProofPath(proof) {
+  const nm = proof.normal_modern || 0;
+  const modern = proof.modern_full || 0;
+  const settled = proof.clean_settled || 0;
+  const target = proof.target_proof || 100;
+  const targetScale = proof.target_scale || 30;
+
+  function setBar(valId, barId, cur, tgt, cls) {
+    const pct = tgt > 0 ? Math.min(100, cur / tgt * 100) : 0;
+    const valEl = document.getElementById(valId);
+    const barEl = document.getElementById(barId);
+    if (valEl) valEl.textContent = cur + ' / ' + tgt;
+    if (barEl) { barEl.style.width = pct + '%'; if (cls) barEl.className = 'gate-fill ' + cls; }
+  }
+  setBar('pp-settled', 'pp-settled-bar', settled, target, '');
+  setBar('pp-modern',  'pp-modern-bar',  modern,  target, 'yellow');
+  setBar('pp-normal',  'pp-normal-bar',  nm,      targetScale, nm >= targetScale ? '' : 'red');
+
+  const detail = document.getElementById('pp-bucket-detail');
+  if (detail) {
+    detail.textContent = (
+      `dc_override=${proof.dc_override || 0} | provisional=${proof.provisional || 0} | ` +
+      `era_allow=${proof.era_allow || 0} | legacy=${proof.legacy || 0} [excluded]`
+    );
+  }
+}
+
+function renderBootstrapMonitor(bs) {
+  const el = document.getElementById('cr-bootstrap');
+  if (!el) return;
+  const status = bs.status || 'UNKNOWN';
+  const clsMap = {
+    ALIVE: 'bs-alive', DEADLOCK: 'bs-deadlock',
+    DISABLED: 'bs-disabled', NO_TRADES: 'bs-pending', UNKNOWN: 'bs-pending',
+  };
+  const cls = clsMap[status] || 'bs-pending';
+  const deadlockNote = status === 'DEADLOCK'
+    ? '<div class="bs-action" style="border-left-color:var(--red)">⚠️ CRITICAL: Dashboard process loaded stale module cache before Phase 6B-2. Restart to fix.</div>'
+    : '';
+  el.innerHTML = `
+    <span class="bs-badge ${cls}">${escapeHtml(status)}</span>
+    <div class="bs-detail">
+      enabled=${bs.enabled} | era_allow=${bs.era_allow_count || 0} | provisional=${bs.provisional_count || 0}<br>
+      ${escapeHtml(bs.detail || '')}
+    </div>
+    ${deadlockNote}
+    <div class="bs-action">${escapeHtml(bs.action || '')}</div>
+  `;
+  const section = document.getElementById('cr-bootstrap-section');
+  if (section) {
+    section.style.background = status === 'DEADLOCK' ? 'rgba(255,23,68,0.04)' : '';
+  }
+}
+
+function renderTradeTruthFeed(feed) {
+  const el = document.getElementById('cr-trade-feed');
+  const cntEl = document.getElementById('cr-feed-count');
+  if (!el) return;
+  if (cntEl) cntEl.textContent = feed.length ? feed.length + ' trades' : '';
+  if (!feed.length) {
+    el.innerHTML = '<div class="empty">No trades yet.</div>';
+    return;
+  }
+  el.innerHTML = feed.map(t => {
+    const pnl = t.pnl;
+    const pnlStr = pnl == null ? '--' : (pnl >= 0 ? '+$' + Math.abs(pnl).toFixed(2) : '-$' + Math.abs(pnl).toFixed(2));
+    const pnlCls = pnl == null ? '' : pnl > 0 ? 'mini-val good' : pnl < 0 ? 'mini-val bad' : '';
+    const bucket = escapeHtml(t.bucket || 'UNKNOWN');
+    return `<div class="tth ttr">
+      <span class="ttr-ticker">${escapeHtml(t.ticker || '?')}</span>
+      <span class="ttr-bucket bkt-${bucket}">${bucket}</span>
+      <span class="ttr-status">${escapeHtml((t.status || '?').slice(0,8))}</span>
+      <span class="ttr-pnl ${pnlCls}">${pnlStr}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderProfitabilityReality(prof) {
+  function setGate(iconId, valId, pass, val) {
+    const icon = document.getElementById(iconId);
+    const valEl = document.getElementById(valId);
+    if (icon) { icon.textContent = pass ? '✓' : '✗'; icon.className = 'pg-icon ' + (pass ? 'pass' : 'fail'); }
+    if (valEl) valEl.textContent = val;
+  }
+  const roi = prof.roi;
+  const clv = prof.avg_clv;
+  const pf  = prof.payoff_ratio;
+  const wr  = prof.win_rate;
+  setGate('pg-roi-icon', 'pg-roi-val', prof.gate_roi,
+    roi != null ? (roi * 100).toFixed(1) + '%' : '--');
+  setGate('pg-clv-icon', 'pg-clv-val', prof.gate_clv,
+    clv != null ? (clv >= 0 ? '+' : '') + clv.toFixed(4) : '--');
+  setGate('pg-pf-icon',  'pg-pf-val',  prof.gate_pf,
+    pf  != null ? pf.toFixed(3) : '--');
+
+  const box = document.getElementById('prof-verdict-box');
+  if (box) {
+    const gp = prof.gates_passed || 0;
+    const cls = gp === 3 ? 'ok' : gp >= 1 ? 'warn' : '';
+    box.className = 'prof-verdict ' + cls;
+    box.innerHTML = `<strong>${escapeHtml(prof.verdict || 'UNKNOWN')}</strong><br>
+      <span style="color:var(--muted)">${escapeHtml(prof.plain_english || '')}</span>`;
+  }
+}
+
+function renderAsymmetryPanel(prof) {
+  const wr  = prof.win_rate;
+  const lrate = wr != null ? (1 - wr) : null;
+  const avgW = prof.avg_win;
+  const avgL = prof.avg_loss;
+  const be  = prof.breakeven_wr;
+  const actual = wr;
+
+  function orDash(v, fmt) { return v != null ? fmt(v) : '?'; }
+
+  const winEqEl  = document.getElementById('asym-win-eq');
+  const lossEqEl = document.getElementById('asym-loss-eq');
+  const beEl     = document.getElementById('asym-be-wr');
+  const actEl    = document.getElementById('asym-actual-wr');
+  const gapEl    = document.getElementById('asym-gap');
+
+  if (winEqEl)  winEqEl.textContent  = orDash(wr, v => (v*100).toFixed(0)+'%') + ' × ' + orDash(avgW, v => '$'+v.toFixed(2)) + ' = ' + (wr != null && avgW != null ? '$'+(wr*avgW).toFixed(2) : '?');
+  if (lossEqEl) lossEqEl.textContent = orDash(lrate, v => (v*100).toFixed(0)+'%') + ' × ' + orDash(avgL, v => '$'+Math.abs(v).toFixed(2)) + ' = ' + (lrate != null && avgL != null ? '$'+(lrate*Math.abs(avgL)).toFixed(2) : '?');
+  if (beEl)     beEl.textContent     = be  != null ? (be*100).toFixed(1)+'%' : '?';
+  if (actEl) {
+    const wr_str = actual != null ? (actual*100).toFixed(1)+'%' : '?';
+    actEl.textContent = wr_str;
+    actEl.style.color = (actual != null && be != null && actual >= be) ? 'var(--green2)' : 'var(--red)';
+  }
+  if (gapEl) {
+    if (actual != null && be != null) {
+      const gap = actual - be;
+      gapEl.textContent = (gap >= 0 ? '+' : '') + (gap*100).toFixed(1) + '%';
+      gapEl.style.color = gap >= 0 ? 'var(--green2)' : 'var(--red)';
+    } else {
+      gapEl.textContent = '?';
+    }
+  }
+}
+
+function renderLockdownPanel(reasons) {
+  const el = document.getElementById('cr-lockdown');
+  if (!el) return;
+  if (!reasons.length) {
+    el.innerHTML = '<div class="lock-reason">No reasons loaded.</div>';
+    return;
+  }
+  el.innerHTML = reasons.map(r => `<div class="lock-reason">${escapeHtml(r)}</div>`).join('');
+}
+
+function renderScaleReadiness(proof, checklist) {
+  const el = document.getElementById('cr-scale');
+  if (!el) return;
+  const nm = proof.normal_modern || 0;
+  const sv = (checklist && checklist.scale_verdict) || 'NOT_PROVEN';
+  const svr = (checklist && checklist.scale_verdict_reason) || '';
+  const blockers = [];
+  if (nm < 30) blockers.push(`normal_modern=${nm}/30 (need 30 council-approved modern trades)`);
+  if (sv === 'NOT_PROVEN' || sv === 'DATA_COLLECTION_ONLY') {
+    if (svr && !blockers.some(b => b.includes(svr.slice(0,20)))) blockers.push(svr);
+  }
+  blockers.push('scale_allowed=False (hardcoded — requires explicit human council approval)');
+  el.innerHTML = blockers.map(b => `<div class="scale-blocker">${escapeHtml(b)}</div>`).join('');
+}
+
+function renderNextBottleneck(bn) {
+  const el = document.getElementById('cr-bottleneck');
+  if (!el || !bn.action) return;
+  const pCls = { CRITICAL: 'var(--red)', HIGH: 'var(--yellow)', MEDIUM: 'var(--cyan)', LOW: 'var(--green2)' };
+  const color = pCls[bn.priority] || 'var(--muted)';
+  el.innerHTML = `
+    <div class="bn-card" style="border-color:${color}30;background:${color}08">
+      <div class="bn-priority" style="color:${color}">${escapeHtml(bn.priority || 'INFO')}</div>
+      <div class="bn-action">${escapeHtml(bn.action || '')}</div>
+      <div class="bn-reason">${escapeHtml(bn.reason || '')}</div>
+      <div class="bn-command">$ ${escapeHtml(bn.command || '')}</div>
+      <div class="bn-impact">→ ${escapeHtml(bn.impact || '')}</div>
+    </div>
+  `;
+}
+
+// ── END CONTROL ROOM RENDER FUNCTIONS ─────────────────────────────────────────
+
 async function fetchState() {
   try {
     const [stateResp, riskResp] = await Promise.all([
@@ -3094,6 +3892,7 @@ async function fetchState() {
     renderLog(d.scan_log || []);
     renderLiveEvents(d.live_events || []);
     renderPaperStats(d.performance_report || d.paper_stats || {});
+    renderControlRoom(d.performance_report || {});
     renderExecutionFunnel(d.execution_funnel || {});
     renderBlockedReasons(d.recent_blocked_reasons || {});
     renderRiskStatus(risk);
