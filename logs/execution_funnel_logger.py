@@ -8,6 +8,7 @@ PaperTrader. This is observability only and must not affect execution.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -31,6 +32,51 @@ def _short_text(value: Any, limit: int = 500) -> Optional[str]:
         return None
     text = str(value).replace("\n", " ").strip()
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _extract_risk_allowed(trace: str) -> Optional[bool]:
+    """Return True/False if a risk decision line is present in the trace."""
+    if not trace:
+        return None
+    if "risk decision=ALLOW" in trace:
+        return True
+    if "risk decision=BLOCK" in trace or "Trade blocked by risk manager" in trace:
+        return False
+    return None
+
+
+def _extract_risk_block_reason(trace: str) -> Optional[str]:
+    """Extract the actual risk block reason from a full (untruncated) trace."""
+    if not trace:
+        return None
+    # [TRACE] risk decision=BLOCK reason=<reason text>
+    m = re.search(r"\[TRACE\] risk decision=BLOCK reason=(.+)", trace)
+    if m:
+        return m.group(1).strip()
+    # [PAPER] ... Trade blocked by risk manager: <reason>
+    m = re.search(r"Trade blocked by risk manager: (.+)", trace)
+    if m:
+        return m.group(1).strip()
+    # [LEARNING] Risk override denied: <reason>
+    m = re.search(r"Risk override denied: (.+)", trace)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _extract_council_reason_from_trace(trace: str) -> Optional[str]:
+    """Extract council block reason from a full (untruncated) trace."""
+    if not trace:
+        return None
+    # [COUNCIL] BLOCKED: <reason>
+    m = re.search(r"\[COUNCIL\] BLOCKED: (.+)", trace)
+    if m:
+        return m.group(1).strip()
+    # [TRACE] stop: council block confidence_before=X.XXX reason=<reason>
+    m = re.search(r"stop: council block .+?reason=(.+)", trace)
+    if m:
+        return m.group(1).strip()
+    return None
 
 
 def _final_reason(trace_text: str, trade: Optional[Dict[str, Any]]) -> str:
@@ -121,10 +167,19 @@ def log_execution_funnel(
         "intended_action": intended_action,
         "executed_action": executed_action,
         "handoff_action_mismatch": mismatch if executed_action else None,
-        "risk_allowed": trade.get("risk_manager_approved_initially") if trade else None,
-        "risk_block_reason": trade.get("risk_manager_block_reason") if trade else None,
+        "risk_allowed": (
+            trade.get("risk_manager_approved_initially") if trade
+            else _extract_risk_allowed(trace_text)
+        ),
+        "risk_block_reason": (
+            trade.get("risk_manager_block_reason") if trade
+            else _extract_risk_block_reason(trace_text)
+        ),
         "council_decision": _council_decision(trace_text, trade),
-        "council_reason": _short_text(trade.get("council_reason")) if trade else None,
+        "council_reason": (
+            _short_text(trade.get("council_reason")) if trade
+            else _short_text(_extract_council_reason_from_trace(trace_text))
+        ),
         "paper_trade_opened": bool(trade),
         "final_status": "TRADE_OPENED" if trade else "NO_TRADE",
         "final_reason": final_reason,

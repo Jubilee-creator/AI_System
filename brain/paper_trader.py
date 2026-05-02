@@ -295,6 +295,56 @@ class PaperTrader:
             )
 
 
+    def _sync_open_trades_from_log(self) -> None:
+        """
+        Prune self.open_trades against the on-disk log.
+
+        auto_settle_trades.py runs as a separate process and writes SETTLED /
+        FORCED_CLOSE rows directly to paper_trades.jsonl without touching this
+        instance's self.open_trades.  Without this sync, ghost OPENs accumulate
+        mid-session and the cap check blocks all new entries until restart.
+
+        Uses the same deduplication key as _load_state_from_trade_log so the
+        two paths remain consistent.
+        """
+        log_path = self.logger.log_file
+        if not os.path.exists(log_path):
+            return
+        try:
+            latest_status: dict = {}
+            with open(log_path, "r") as fh:
+                for raw in fh:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        row = json.loads(raw)
+                        key = (row.get("ticker", ""), row.get("timestamp", ""))
+                        latest_status[key] = str(row.get("status", "")).upper()
+                    except Exception:
+                        continue
+            before = len(self.open_trades)
+            self.open_trades = [
+                t for t in self.open_trades
+                if latest_status.get(
+                    (t.get("ticker", ""), t.get("timestamp", "")), "OPEN"
+                ) == "OPEN"
+            ]
+            pruned = before - len(self.open_trades)
+            if pruned:
+                print(
+                    f"[PAPER] _sync_open_trades_from_log: pruned {pruned} ghost "
+                    f"OPEN(s) — {len(self.open_trades)} truly active"
+                )
+                # Keep risk manager in sync so open_positions / total_exposure
+                # don't diverge from the real open-trade list.
+                try:
+                    self.risk_manager.rebuild_from_trade_log(self.open_trades)
+                except Exception as rm_exc:
+                    print(f"[PAPER] risk_manager sync after prune failed: {rm_exc}")
+        except Exception as exc:
+            print(f"[PAPER] _sync_open_trades_from_log error: {exc}")
+
     def enable(self) -> None:
         """Enable paper trading - will log all signals."""
         self.enabled = True
@@ -412,6 +462,10 @@ class PaperTrader:
                 f"confidence={estimated_prob:.3f} "
                 f"min_confidence={self.min_confidence:.3f}"
             )
+
+        # Re-sync against on-disk log before cap check so auto_settle_trades.py
+        # settlements are reflected mid-session without requiring a restart.
+        self._sync_open_trades_from_log()
 
         # Duplicate-ticker guard: enforce MAX_POSITIONS_PER_TICKER
         if len(self.open_trades) >= MAX_CONCURRENT_OPEN_TRADES:
