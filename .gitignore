@@ -15,3 +15,6 @@ data/*.json
 data/risk_state.json
 .env.monitor
 *.pem
+
+# Local runtime state
+/data/
