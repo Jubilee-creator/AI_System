@@ -144,6 +144,21 @@ def log_execution_funnel(
     rank_context = rank_context or {}
     final_reason = _final_reason(trace_text, trade)
 
+    _ob_yes_bid     = _safe_float(opportunity.get("yes_bid"))
+    _ob_yes_ask     = _safe_float(opportunity.get("yes_ask"))
+    _ob_no_ask      = _safe_float(opportunity.get("no_ask"))
+    _ob_spread      = (
+        round(_ob_yes_ask - _ob_yes_bid, 4)
+        if _ob_yes_ask is not None and _ob_yes_bid is not None
+        else None
+    )
+    _ob_half_spread = round(_ob_spread / 2, 4) if _ob_spread is not None else None
+    _ob_overround   = (
+        round(_ob_yes_ask + _ob_no_ask - 1.0, 4)
+        if _ob_yes_ask is not None and _ob_no_ask is not None
+        else None
+    )
+
     row = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "run_id": run_id or "UNKNOWN_RUN",
@@ -154,6 +169,12 @@ def log_execution_funnel(
         "scanner_action": scanner_action,
         "confidence": _safe_float(opportunity.get("confidence")),
         "edge": _safe_float(opportunity.get("edge")),
+        "yes_bid":     _ob_yes_bid,
+        "yes_ask":     _ob_yes_ask,
+        "no_ask":      _ob_no_ask,
+        "spread":      _ob_spread,
+        "half_spread": _ob_half_spread,
+        "overround":   _ob_overround,
         "open_slots_before": rank_context.get("open_slots_before"),
         "open_count_before": rank_context.get("open_count_before"),
         "max_open_trades": rank_context.get("max_open_trades"),
