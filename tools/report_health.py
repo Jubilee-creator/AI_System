@@ -40,7 +40,7 @@ from config.trading_config import (
     BOOTSTRAP_ALLOW_ENABLED,
     EDGE_DANGER_HIGH_EDGE_MIN,
 )
-from tools.clean_truth_report import classify_records, evaluate_proof_gates
+from tools.clean_truth_report import classify_records, evaluate_proof_gates, row_quality_group
 from tools.performance_report import load_trades
 
 HEARTBEAT_FILE = ROOT / "data" / "auto_settle_last_run.json"
@@ -276,6 +276,10 @@ def check_research_truth() -> dict:
         "bootstrap_provisional_count": gate.get("bootstrap_count", 0),
         "bootstrap_era_allow_count": gate.get("bootstrap_era_allow_count", 0),
         "time_exit_excluded_count": gate.get("time_exit_excluded_count", 0),
+        "legacy_count": sum(
+            1 for r in buckets["clean_settled"]
+            if row_quality_group(r) == "LEGACY_EDGE_ONLY"
+        ),
     }
 
 
@@ -402,6 +406,36 @@ def main() -> None:
         print(_status_line(True, "total_pnl", f"${risk.get('total_pnl', 0):+.2f}" if risk.get("total_pnl") is not None else "n/a"))
         print(_status_line(True, "loss_streak", str(risk.get("loss_streak", 0))))
 
+    # ── Legacy quarantine + modern proof path ───────────────────────────────
+    print("\nLEGACY QUARANTINE + MODERN PROOF PATH")
+    print("-" * 72)
+    if truth.get("loaded"):
+        legacy_count = truth.get("legacy_count", 0)
+        era_allow    = truth.get("bootstrap_era_allow_count", 0)
+        normal_mod   = truth.get("normal_modern_count", 0)
+        ba_enabled   = truth.get("bootstrap_allow_enabled", False)
+        print(
+            f"  {'[CONFIRMED]' if legacy_count >= 0 else '[UNKNOWN]'}"
+            f"  legacy_edge_only={legacy_count}  "
+            f"[visible for diagnostics, excluded from all proof/trust/scale gates]"
+        )
+        print(
+            f"  {'[OK  ]' if era_allow > 0 else '[WAIT]'}"
+            f"  bootstrap_era_allow_settled={era_allow}  "
+            f"normal_modern={normal_mod}  "
+            f"(need 10 for trust gate, 30 for scale)"
+        )
+        if ba_enabled and era_allow == 0:
+            print(
+                "  [WARN]  BOOTSTRAP_ALLOW_ENABLED=True but zero era_allow trades — "
+                "Dashboard.py needs restart to load Phase 6B-2 module changes."
+            )
+            print(
+                "          Run:  pkill -f 'python3 Dashboard.py' && bash start_dashboard.sh"
+            )
+    else:
+        print("  [n/a]  truth data unavailable — run build_edge_profile.py first")
+
     # ── BTC snapshots ────────────────────────────────────────────────────────
     print("\nBTC SNAPSHOT FRESHNESS")
     print("-" * 72)
@@ -428,6 +462,14 @@ def main() -> None:
             "TRUST DEADLOCK ACTIVE — DATA_COLLECTION_OVERRIDE_ENABLED=True keeps "
             "normal_council_approved at 0; proof gates cannot advance. "
             "Set DATA_COLLECTION_OVERRIDE_ENABLED=False to unblock (Phase 6B-2)."
+        )
+    if (truth.get("loaded")
+            and truth.get("bootstrap_allow_enabled")
+            and truth.get("bootstrap_era_allow_count", 0) == 0):
+        alerts.append(
+            "BOOTSTRAP_ERA_ALLOW DEADLOCK — BOOTSTRAP_ALLOW_ENABLED=True in config "
+            "but zero era_allow trades. Dashboard has stale module cache from before "
+            "Phase 6B-2. Restart Dashboard: pkill -f 'python3 Dashboard.py' && bash start_dashboard.sh"
         )
     if truth.get("loaded") and truth.get("proof_verdict") != "SCALE_ELIGIBLE":
         alerts.append(
