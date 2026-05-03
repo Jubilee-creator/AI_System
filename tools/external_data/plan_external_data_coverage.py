@@ -381,11 +381,20 @@ def _kalshi_command(ticker: str, series_ticker: Optional[str], start: int, end: 
     return " ".join(parts)
 
 
+def _crypto_pages_needed(start: int, end: int, candles_per_page: int = 720) -> int:
+    """Estimate Kraken pages required for a window (1m candles, 720 per page)."""
+    window_min = max(1, (end - start) // 60)
+    return max(1, (window_min + candles_per_page - 1) // candles_per_page)
+
+
 def _crypto_command(symbol: str, start: int, end: int) -> str:
+    pages = _crypto_pages_needed(start, end)
+    paginate_flag = " --paginate" if pages > 1 else ""
     return (
         "python3 tools/external_data/crypto_candle_collector.py "
         f"--symbol {symbol} --interval 1m --source kraken "
-        f"--start-time {start} --end-time {end} --dry-run"
+        f"--start-time {start} --end-time {end}"
+        f"{paginate_flag} --dry-run"
     )
 
 
@@ -576,7 +585,9 @@ def main() -> None:
     print("-" * 72)
     if crypto_missing:
         for symbol, start, end, trade_count in sorted(crypto_missing, key=lambda item: (-item[3], item[0], item[1]))[:args.limit]:
-            print(f"  # trades={trade_count} symbol={symbol}")
+            window_min = (end - start) // 60
+            pages = _crypto_pages_needed(start, end)
+            print(f"  # trades={trade_count} symbol={symbol} window={window_min}min pages_needed={pages}")
             print(f"  {_crypto_command(symbol, start, end)}")
     else:
         print("  (none)")
@@ -586,7 +597,12 @@ def main() -> None:
     print("-" * 72)
     print("  - Commands are dry-run suggestions only.")
     print("  - Use --no-dry-run manually only after reviewing each target window.")
-    print("  - Kraken --end-time is advisory in the current collector; Kraken OHLC fetches from --start-time.")
+    print("  - Kraken OHLC API: max 720 candles per request (= 12h at 1m resolution).")
+    print("    Windows > 720 min get --paginate added automatically above.")
+    print("    With --paginate the collector uses result['last'] cursor to walk forward")
+    print("    in 720-candle steps until --end-time is reached or API data is exhausted.")
+    print("    --end-time is NOT a Kraken API parameter; it is only the pagination stop condition.")
+    print("  - Run --no-dry-run for each paginated command to cover the full window.")
     print("  - Raw JSON remains under ignored data/external/ paths.")
     print("  - Joined CSV remains under ignored data/research/joined/ paths.")
     print("RESULT: EXTERNAL_DATA_COVERAGE_PLAN_OK")

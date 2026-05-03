@@ -500,6 +500,67 @@ def _print_counts(label: str, counts: Dict[str, int]) -> None:
         print(f"    - {key}: {count}")
 
 
+def _crypto_coverage_range(by_symbol: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Dict[str, Any]]:
+    """Return per-symbol coverage metadata: first_ts, last_ts, count, span_hours."""
+    result: Dict[str, Dict[str, Any]] = {}
+    for symbol, candles in by_symbol.items():
+        if not candles:
+            continue
+        timestamps = [int(c["ts"]) for c in candles if c.get("ts") is not None]
+        if not timestamps:
+            continue
+        first = min(timestamps)
+        last = max(timestamps)
+        result[symbol] = {
+            "first_ts": first,
+            "last_ts": last,
+            "count": len(candles),
+            "span_hours": round((last - first) / 3600, 1),
+            "first_utc": datetime.fromtimestamp(first, tz=timezone.utc).isoformat(),
+            "last_utc": datetime.fromtimestamp(last, tz=timezone.utc).isoformat(),
+        }
+    return result
+
+
+def _temporal_join_failure_analysis(
+    rows: List[Dict[str, Any]],
+    crypto_by_symbol: Dict[str, List[Dict[str, Any]]],
+    coverage: Dict[str, Dict[str, Any]],
+) -> None:
+    """Print why crypto joins failed broken down by time gap vs. symbol mismatch."""
+    no_candle_before: Dict[str, int] = {}
+    no_symbol: int = 0
+    stale: int = 0
+
+    for row in rows:
+        status = str(row.get("crypto_join_status") or "")
+        if status == "NO_CRYPTO_SYMBOL_FOR_MARKET":
+            no_symbol += 1
+        elif status == "NO_CRYPTO_CANDLE_BEFORE_ENTRY":
+            sym = str(row.get("crypto_symbol") or "UNKNOWN")
+            no_candle_before[sym] = no_candle_before.get(sym, 0) + 1
+        elif status == "STALE_CRYPTO_CANDLE":
+            stale += 1
+
+    if not (no_candle_before or no_symbol or stale):
+        return
+
+    print("  crypto_join_failure_analysis:")
+    if no_symbol:
+        print(f"    NO_CRYPTO_SYMBOL (non-BTC/ETH tickers): {no_symbol}")
+    if stale:
+        print(f"    STALE_CRYPTO_CANDLE (candle > 1h old at entry): {stale}")
+    for sym, count in sorted(no_candle_before.items()):
+        cov = coverage.get(sym)
+        if cov:
+            print(
+                f"    NO_CRYPTO_CANDLE_BEFORE_ENTRY ({sym}): {count} trade(s)  "
+                f"— earliest candle is {cov['first_utc']}"
+            )
+        else:
+            print(f"    NO_CRYPTO_CANDLE_BEFORE_ENTRY ({sym}): {count} trade(s)  — no candles loaded for symbol")
+
+
 def main() -> None:
     trades = _load_jsonl(PAPER_TRADES_LOG)
     kalshi_by_ticker, kalshi_stats = _load_kalshi_candles()
@@ -521,6 +582,16 @@ def main() -> None:
         "    crypto_files={files} crypto_candles={candles} "
         "skipped_files={skipped_files} skipped_candles={skipped_candles}".format(**crypto_stats)
     )
+    crypto_coverage = _crypto_coverage_range(crypto_by_symbol)
+    if crypto_coverage:
+        print("  crypto_coverage_range:")
+        for sym, info in sorted(crypto_coverage.items()):
+            print(
+                f"    {sym}: {info['first_utc']}  to  {info['last_utc']}"
+                f"  ({info['span_hours']}h, {info['count']} candles)"
+            )
+    else:
+        print("  crypto_coverage_range: none loaded")
 
     missing: List[str] = []
     if not PAPER_TRADES_LOG.exists() or not trades:
@@ -548,6 +619,7 @@ def main() -> None:
     out_path = _write_csv(rows)
     print(f"  joined_rows:        {len(rows)}")
     _print_counts("crypto_join_status", _count_status(rows, "crypto_join_status"))
+    _temporal_join_failure_analysis(rows, crypto_by_symbol, crypto_coverage)
     _print_counts("kalshi_join_status", _count_status(rows, "kalshi_join_status"))
     print(f"  wrote:              {out_path}")
     print("RESULT: RESEARCH_DATASET_BUILDER_OK")

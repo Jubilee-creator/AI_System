@@ -11,12 +11,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -50,6 +51,38 @@ def _utc_stamp() -> str:
 
 def _fetched_at_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _as_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _candle_range_kraken(payload: Any) -> Optional[Tuple[int, int, int]]:
+    """Return (first_ts, last_ts, count) from a Kraken OHLC payload, or None."""
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(result, dict):
+        return None
+    timestamps: List[int] = []
+    for key, candles in result.items():
+        if key == "last" or not isinstance(candles, list):
+            continue
+        for candle in candles:
+            if isinstance(candle, list) and candle:
+                ts = _as_int(candle[0])
+                if ts is not None:
+                    timestamps.append(ts)
+    if not timestamps:
+        return None
+    return min(timestamps), max(timestamps), len(timestamps)
+
+
+def _fmt_epoch(epoch: int) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
 
 
 def _build_binance_url(args: argparse.Namespace) -> str:
@@ -131,6 +164,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", choices=("binance", "kraken", "auto"), default="auto")
     parser.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     parser.add_argument("--no-dry-run", dest="dry_run", action="store_false")
+    parser.add_argument(
+        "--paginate", action="store_true", default=False,
+        help="Kraken only: paginate from --start-time to --end-time using result['last'] cursor. "
+             "Saves one raw JSON file per page. Requires --start-time.",
+    )
     return parser.parse_args()
 
 
@@ -173,6 +211,83 @@ def _try_kraken(args: argparse.Namespace) -> Tuple[Optional[str], Optional[str]]
     return str(out_path), None
 
 
+def _try_kraken_paginated(
+    args: argparse.Namespace,
+) -> Tuple[List[str], Optional[str], Optional[int], Optional[int], int]:
+    """
+    Paginate Kraken OHLC from --start-time to --end-time (or until API returns no new data).
+    Saves one raw JSON file per page. Returns (saved_paths, error, first_ts, last_ts, total_candles).
+    error is only set when zero pages were saved successfully.
+    """
+    symbol = args.symbol.upper()
+    mapped_symbol = KRAKEN_SYMBOLS.get(symbol)
+    mapped_interval = KRAKEN_INTERVALS.get(args.interval)
+    if mapped_symbol is None:
+        return [], f"unsupported_kraken_symbol={symbol}", None, None, 0
+    if mapped_interval is None:
+        return [], f"unsupported_kraken_interval={args.interval}", None, None, 0
+
+    since = int(args.start_time)
+    end_epoch: Optional[int] = int(args.end_time) if args.end_time else None
+    MAX_PAGES = 20  # 20 × 720 candles × 1 min = 10 days maximum
+    saved: List[str] = []
+    first_ts: Optional[int] = None
+    last_ts: Optional[int] = None
+    total_candles = 0
+
+    for page_num in range(MAX_PAGES):
+        params: Dict[str, Any] = {
+            "pair": mapped_symbol,
+            "interval": mapped_interval,
+            "since": since,
+        }
+        url = KRAKEN_OHLC_URL + "?" + urllib.parse.urlencode(params)
+        payload, error = _fetch_json(url)
+        if error:
+            return (saved, None, first_ts, last_ts, total_candles) if saved else ([], error, None, None, 0)
+
+        # Check for Kraken API-level errors
+        api_errors = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(api_errors, list) and api_errors:
+            err_str = f"kraken_api_error: {api_errors}"
+            return (saved, None, first_ts, last_ts, total_candles) if saved else ([], err_str, None, None, 0)
+
+        wrapped = _wrap_payload(
+            source="kraken",
+            symbol_requested=args.symbol,
+            symbol_mapped=mapped_symbol,
+            interval_requested=args.interval,
+            interval_mapped=mapped_interval,
+            payload=payload,
+        )
+        out_path = _save_raw("kraken", args.symbol, args.interval, wrapped)
+        saved.append(str(out_path))
+
+        rng = _candle_range_kraken(payload)
+        if rng:
+            page_first, page_last, page_count = rng
+            total_candles += page_count
+            if first_ts is None or page_first < first_ts:
+                first_ts = page_first
+            if last_ts is None or page_last > last_ts:
+                last_ts = page_last
+
+        # Kraken provides result["last"] as the cursor for the next page
+        result = payload.get("result") if isinstance(payload, dict) else None
+        next_since = _as_int(result.get("last")) if isinstance(result, dict) else None
+
+        if next_since is None or next_since <= since:
+            break  # No pagination hint or no forward progress
+        if end_epoch is not None and next_since >= end_epoch:
+            break  # Covered the requested window
+        since = next_since
+
+        if page_num < MAX_PAGES - 1:
+            time.sleep(1)  # Polite delay between Kraken requests
+
+    return saved, None, first_ts, last_ts, total_candles
+
+
 def main() -> None:
     args = parse_args()
     binance_url = _build_binance_url(args)
@@ -189,6 +304,7 @@ def main() -> None:
     print(f"  end_time:    {args.end_time or 'n/a'}")
     print(f"  limit:       {args.limit}")
     print(f"  dry_run:     {args.dry_run}")
+    print(f"  paginate:    {args.paginate}")
     print(f"  binance_url: {binance_url if args.source in ('binance', 'auto') else 'n/a'}")
     if kraken_build_error:
         kraken_display = f"n/a ({kraken_build_error})"
@@ -198,9 +314,18 @@ def main() -> None:
     print(f"  fallback:    {'binance_to_kraken' if args.source == 'auto' else 'disabled'}")
     if kraken_symbol or kraken_interval:
         print(f"  kraken_map:  symbol={kraken_symbol or 'n/a'} interval={kraken_interval or 'n/a'}")
+    if args.source in ("kraken", "auto") and args.end_time and not args.paginate:
+        print("  WARNING:     Kraken OHLC has no end-time parameter; --end-time is ignored by the API.")
+        print("               Use --paginate to cover the full requested window.")
 
     if args.dry_run:
         print("  action:      dry run only; no network request and no file write")
+        if args.paginate and args.start_time and args.end_time:
+            window_min = (int(args.end_time) - int(args.start_time)) // 60
+            pages = max(1, (window_min + 719) // 720)
+            print(f"  paginate:    window={window_min}min → ~{pages} page(s) needed at 720 candles/page")
+        elif args.paginate:
+            print("  paginate:    set --start-time and --end-time to estimate pages needed")
         print("RESULT: CRYPTO_CANDLE_COLLECTOR_OK")
         return
 
@@ -217,6 +342,28 @@ def main() -> None:
         return
 
     if args.source == "kraken":
+        if args.paginate:
+            if not args.start_time:
+                print("  paginate_error: --paginate requires --start-time")
+                print("RESULT: CRYPTO_CANDLE_COLLECTOR_OK")
+                return
+            saved_paths, error, first_ts, last_ts, n_candles = _try_kraken_paginated(args)
+            if error and not saved_paths:
+                print(f"  kraken_error:  {error}")
+                print("  action:        kraken paginated failed gracefully; no file written")
+                print("RESULT: CRYPTO_CANDLE_COLLECTOR_OK")
+                return
+            print(f"  source_used:    kraken (paginated)")
+            print(f"  pages_fetched:  {len(saved_paths)}")
+            print(f"  total_candles:  {n_candles}")
+            if first_ts is not None:
+                print(f"  first_candle:   {first_ts}  ({_fmt_epoch(first_ts)})")
+            if last_ts is not None:
+                print(f"  last_candle:    {last_ts}  ({_fmt_epoch(last_ts)})")
+            for p in saved_paths:
+                print(f"  saved_raw_json: {p}")
+            print("RESULT: CRYPTO_CANDLE_COLLECTOR_OK")
+            return
         out_path, error = _try_kraken(args)
         if error:
             print(f"  kraken_error:  {error}")
@@ -237,6 +384,24 @@ def main() -> None:
 
     print(f"  binance_error: {error}")
     print("  fallback:      attempting kraken")
+    if args.paginate and args.start_time:
+        saved_paths, kraken_error, first_ts, last_ts, n_candles = _try_kraken_paginated(args)
+        if saved_paths:
+            print(f"  source_used:    kraken (paginated)")
+            print(f"  pages_fetched:  {len(saved_paths)}")
+            print(f"  total_candles:  {n_candles}")
+            if first_ts is not None:
+                print(f"  first_candle:   {first_ts}  ({_fmt_epoch(first_ts)})")
+            if last_ts is not None:
+                print(f"  last_candle:    {last_ts}  ({_fmt_epoch(last_ts)})")
+            for p in saved_paths:
+                print(f"  saved_raw_json: {p}")
+            print("RESULT: CRYPTO_CANDLE_COLLECTOR_OK")
+            return
+        print(f"  kraken_error:  {kraken_error}")
+        print("  action:        all configured sources failed gracefully; no file written")
+        print("RESULT: CRYPTO_CANDLE_COLLECTOR_OK")
+        return
     out_path, kraken_error = _try_kraken(args)
     if out_path:
         print("  source_used:   kraken")
