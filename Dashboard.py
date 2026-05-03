@@ -3984,6 +3984,290 @@ def api_live_events():
 
 
 # ─────────────────────────────────────────
+# TRUTH PANELS — Phase 6I operator layer
+# Read-only extended diagnostics route.
+# Adding new imports here so existing imports are not disturbed.
+# ─────────────────────────────────────────
+
+try:
+    from tools.clean_truth_report import (
+        edge_bucket       as _tp_edge_bucket,
+        market_horizon    as _tp_market_horizon,
+        entry_price_bucket as _tp_entry_bucket,
+        calibration_bucket as _tp_conf_bucket,
+    )
+    _TP_CLASSIFY_OK = True
+except ImportError:
+    _TP_CLASSIFY_OK = False
+
+
+def _compute_truth_panels() -> dict:
+    """
+    Compute additional operator-layer truth panels not in the main state.
+    All read-only. Fail-soft: errors return partial data with an error key.
+    Never touches trading logic, thresholds, or locks.
+    """
+    try:
+        all_records = load_trades()
+    except Exception as exc:
+        return {"error": f"load_trades failed: {exc}"}
+
+    # ── 1. Proof velocity ──────────────────────────────────────────────────────
+    def _is_modern_r(r):
+        return (
+            r.get("risk_edge") is not None
+            and r.get("model_probability") is not None
+            and any(r.get(k) is not None for k in
+                    ("yes_bid", "yes_ask", "no_bid", "no_ask", "price_yes", "price_no"))
+        )
+
+    try:
+        from tools.performance_report import (
+            build_terminal_key_sets, classify_open_records, classify_settled_records,
+        )
+        active_opens, stale_opens = classify_open_records(all_records)
+        sk, fk, vk = build_terminal_key_sets(all_records)
+        clean_settled, _ = classify_settled_records(all_records, sk, fk, vk)
+    except Exception:
+        active_opens = [r for r in all_records if r.get("status") == "OPEN"]
+        stale_opens  = []
+        clean_settled = [r for r in all_records if r.get("status") == "SETTLED"]
+
+    modern_full   = [r for r in clean_settled if _is_modern_r(r)]
+    dc_override   = [r for r in modern_full if r.get("data_collection_override")]
+    provisional   = [
+        r for r in modern_full
+        if r.get("bootstrap_provisional") and not r.get("data_collection_override")
+    ]
+    era_allow     = [r for r in modern_full if r.get("bootstrap_era_council_allow")]
+    normal_modern = [
+        r for r in modern_full
+        if not r.get("data_collection_override") and not r.get("bootstrap_provisional")
+    ]
+
+    proof_velocity = {
+        "clean_settled":      len(clean_settled),
+        "modern_full":        len(modern_full),
+        "dc_override":        len(dc_override),
+        "provisional":        len(provisional),
+        "era_allow":          len(era_allow),
+        "normal_modern":      len(normal_modern),
+        "active_opens":       len(active_opens),
+        "stale_opens":        len(stale_opens),
+        "trust_gate_target":  10,
+        "scale_gate_target":  30,
+        "trust_gate_pct":     round(len(normal_modern) / 10 * 100, 1),
+        "scale_gate_pct":     round(len(normal_modern) / 30 * 100, 1),
+        "real_money_allowed": False,
+        "scale_allowed":      False,
+    }
+
+    # ── 2. CLV trend (by time bucket) ─────────────────────────────────────────
+    from datetime import timedelta
+    clv_trend = {"all_time": None, "last_7d": None, "last_30d": None, "note": ""}
+    try:
+        now = datetime.now(timezone.utc)
+        def _avg_clv(rows):
+            vals = [v for v in (get_clv(r) for r in rows) if v is not None]
+            return round(sum(vals) / len(vals), 4) if vals else None
+
+        def _recent(rows, days):
+            cutoff = now - timedelta(days=days)
+            return [
+                r for r in rows
+                if (ts_v := (r.get("timestamp") or r.get("timestamp_utc")))
+                and (lambda t: t >= cutoff if t else False)(
+                    __import__("datetime").datetime.fromisoformat(
+                        str(ts_v).replace("Z", "+00:00")
+                    ).replace(tzinfo=timezone.utc)
+                    if "+" not in str(ts_v) else
+                    __import__("datetime").datetime.fromisoformat(
+                        str(ts_v).replace("Z", "+00:00")
+                    )
+                )
+            ]
+
+        # Simpler recency filter
+        def _recent_s(rows, days):
+            cutoff = now - timedelta(days=days)
+            result = []
+            for r in rows:
+                ts_raw = r.get("timestamp") or r.get("timestamp_utc")
+                if not ts_raw:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts >= cutoff:
+                        result.append(r)
+                except (ValueError, TypeError):
+                    pass
+            return result
+
+        clv_trend = {
+            "all_time":  _avg_clv(clean_settled),
+            "last_30d":  _avg_clv(_recent_s(clean_settled, 30)),
+            "last_7d":   _avg_clv(_recent_s(clean_settled, 7)),
+            "n_all":     len(clean_settled),
+            "n_30d":     len(_recent_s(clean_settled, 30)),
+            "n_7d":      len(_recent_s(clean_settled, 7)),
+            "note": "Negative CLV = model entering after price moves against it (momentum-chasing signal)",
+        }
+    except Exception as exc:
+        clv_trend["error"] = str(exc)[:120]
+
+    # ── 3. Edge bucket performance summary ────────────────────────────────────
+    edge_buckets: dict = {}
+    if _TP_CLASSIFY_OK:
+        from collections import defaultdict as _dd
+        by_eb = _dd(list)
+        for r in clean_settled:
+            by_eb[_tp_edge_bucket(r)].append(r)
+        for bucket, brows in by_eb.items():
+            wins_b   = [r for r in brows if get_pnl(r) > 0]
+            losses_b = [r for r in brows if get_pnl(r) < 0]
+            wagered_b = sum(get_size(r) for r in brows)
+            pnl_b    = sum(get_pnl(r) for r in brows)
+            clv_b    = [v for v in (get_clv(r) for r in brows) if v is not None]
+            edge_buckets[bucket] = {
+                "n":      len(brows),
+                "wr":     round(len(wins_b) / (len(wins_b) + len(losses_b)), 3) if (wins_b or losses_b) else None,
+                "roi":    round(pnl_b / wagered_b, 4) if wagered_b else None,
+                "avg_clv": round(sum(clv_b) / len(clv_b), 4) if clv_b else None,
+                "sample_warning": len(brows) < 15,
+            }
+
+    # ── 4. Market type performance summary ────────────────────────────────────
+    market_types: dict = {}
+    if _TP_CLASSIFY_OK:
+        by_mh = _dd(list)
+        for r in clean_settled:
+            by_mh[_tp_market_horizon(r)].append(r)
+        for mtype, mrows in by_mh.items():
+            wins_m   = [r for r in mrows if get_pnl(r) > 0]
+            losses_m = [r for r in mrows if get_pnl(r) < 0]
+            wagered_m = sum(get_size(r) for r in mrows)
+            pnl_m    = sum(get_pnl(r) for r in mrows)
+            clv_m    = [v for v in (get_clv(r) for r in mrows) if v is not None]
+            market_types[mtype] = {
+                "n":      len(mrows),
+                "wr":     round(len(wins_m) / (len(wins_m) + len(losses_m)), 3) if (wins_m or losses_m) else None,
+                "roi":    round(pnl_m / wagered_m, 4) if wagered_m else None,
+                "avg_clv": round(sum(clv_m) / len(clv_m), 4) if clv_m else None,
+                "sample_warning": len(mrows) < 15,
+            }
+
+    # ── 5. Blocker breakdown (most recent dashboard session) ──────────────────
+    blocker_summary: dict = {"error": "funnel log not read"}
+    try:
+        funnel_path = ROOT / "logs" / "execution_funnel.jsonl"
+        if funnel_path.exists():
+            funnel_rows = []
+            for line in funnel_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        funnel_rows.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+            # Most recent dashboard_run session
+            run_ids = [r.get("run_id") for r in funnel_rows if r.get("run_id")]
+            real_ids = [rid for rid in set(run_ids) if rid and rid.startswith("dashboard_run_")]
+            if real_ids:
+                latest_id = max(real_ids)
+                session_rows = [r for r in funnel_rows if r.get("run_id") == latest_id]
+                from collections import Counter as _Counter
+                reason_ctr = _Counter(r.get("final_reason", "UNKNOWN") for r in session_rows)
+                total = len(session_rows)
+                blocker_summary = {
+                    "session_id":    latest_id,
+                    "total_signals": total,
+                    "breakdown":     {k: {"count": v, "pct": round(v / total * 100, 1)} for k, v in reason_ctr.most_common()},
+                    "trade_open_rate": round(reason_ctr.get("TRADE_OPENED", 0) / total, 5) if total else 0,
+                }
+            else:
+                blocker_summary = {"error": "no dashboard_run sessions in funnel log"}
+        else:
+            blocker_summary = {"error": "execution_funnel.jsonl not found"}
+    except Exception as exc:
+        blocker_summary = {"error": str(exc)[:120]}
+
+    # ── 6. Edge profile staleness ─────────────────────────────────────────────
+    ep_status: dict = {"status": "MISSING"}
+    try:
+        ep_path = ROOT / "data" / "edge_profile.json"
+        if ep_path.exists():
+            ep_data = json.loads(ep_path.read_text(encoding="utf-8"))
+            raw_ts = ep_data.get("generated_at") or ep_data.get("timestamp")
+            if raw_ts:
+                ep_ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+                if ep_ts.tzinfo is None:
+                    ep_ts = ep_ts.replace(tzinfo=timezone.utc)
+                age_h = (datetime.now(timezone.utc) - ep_ts).total_seconds() / 3600
+                stale = age_h > 48
+                ep_status = {
+                    "status":    "STALE" if stale else "FRESH",
+                    "age_hours": round(age_h, 1),
+                    "generated_at": raw_ts,
+                    "trusted":   ep_data.get("edge_profile_health", {}).get("edge_profile_trusted", False),
+                    "warning":   "Run tools/build_edge_profile.py to refresh" if stale else "",
+                }
+            else:
+                ep_status = {"status": "NO_TIMESTAMP"}
+        else:
+            ep_status = {"status": "MISSING", "warning": "Run tools/build_edge_profile.py"}
+    except Exception as exc:
+        ep_status = {"status": "ERROR", "error": str(exc)[:80]}
+
+    # ── 7. Lock status ────────────────────────────────────────────────────────
+    try:
+        from config.trading_config import (
+            MIN_EDGE, MIN_CONFIDENCE, GLOBAL_FORCED_LEARNING_MODE,
+            EDGE_DANGER_HIGH_EDGE_MIN, BOOTSTRAP_MIN_EDGE,
+            BOOTSTRAP_MIN_CONFIDENCE, BOOTSTRAP_ALLOW_ENABLED,
+        )
+        lock_status = {
+            "real_money_allowed":    False,
+            "scale_allowed":         False,
+            "kelly_execution":       "DISABLED" if GLOBAL_FORCED_LEARNING_MODE else "ENABLED",
+            "global_forced_learning": GLOBAL_FORCED_LEARNING_MODE,
+            "min_edge":              MIN_EDGE,
+            "min_confidence":        MIN_CONFIDENCE,
+            "edge_danger_guard_min": EDGE_DANGER_HIGH_EDGE_MIN,
+            "bootstrap_allow":       BOOTSTRAP_ALLOW_ENABLED,
+            "bootstrap_min_edge":    BOOTSTRAP_MIN_EDGE,
+            "bootstrap_min_conf":    BOOTSTRAP_MIN_CONFIDENCE,
+            "trading_mode":          "PAPER",
+        }
+    except Exception as exc:
+        lock_status = {"error": str(exc)[:80], "real_money_allowed": False, "scale_allowed": False}
+
+    return {
+        "proof_velocity":    proof_velocity,
+        "clv_trend":         clv_trend,
+        "edge_bucket_perf":  edge_buckets,
+        "market_type_perf":  market_types,
+        "blocker_summary":   blocker_summary,
+        "edge_profile":      ep_status,
+        "lock_status":       lock_status,
+        "generated_at":      datetime.now(timezone.utc).isoformat(),
+        "note":              "Read-only operator layer. No trading logic changed.",
+    }
+
+
+@app.route("/api/truth_panels")
+def api_truth_panels():
+    """
+    Extended operator truth panels — read-only diagnostic endpoint.
+    Returns proof velocity, CLV trend, edge bucket/market type performance,
+    blocker breakdown, edge profile staleness, and lock status.
+    No trading logic is affected by this endpoint.
+    """
+    return jsonify(_compute_truth_panels())
+
+
+# ─────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────
 
