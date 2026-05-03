@@ -309,10 +309,13 @@ EDGE_PROFILE_MIN_NORMAL_MODERN = 10
 BOOTSTRAP_PROVISIONAL_MODE = True
 BOOTSTRAP_MIN_EDGE = 0.05          # edge floor for bootstrap candidates
 BOOTSTRAP_MIN_CONFIDENCE = 0.65    # confidence floor for bootstrap candidates
-# Conservative confidence penalty applied by the Critic when returning a
-# bootstrap_era_allow or provisional decision.  Tunable here; referenced by
-# brain/critic_brain.py so changes propagate automatically.
-BOOTSTRAP_CONFIDENCE_ADJUSTMENT = -0.05
+# Bootstrap proof-flow adjustment.
+# Must leave a viable post-council edge window below EDGE_DANGER_HIGH_EDGE_MIN
+# and above MIN_EDGE. This does not unlock real money or scaling.
+# Phase 8P-C: changed -0.05 → -0.02 to resolve bootstrap catch-22 where
+# post_council_edge = pre_edge - 0.05 always fell below MIN_EDGE=0.03
+# for any signal with pre_edge in [0.05, 0.08).
+BOOTSTRAP_CONFIDENCE_ADJUSTMENT = -0.02
 
 # Bootstrap allow mode (Phase 6B-2): when True, signals that meet the bootstrap
 # quality threshold (edge >= BOOTSTRAP_MIN_EDGE, confidence >= BOOTSTRAP_MIN_CONFIDENCE)

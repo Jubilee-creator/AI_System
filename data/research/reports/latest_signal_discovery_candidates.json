@@ -1,0 +1,303 @@
+{
+  "generated_at": "2026-05-03T18:50:49.384269+00:00",
+  "real_money_allowed": false,
+  "scale_allowed": false,
+  "verdict_note": "All candidates are WEAK CANDIDATE EDGE ONLY or lower due to proof contamination and small samples.",
+  "candidates": [
+    {
+      "segment": "prefix:KXBTCD",
+      "n_ok": 24,
+      "wins": 18,
+      "losses": 6,
+      "win_rate": 0.75,
+      "breakeven_wr": 0.6637,
+      "vs_breakeven": 0.0863,
+      "mean_roi": -0.0163,
+      "median_roi": 0.285,
+      "mean_clv": 0.0741,
+      "proof_eligible_n": 4,
+      "legacy_pct": 0.333,
+      "confidence_label": "weak exploratory",
+      "may_be_real": "KXBTCD has shown consistently higher WR than breakeven across ALL proof classes (legacy, DC, bootstrap, era_allow). This persistence across proof class boundaries is the most credible signal in the dataset.",
+      "may_be_fake": "LEGACY rows 33% \u2014 edge formula artifact",
+      "forward_test_rule": "Forward-test: track WR for all KXBTCD trades in next 30 normal_modern rows. If WR stays > 0.70, KXBTCD bias is real. If WR reverts toward 0.65, it was regime luck.",
+      "contamination": [
+        "LEGACY rows 33% \u2014 edge formula artifact"
+      ]
+    },
+    {
+      "segment": "proof:LEGACY_OR_INCOMPLETE",
+      "n_ok": 22,
+      "wins": 13,
+      "losses": 9,
+      "win_rate": 0.5909,
+      "breakeven_wr": 0.5305,
+      "vs_breakeven": 0.0604,
+      "mean_roi": -0.0828,
+      "median_roi": 0.23,
+      "mean_clv": 0.0022,
+      "proof_eligible_n": 0,
+      "legacy_pct": 1.0,
+      "confidence_label": "weak exploratory",
+      "may_be_real": "WR exceeds breakeven with positive median ROI.",
+      "may_be_fake": "LEGACY rows 100% \u2014 edge formula artifact; ZERO proof-eligible rows",
+      "forward_test_rule": "Forward-test: collect 30+ proof-eligible rows in this segment before drawing conclusions.",
+      "contamination": [
+        "LEGACY rows 100% \u2014 edge formula artifact",
+        "ZERO proof-eligible rows"
+      ]
+    },
+    {
+      "segment": "pce:0.06-0.10",
+      "n_ok": 11,
+      "wins": 9,
+      "losses": 2,
+      "win_rate": 0.8182,
+      "breakeven_wr": 0.6309,
+      "vs_breakeven": 0.1873,
+      "mean_roi": 0.2063,
+      "median_roi": 0.35,
+      "mean_clv": -0.02,
+      "proof_eligible_n": 0,
+      "legacy_pct": 0.909,
+      "confidence_label": "weak exploratory",
+      "may_be_real": "Post-council edge in 0.06-0.10 range shows 9/11 wins. Edge level suggests council is correctly identifying genuine probability advantage.",
+      "may_be_fake": "LEGACY rows 91% \u2014 edge formula artifact; ZERO proof-eligible rows",
+      "forward_test_rule": "Forward-test: collect 30+ proof-eligible rows in this segment before drawing conclusions.",
+      "contamination": [
+        "LEGACY rows 91% \u2014 edge formula artifact",
+        "ZERO proof-eligible rows"
+      ]
+    },
+    {
+      "segment": "mom:5m_pos_mild",
+      "n_ok": 6,
+      "wins": 6,
+      "losses": 0,
+      "win_rate": 1.0,
+      "breakeven_wr": 0.6583,
+      "vs_breakeven": 0.3417,
+      "mean_roi": 0.3417,
+      "median_roi": 0.365,
+      "mean_clv": 0.33,
+      "proof_eligible_n": 1,
+      "legacy_pct": 0.5,
+      "confidence_label": "very weak",
+      "may_be_real": "Positive crypto momentum before entry correlates with wins. Could indicate regime alignment (rising price favors YES bets at threshold).",
+      "may_be_fake": "LEGACY rows 50% \u2014 edge formula artifact; tiny sample n=6",
+      "forward_test_rule": "Forward-test: collect 30+ proof-eligible rows in this segment before drawing conclusions.",
+      "contamination": [
+        "LEGACY rows 50% \u2014 edge formula artifact",
+        "tiny sample n=6"
+      ]
+    },
+    {
+      "segment": "mom:15m_pos_mild",
+      "n_ok": 10,
+      "wins": 9,
+      "losses": 1,
+      "win_rate": 0.9,
+      "breakeven_wr": 0.66,
+      "vs_breakeven": 0.24,
+      "mean_roi": 0.2,
+      "median_roi": 0.365,
+      "mean_clv": 0.1914,
+      "proof_eligible_n": 1,
+      "legacy_pct": 0.4,
+      "confidence_label": "weak exploratory",
+      "may_be_real": "Positive crypto momentum before entry correlates with wins. Could indicate regime alignment (rising price favors YES bets at threshold).",
+      "may_be_fake": "LEGACY rows 40% \u2014 edge formula artifact",
+      "forward_test_rule": "Forward-test: for KXBTCD/KXETHD with 15m BTC/ETH return > +0.1%, track if WR remains > 0.85. NOTE: must control for prefix \u2014 test separately from baseline.",
+      "contamination": [
+        "LEGACY rows 40% \u2014 edge formula artifact"
+      ]
+    }
+  ],
+  "anti_edges": [
+    {
+      "segment": "src:FORCED_TIME_EXIT",
+      "n_ok": 13,
+      "wins": 3,
+      "losses": 10,
+      "win_rate": 0.2308,
+      "breakeven_wr": 0.6209,
+      "vs_breakeven": -0.3902,
+      "mean_roi": -0.0155,
+      "median_roi": -0.03,
+      "proof_eligible_n": 1,
+      "legacy_pct": 0.385,
+      "confidence_label": "weak exploratory",
+      "possible_cause": "Win rate significantly below breakeven threshold.",
+      "future_action": "WATCHLIST ONLY: collect more data before considering a blocker.",
+      "contamination": [
+        "LEGACY rows 38%"
+      ]
+    },
+    {
+      "segment": "prefix:OTHER",
+      "n_ok": 11,
+      "wins": 2,
+      "losses": 9,
+      "win_rate": 0.1818,
+      "breakeven_wr": 0.4665,
+      "vs_breakeven": -0.2847,
+      "mean_roi": -0.2228,
+      "median_roi": -0.03,
+      "proof_eligible_n": 0,
+      "legacy_pct": 0.636,
+      "confidence_label": "weak exploratory",
+      "possible_cause": "OTHER prefix contains novel/unusual market structures (KXETHMINY, KXETH hourly buckets) not seen in normal KXBTCD/KXETHD daily markets. Different resolution mechanics and lower liquidity.",
+      "future_action": "WATCHLIST: Consider blocking non-KXBTCD/KXETHD/BTC15M/ETH15M prefixes once data accumulates. Do NOT add blocker yet \u2014 n=11 is insufficient.",
+      "contamination": [
+        "LEGACY rows 64%",
+        "ZERO proof-eligible rows"
+      ]
+    },
+    {
+      "segment": "proof:BOOTSTRAP_PROVISIONAL_EXCLUDED",
+      "n_ok": 10,
+      "wins": 4,
+      "losses": 6,
+      "win_rate": 0.4,
+      "breakeven_wr": 0.637,
+      "vs_breakeven": -0.237,
+      "mean_roi": -0.278,
+      "median_roi": -0.04,
+      "proof_eligible_n": 0,
+      "legacy_pct": 0.0,
+      "confidence_label": "weak exploratory",
+      "possible_cause": "Win rate significantly below breakeven threshold.",
+      "future_action": "WATCHLIST ONLY: collect more data before considering a blocker.",
+      "contamination": [
+        "ZERO proof-eligible rows"
+      ]
+    },
+    {
+      "segment": "proof:DATA_COLLECTION_OVERRIDE_EXCLUDED",
+      "n_ok": 15,
+      "wins": 7,
+      "losses": 8,
+      "win_rate": 0.4667,
+      "breakeven_wr": 0.7007,
+      "vs_breakeven": -0.234,
+      "mean_roi": -0.0987,
+      "median_roi": -0.02,
+      "proof_eligible_n": 0,
+      "legacy_pct": 0.0,
+      "confidence_label": "weak exploratory",
+      "possible_cause": "Win rate significantly below breakeven threshold.",
+      "future_action": "WATCHLIST ONLY: collect more data before considering a blocker.",
+      "contamination": [
+        "ZERO proof-eligible rows"
+      ]
+    },
+    {
+      "segment": "mp:0.60-0.70",
+      "n_ok": 11,
+      "wins": 4,
+      "losses": 7,
+      "win_rate": 0.3636,
+      "breakeven_wr": 0.5955,
+      "vs_breakeven": -0.2318,
+      "mean_roi": -0.2273,
+      "median_roi": -0.03,
+      "proof_eligible_n": 1,
+      "legacy_pct": 0.0,
+      "confidence_label": "weak exploratory",
+      "possible_cause": "Lower model probability rows underperform. WR below breakeven suggests model overestimates at these confidence levels (calibration deficit).",
+      "future_action": "WATCHLIST ONLY: collect more data before considering a blocker.",
+      "contamination": []
+    },
+    {
+      "segment": "mp:0.70-0.80",
+      "n_ok": 10,
+      "wins": 5,
+      "losses": 5,
+      "win_rate": 0.5,
+      "breakeven_wr": 0.653,
+      "vs_breakeven": -0.153,
+      "mean_roi": -0.18,
+      "median_roi": 0.025,
+      "proof_eligible_n": 2,
+      "legacy_pct": 0.0,
+      "confidence_label": "weak exploratory",
+      "possible_cause": "Lower model probability rows underperform. WR below breakeven suggests model overestimates at these confidence levels (calibration deficit).",
+      "future_action": "WATCHLIST ONLY: collect more data before considering a blocker.",
+      "contamination": []
+    },
+    {
+      "segment": "mp:0.80-0.90",
+      "n_ok": 7,
+      "wins": 4,
+      "losses": 3,
+      "win_rate": 0.5714,
+      "breakeven_wr": 0.7843,
+      "vs_breakeven": -0.2129,
+      "mean_roi": -0.0314,
+      "median_roi": 0.19,
+      "proof_eligible_n": 1,
+      "legacy_pct": 0.0,
+      "confidence_label": "very weak",
+      "possible_cause": "Win rate significantly below breakeven threshold.",
+      "future_action": "WATCHLIST ONLY: collect more data before considering a blocker.",
+      "contamination": []
+    },
+    {
+      "segment": "re:0.05-0.08",
+      "n_ok": 18,
+      "wins": 7,
+      "losses": 11,
+      "win_rate": 0.3889,
+      "breakeven_wr": 0.63,
+      "vs_breakeven": -0.2411,
+      "mean_roi": -0.22,
+      "median_roi": -0.03,
+      "proof_eligible_n": 0,
+      "legacy_pct": 0.0,
+      "confidence_label": "weak exploratory",
+      "possible_cause": "Win rate significantly below breakeven threshold.",
+      "future_action": "WATCHLIST ONLY: collect more data before considering a blocker.",
+      "contamination": [
+        "ZERO proof-eligible rows"
+      ]
+    },
+    {
+      "segment": "pce:0.00-0.03",
+      "n_ok": 10,
+      "wins": 4,
+      "losses": 6,
+      "win_rate": 0.4,
+      "breakeven_wr": 0.637,
+      "vs_breakeven": -0.237,
+      "mean_roi": -0.278,
+      "median_roi": -0.04,
+      "proof_eligible_n": 0,
+      "legacy_pct": 0.0,
+      "confidence_label": "weak exploratory",
+      "possible_cause": "Win rate significantly below breakeven threshold.",
+      "future_action": "WATCHLIST ONLY: collect more data before considering a blocker.",
+      "contamination": [
+        "ZERO proof-eligible rows"
+      ]
+    },
+    {
+      "segment": "mom:15m_neg_mild",
+      "n_ok": 8,
+      "wins": 3,
+      "losses": 5,
+      "win_rate": 0.375,
+      "breakeven_wr": 0.6637,
+      "vs_breakeven": -0.2887,
+      "mean_roi": -0.405,
+      "median_roi": -0.525,
+      "proof_eligible_n": 0,
+      "legacy_pct": 0.25,
+      "confidence_label": "very weak",
+      "possible_cause": "Negative crypto momentum before entry. Could indicate market moving against direction of YES bet.",
+      "future_action": "WATCHLIST ONLY: collect more data before considering a blocker.",
+      "contamination": [
+        "ZERO proof-eligible rows"
+      ]
+    }
+  ]
+}
