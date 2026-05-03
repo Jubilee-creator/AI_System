@@ -9,6 +9,7 @@ mutate logs, or change proof/trading behavior.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from collections import Counter, defaultdict
@@ -23,10 +24,12 @@ sys.path.insert(0, str(ROOT))
 PAPER_TRADES_LOG = ROOT / "logs" / "paper_trades.jsonl"
 KALSHI_DIR = ROOT / "data" / "external" / "kalshi"
 CRYPTO_DIR = ROOT / "data" / "external" / "crypto"
+JOINED_DIR = ROOT / "data" / "research" / "joined"
 
 RELEVANT_STATUSES = {"SETTLED", "FORCED_CLOSE", "OPEN"}
 SETTLED_STATUSES = {"SETTLED", "FORCED_CLOSE"}
 DEFAULT_WINDOW_PAD_SECONDS = 15 * 60
+DEFAULT_COVERAGE_TOLERANCE_SECONDS = 60
 DEFAULT_LIMIT = 20
 
 
@@ -160,6 +163,46 @@ def _window_covered(coverage: List[Tuple[int, int]], start: Optional[int], end: 
     return any(cov_start <= start and cov_end >= end for cov_start, cov_end in coverage)
 
 
+def _window_overlaps(coverage: List[Tuple[int, int]], start: int, end: int) -> bool:
+    return any(cov_start < end and cov_end > start for cov_start, cov_end in coverage)
+
+
+def _subtract_coverage(
+    window: Tuple[int, int],
+    coverage: List[Tuple[int, int]],
+    tolerance_seconds: int = DEFAULT_COVERAGE_TOLERANCE_SECONDS,
+) -> List[Tuple[int, int]]:
+    start, end = window
+    if end <= start:
+        return []
+
+    missing: List[Tuple[int, int]] = []
+    cursor = start
+    for cov_start, cov_end in sorted(coverage):
+        cov_start -= tolerance_seconds
+        cov_end += tolerance_seconds
+        if cov_end <= cursor:
+            continue
+        if cov_start >= end:
+            break
+        if cov_start > cursor:
+            missing.append((cursor, min(cov_start, end)))
+        cursor = max(cursor, cov_end)
+        if cursor >= end:
+            break
+    if cursor < end:
+        missing.append((cursor, end))
+    return [
+        (seg_start, seg_end)
+        for seg_start, seg_end in missing
+        if seg_end - seg_start > tolerance_seconds
+    ]
+
+
+def _intersects(window_a: Tuple[int, int], window_b: Tuple[int, int]) -> bool:
+    return window_a[0] < window_b[1] and window_a[1] > window_b[0]
+
+
 def _load_kalshi_coverage() -> Dict[str, List[Tuple[int, int]]]:
     coverage: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
     for path in _iter_data_files(KALSHI_DIR):
@@ -213,6 +256,25 @@ def _load_crypto_coverage() -> Dict[str, List[Tuple[int, int]]]:
         if symbol and timestamps:
             coverage[symbol].append((min(timestamps), max(timestamps)))
     return {symbol: _merge_windows(windows) for symbol, windows in coverage.items()}
+
+
+def _load_latest_joined_kalshi_status_counts() -> Dict[str, Counter]:
+    paths = sorted(JOINED_DIR.glob("*.csv")) if JOINED_DIR.exists() else []
+    if not paths:
+        return {}
+    latest = paths[-1]
+    counts: Dict[str, Counter] = defaultdict(Counter)
+    try:
+        with latest.open(newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                ticker = row.get("ticker")
+                status = row.get("kalshi_join_status") or "UNKNOWN"
+                if ticker:
+                    counts[ticker][status] += 1
+    except OSError:
+        return {}
+    return counts
 
 
 def _build_trade_records(trades: List[dict], include_open: bool, pad_seconds: int) -> List[Dict[str, Any]]:
@@ -282,6 +344,24 @@ def _group_crypto_targets(records: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
     return grouped
 
 
+def _affected_trade_rows(records: List[Dict[str, Any]], ticker: str, segment: Tuple[int, int]) -> int:
+    affected = 0
+    for record in records:
+        if record["ticker"] != ticker:
+            continue
+        start = record.get("start_ts")
+        end = record.get("end_ts")
+        if start is None or end is None:
+            continue
+        if _intersects((int(start), int(end)), segment):
+            affected += 1
+    return affected
+
+
+def _unjoined_or_stale_count(status_counts: Counter) -> int:
+    return sum(count for status, count in status_counts.items() if status != "JOINED")
+
+
 def _kalshi_command(ticker: str, series_ticker: Optional[str], start: int, end: int) -> str:
     parts = [
         "python3 tools/external_data/kalshi_historical_collector.py",
@@ -309,6 +389,22 @@ def _crypto_command(symbol: str, start: int, end: int) -> str:
     )
 
 
+def _kalshi_sort_key(item: Dict[str, Any]) -> Tuple[int, int, int, str, int]:
+    status_priority = {
+        "PARTIALLY_COVERED": 0,
+        "MISSING": 1,
+        "NO_VALID_WINDOW": 2,
+        "FULLY_COVERED": 3,
+    }.get(str(item.get("coverage_status")), 9)
+    return (
+        -int(item.get("stale_or_unjoined_rows") or 0),
+        -int(item.get("affected_rows") or 0),
+        status_priority,
+        str(item.get("ticker") or ""),
+        int(item.get("start") or 0),
+    )
+
+
 def _print_windows(windows: List[Tuple[int, int]], indent: str = "    ") -> None:
     if not windows:
         print(f"{indent}- none")
@@ -322,30 +418,67 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-open", action="store_true", help="Include OPEN trades in addition to settled/forced-close trades.")
     parser.add_argument("--window-pad-minutes", type=int, default=15)
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+    parser.add_argument("--coverage-tolerance-seconds", type=int, default=DEFAULT_COVERAGE_TOLERANCE_SECONDS)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     pad_seconds = max(args.window_pad_minutes, 0) * 60
+    tolerance_seconds = max(args.coverage_tolerance_seconds, 0)
     trades = _load_jsonl(PAPER_TRADES_LOG)
     records = _build_trade_records(trades, include_open=args.include_open, pad_seconds=pad_seconds)
     kalshi_coverage = _load_kalshi_coverage()
     crypto_coverage = _load_crypto_coverage()
+    latest_kalshi_status_counts = _load_latest_joined_kalshi_status_counts()
     ticker_targets = _group_ticker_targets(records)
     crypto_targets = _group_crypto_targets(records)
 
-    kalshi_missing: List[Tuple[str, Optional[str], int, int, int]] = []
-    kalshi_covered_tickers = 0
+    kalshi_missing: List[Dict[str, Any]] = []
+    fully_covered_tickers = 0
+    partially_covered_tickers = 0
+    missing_tickers = 0
+    no_valid_window_tickers = 0
     for ticker, target in ticker_targets.items():
         coverage = kalshi_coverage.get(ticker, [])
         windows = target["windows"]
-        if windows and all(_window_covered(coverage, start, end) for start, end in windows):
-            kalshi_covered_tickers += 1
+        status = "NO_VALID_WINDOW"
+        if windows:
+            missing_for_status: List[Tuple[int, int]] = []
+            overlaps_for_status = False
+            for window in windows:
+                missing_for_status.extend(_subtract_coverage(window, coverage, tolerance_seconds=tolerance_seconds))
+                overlaps_for_status = overlaps_for_status or _window_overlaps(coverage, window[0], window[1])
+            if not missing_for_status:
+                status = "FULLY_COVERED"
+            elif overlaps_for_status:
+                status = "PARTIALLY_COVERED"
+            else:
+                status = "MISSING"
+        if status == "FULLY_COVERED":
+            fully_covered_tickers += 1
             continue
-        for start, end in windows:
-            if not _window_covered(coverage, start, end):
-                kalshi_missing.append((ticker, target["series_ticker"], start, end, target["trade_count"]))
+        if status == "PARTIALLY_COVERED":
+            partially_covered_tickers += 1
+        elif status == "MISSING":
+            missing_tickers += 1
+        else:
+            no_valid_window_tickers += 1
+        for window in windows:
+            for start, end in _subtract_coverage(window, coverage, tolerance_seconds=tolerance_seconds):
+                affected_rows = _affected_trade_rows(records, ticker, (start, end))
+                status_counter = latest_kalshi_status_counts.get(ticker, Counter())
+                stale_or_unjoined = _unjoined_or_stale_count(status_counter)
+                kalshi_missing.append({
+                    "ticker": ticker,
+                    "series_ticker": target["series_ticker"],
+                    "start": start,
+                    "end": end,
+                    "trade_count": target["trade_count"],
+                    "coverage_status": status,
+                    "affected_rows": affected_rows,
+                    "stale_or_unjoined_rows": stale_or_unjoined,
+                })
 
     crypto_missing: List[Tuple[str, int, int, int]] = []
     crypto_covered_windows = 0
@@ -373,10 +506,15 @@ def main() -> None:
     print(f"  planning_scope:             {'settled_plus_open' if args.include_open else 'settled_only'}")
     print(f"  planned_trade_rows:         {len(records)}")
     print(f"  window_pad_minutes:         {args.window_pad_minutes}")
+    print(f"  coverage_tolerance_seconds: {tolerance_seconds}")
     print(f"  unique_kalshi_tickers:      {len(ticker_targets)}")
     print(f"  tickers_with_kalshi_raw:    {sum(1 for ticker in ticker_targets if ticker in kalshi_coverage)}")
-    print(f"  tickers_fully_covered:      {kalshi_covered_tickers}")
-    print(f"  tickers_missing_coverage:   {len(ticker_targets) - kalshi_covered_tickers}")
+    print(f"  fully_covered_tickers:      {fully_covered_tickers}")
+    print(f"  partially_covered_tickers:  {partially_covered_tickers}")
+    print(f"  missing_tickers:            {missing_tickers}")
+    print(f"  no_valid_window_tickers:    {no_valid_window_tickers}")
+    print(f"  missing_windows:            {len(kalshi_missing)}")
+    print(f"  est_affected_trade_rows:    {sum(item['affected_rows'] for item in kalshi_missing)}")
     print(f"  crypto_symbols_needed:      {len(crypto_targets)}")
     print(f"  crypto_windows_covered:     {crypto_covered_windows}")
     print(f"  crypto_windows_missing:     {len(crypto_missing)}")
@@ -414,8 +552,21 @@ def main() -> None:
     print("PRIORITY KALSHI FETCH COMMANDS")
     print("-" * 72)
     if kalshi_missing:
-        for ticker, series_ticker, start, end, trade_count in sorted(kalshi_missing, key=lambda item: (-item[4], item[0], item[2]))[:args.limit]:
-            print(f"  # trades={trade_count} ticker={ticker} series={series_ticker or 'UNKNOWN'}")
+        for item in sorted(kalshi_missing, key=_kalshi_sort_key)[:args.limit]:
+            ticker = str(item["ticker"])
+            series_ticker = item["series_ticker"]
+            start = int(item["start"])
+            end = int(item["end"])
+            print(
+                "  # status={status} affected_rows={affected} stale_or_unjoined_rows={stale} "
+                "ticker={ticker} series={series}".format(
+                    status=item["coverage_status"],
+                    affected=item["affected_rows"],
+                    stale=item["stale_or_unjoined_rows"],
+                    ticker=ticker,
+                    series=series_ticker or "UNKNOWN",
+                )
+            )
             print(f"  {_kalshi_command(ticker, series_ticker, start, end)}")
     else:
         print("  (none)")
