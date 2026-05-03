@@ -398,6 +398,62 @@ def _crypto_command(symbol: str, start: int, end: int) -> str:
     )
 
 
+def _consolidated_kalshi_commands(kalshi_missing: List[Dict[str, Any]], limit: int) -> None:
+    """One fetch command per ticker covering min(start) to max(end) across all missing segments."""
+    per_ticker: Dict[str, Dict[str, Any]] = {}
+    for item in kalshi_missing:
+        ticker = str(item["ticker"])
+        start = int(item["start"])
+        end = int(item["end"])
+        if ticker not in per_ticker:
+            per_ticker[ticker] = {
+                "ticker": ticker,
+                "series_ticker": item["series_ticker"],
+                "min_start": start,
+                "max_end": end,
+                "total_affected": item["affected_rows"],
+                "stale_or_unjoined": item["stale_or_unjoined_rows"],
+                "segments": 1,
+            }
+        else:
+            entry = per_ticker[ticker]
+            entry["min_start"] = min(entry["min_start"], start)
+            entry["max_end"] = max(entry["max_end"], end)
+            entry["total_affected"] = max(entry["total_affected"], item["affected_rows"])
+            entry["stale_or_unjoined"] = max(entry["stale_or_unjoined"], item["stale_or_unjoined_rows"])
+            entry["segments"] += 1
+
+    sorted_tickers = sorted(
+        per_ticker.values(),
+        key=lambda x: (-x["stale_or_unjoined"], -x["total_affected"], x["ticker"]),
+    )
+
+    print("CONSOLIDATED KALSHI FETCH COMMANDS (one per ticker, full span)")
+    print("-" * 72)
+    if not sorted_tickers:
+        print("  (none)")
+        print()
+        return
+    for entry in sorted_tickers[:limit]:
+        ticker = entry["ticker"]
+        series_ticker = entry["series_ticker"]
+        start = entry["min_start"]
+        end = entry["max_end"]
+        window_min = (end - start) // 60
+        print(
+            "  # stale_or_unjoined={stale} affected_rows={affected} "
+            "segments={segments} window={window}min ticker={ticker}".format(
+                stale=entry["stale_or_unjoined"],
+                affected=entry["total_affected"],
+                segments=entry["segments"],
+                window=window_min,
+                ticker=ticker,
+            )
+        )
+        print(f"  {_kalshi_command(ticker, series_ticker, start, end)}")
+    print()
+
+
 def _kalshi_sort_key(item: Dict[str, Any]) -> Tuple[int, int, int, str, int]:
     status_priority = {
         "PARTIALLY_COVERED": 0,
@@ -580,6 +636,8 @@ def main() -> None:
     else:
         print("  (none)")
     print()
+
+    _consolidated_kalshi_commands(kalshi_missing, args.limit)
 
     print("PRIORITY CRYPTO FETCH COMMANDS")
     print("-" * 72)

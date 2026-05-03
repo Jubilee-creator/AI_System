@@ -11,6 +11,7 @@ from __future__ import annotations
 import bisect
 import csv
 import json
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -151,6 +152,36 @@ def _proof_class(row: dict) -> str:
     if row.get("risk_edge") is not None and row.get("model_probability") is not None:
         return "NORMAL_MODERN_CANDIDATE"
     return "LEGACY_OR_INCOMPLETE"
+
+
+def _outcome_source(row: dict) -> str:
+    status = str(row.get("status") or "")
+    if status == "SETTLED":
+        return "MARKET_RESOLVED"
+    if status == "FORCED_CLOSE":
+        if str(row.get("result") or "").upper() == "TIME_EXIT":
+            return "FORCED_TIME_EXIT"
+        return "FORCED_VOID"
+    if status == "OPEN":
+        return "OPEN_NO_OUTCOME"
+    return "UNKNOWN"
+
+
+def _outcome_known(row: dict) -> bool:
+    return _outcome_source(row) in ("MARKET_RESOLVED", "FORCED_TIME_EXIT")
+
+
+def _resolved_by_market(row: dict) -> bool:
+    return _outcome_source(row) == "MARKET_RESOLVED"
+
+
+def _analysis_exclusion_reason(row: dict) -> Optional[str]:
+    src = _outcome_source(row)
+    if src == "OPEN_NO_OUTCOME":
+        return "GHOST_OPEN_NO_RESOLUTION"
+    if src == "FORCED_VOID":
+        return "FORCED_VOID_NO_OUTCOME"
+    return None
 
 
 def _external_inputs_available() -> bool:
@@ -343,6 +374,27 @@ def _nearest_before(candles: List[Dict[str, Any]], ts_key: str, target_ts: int) 
     return candles[idx]
 
 
+def _volatility_15m(candles: List[Dict[str, Any]], entry_epoch: int, min_candles: int = 5) -> Optional[float]:
+    ts_to_close: Dict[int, float] = {}
+    for c in candles:
+        ts_int = _as_int(c.get("ts"))
+        close_val = _as_float(c.get("close"))
+        if ts_int is None or close_val is None or close_val <= 0:
+            continue
+        if entry_epoch - 900 <= ts_int <= entry_epoch:
+            ts_to_close[ts_int] = close_val
+    if len(ts_to_close) < min_candles:
+        return None
+    closes = [ts_to_close[ts] for ts in sorted(ts_to_close)]
+    log_returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+    n = len(log_returns)
+    if n < 4:
+        return None
+    mean = sum(log_returns) / n
+    variance = sum((r - mean) ** 2 for r in log_returns) / (n - 1)
+    return math.sqrt(variance)
+
+
 def _return_before(candles: List[Dict[str, Any]], target_ts: int, minutes: int) -> Optional[float]:
     current = _nearest_before(candles, "ts", target_ts)
     prior = _nearest_before(candles, "ts", target_ts - minutes * 60)
@@ -435,6 +487,7 @@ def _join_crypto_features(prefix: str, entry_epoch: Optional[int], crypto_by_sym
         "crypto_close_before_entry": nearest.get("close"),
         "crypto_return_5m_before_entry": _return_before(candles, entry_epoch, 5),
         "crypto_return_15m_before_entry": _return_before(candles, entry_epoch, 15),
+        "crypto_volatility_15m": _volatility_15m(candles, entry_epoch),
     })
     return empty
 
@@ -460,10 +513,18 @@ def _build_rows(
             "entry_ts": entry_ts,
             "settlement_ts": _parse_ts(row.get("settled_at") or row.get("result_time")),
             "entry_price": row.get("entry_price"),
+            "trade_status": row.get("status"),
+            "outcome_source": _outcome_source(row),
+            "outcome_known": _outcome_known(row),
+            "resolved_by_market": _resolved_by_market(row),
+            "analysis_exclusion_reason": _analysis_exclusion_reason(row),
             "outcome": _outcome(row),
             "roi": _roi(row),
             "clv": row.get("clv"),
             "probability_confidence": row.get("model_probability", row.get("confidence")),
+            "model_probability": row.get("model_probability"),
+            "risk_edge": row.get("risk_edge"),
+            "post_council_edge": row.get("edge"),
             "proof_class": _proof_class(row),
         }
         joined_row.update(_join_crypto_features(prefix, entry_epoch, crypto_by_symbol))

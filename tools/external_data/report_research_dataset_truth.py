@@ -108,29 +108,53 @@ def _sample_warn(n: int, threshold: int = 30) -> str:
 
 def _section_composition(rows: List[Dict[str, str]]) -> None:
     total = len(rows)
-    wins   = [r for r in rows if r.get("outcome") == "WIN"]
-    losses = [r for r in rows if r.get("outcome") == "LOSS"]
-    pushes = [r for r in rows if r.get("outcome") == "PUSH"]
+    has_outcome_source = rows and "outcome_source" in rows[0]
 
-    # PUSH rows: ghost OPEN (no settlement_ts) vs forced-close zero-pnl (has settlement_ts)
-    push_deferred  = [r for r in pushes if not (r.get("settlement_ts") or "").strip()]
-    push_zero_pnl  = [r for r in pushes if (r.get("settlement_ts") or "").strip()]
+    if has_outcome_source:
+        market_res   = [r for r in rows if r.get("outcome_source") == "MARKET_RESOLVED"]
+        forced_exit  = [r for r in rows if r.get("outcome_source") == "FORCED_TIME_EXIT"]
+        forced_void  = [r for r in rows if r.get("outcome_source") == "FORCED_VOID"]
+        ghost_open   = [r for r in rows if r.get("outcome_source") == "OPEN_NO_OUTCOME"]
+        outcome_k    = [r for r in rows if r.get("outcome_known", "").lower() in ("true", "1")]
+        outcome_unk  = [r for r in rows if r.get("outcome_known", "").lower() not in ("true", "1")]
+    else:
+        wins   = [r for r in rows if r.get("outcome") == "WIN"]
+        losses = [r for r in rows if r.get("outcome") == "LOSS"]
+        pushes = [r for r in rows if r.get("outcome") == "PUSH"]
+        ghost_open  = [r for r in pushes if not (r.get("settlement_ts") or "").strip()]
+        forced_void = [r for r in pushes if (r.get("settlement_ts") or "").strip()]
+        outcome_k   = wins + losses
+        outcome_unk = pushes
+        market_res  = []
+        forced_exit = wins + losses
+        forced_void = forced_void
 
     print("DATASET COMPOSITION")
     print(LINE)
-    print(f"  total_rows:                {total}")
+    print(f"  total_rows:                    {total}")
     print()
-    print(f"  outcome=WIN:               {len(wins):>4}  ({_pct(len(wins), total)})")
-    print(f"  outcome=LOSS:              {len(losses):>4}  ({_pct(len(losses), total)})")
-    print(f"  outcome=PUSH / settled:    {len(push_zero_pnl):>4}  (FORCED_CLOSE at cost — position closed; market may have resolved)")
-    print(f"  outcome=PUSH / no settle:  {len(push_deferred):>4}  (ghost OPEN rows — no resolution recorded)")
+    if has_outcome_source:
+        print(f"  MARKET_RESOLVED:               {len(market_res):>4}  ({_pct(len(market_res), total)})  — settled by Kalshi; outcome=WIN/LOSS")
+        print(f"  FORCED_TIME_EXIT:               {len(forced_exit):>4}  ({_pct(len(forced_exit), total)})  — position closed at market price; outcome=WIN/LOSS")
+        print(f"  FORCED_VOID:                   {len(forced_void):>4}  ({_pct(len(forced_void), total)})  — validation reset; pnl=0; no trading outcome")
+        print(f"  OPEN_NO_OUTCOME (ghost):       {len(ghost_open):>4}  ({_pct(len(ghost_open), total)})  — unresolved OPEN rows; no outcome recorded")
+    else:
+        wins   = [r for r in rows if r.get("outcome") == "WIN"]
+        losses = [r for r in rows if r.get("outcome") == "LOSS"]
+        pushes = [r for r in rows if r.get("outcome") == "PUSH"]
+        push_deferred = [r for r in pushes if not (r.get("settlement_ts") or "").strip()]
+        push_at_cost  = [r for r in pushes if (r.get("settlement_ts") or "").strip()]
+        print(f"  outcome=WIN:                   {len(wins):>4}  ({_pct(len(wins), total)})")
+        print(f"  outcome=LOSS:                  {len(losses):>4}  ({_pct(len(losses), total)})")
+        print(f"  outcome=PUSH / settled:        {len(push_at_cost):>4}  (FORCED_CLOSE at cost)")
+        print(f"  outcome=PUSH / no settle:      {len(push_deferred):>4}  (ghost OPEN rows)")
     print()
-    print(f"  outcome_known (WIN+LOSS):  {len(wins)+len(losses):>4}  ← usable for performance analysis")
-    print(f"  outcome_unknown (PUSH):    {len(pushes):>4}  ← NOT usable for outcome analysis")
+    print(f"  outcome_known (WIN+LOSS):      {len(outcome_k):>4}  ← usable for performance analysis")
+    print(f"  outcome_unknown:               {len(outcome_unk):>4}  ← NOT usable for outcome analysis")
     print()
-    print("  NOTE: Ghost OPEN rows (no settlement_ts) appear because the research")
-    print("  dataset builder includes rows with status=OPEN from paper_trades.jsonl.")
-    print("  These have pnl=0.0 in the log and contribute no outcome information.")
+    print("  NOTE: Ghost OPEN rows (OPEN_NO_OUTCOME) appear because the research")
+    print("  dataset builder includes status=OPEN rows from paper_trades.jsonl.")
+    print("  FORCED_VOID rows are validation resets — pnl=0, no market outcome.")
     print()
 
 
@@ -215,20 +239,35 @@ def _section_proof_classes(rows: List[Dict[str, str]]) -> None:
 
 
 def _section_usable_rows(rows: List[Dict[str, str]]) -> None:
-    total      = len(rows)
-    outcome_k  = [r for r in rows if r.get("outcome") in ("WIN", "LOSS")]
-    crypto_j   = [r for r in rows if r.get("crypto_join_status") == "JOINED"]
-    kalshi_j   = [r for r in rows if r.get("kalshi_join_status") == "JOINED"]
-    both_j     = [r for r in rows if r.get("crypto_join_status") == "JOINED"
-                                  and r.get("kalshi_join_status") == "JOINED"]
-    proof_el   = [r for r in rows if r.get("proof_class") in PROOF_ELIGIBLE]
+    total     = len(rows)
+    has_src   = rows and "outcome_source" in rows[0]
+    has_ok    = rows and "outcome_known" in rows[0]
+
+    if has_ok:
+        outcome_k = [r for r in rows if r.get("outcome_known", "").lower() in ("true", "1")]
+    else:
+        outcome_k = [r for r in rows if r.get("outcome") in ("WIN", "LOSS")]
+
+    crypto_j  = [r for r in rows if r.get("crypto_join_status") == "JOINED"]
+    kalshi_j  = [r for r in rows if r.get("kalshi_join_status") == "JOINED"]
+    both_j    = [r for r in rows if r.get("crypto_join_status") == "JOINED"
+                                 and r.get("kalshi_join_status") == "JOINED"]
 
     ok_crypto       = [r for r in outcome_k if r.get("crypto_join_status") == "JOINED"]
     ok_kalshi       = [r for r in outcome_k if r.get("kalshi_join_status") == "JOINED"]
     ok_both         = [r for r in outcome_k if r.get("crypto_join_status") == "JOINED"
-                                            and r.get("kalshi_join_status") == "JOINED"]
+                                           and r.get("kalshi_join_status") == "JOINED"]
     ok_proof        = [r for r in outcome_k if r.get("proof_class") in PROOF_ELIGIBLE]
     ok_proof_crypto = [r for r in ok_proof  if r.get("crypto_join_status") == "JOINED"]
+
+    if has_src:
+        ghost_open   = [r for r in rows if r.get("outcome_source") == "OPEN_NO_OUTCOME"]
+        forced_void  = [r for r in rows if r.get("outcome_source") == "FORCED_VOID"]
+    else:
+        ghost_open  = [r for r in rows if r.get("outcome") == "PUSH"
+                                       and not (r.get("settlement_ts") or "").strip()]
+        forced_void = [r for r in rows if r.get("outcome") == "PUSH"
+                                       and (r.get("settlement_ts") or "").strip()]
 
     print("USABLE ROW SUMMARY")
     print(LINE)
@@ -243,12 +282,8 @@ def _section_usable_rows(rows: List[Dict[str, str]]) -> None:
     print(f"    + proof_eligible + crypto_joined:       {len(ok_proof_crypto):>4}")
     print()
     print("  UNUSABLE rows:")
-    push_deferred  = [r for r in rows if r.get("outcome") == "PUSH"
-                                      and not (r.get("settlement_ts") or "").strip()]
-    push_zero_pnl  = [r for r in rows if r.get("outcome") == "PUSH"
-                                      and (r.get("settlement_ts") or "").strip()]
-    print(f"    ghost OPEN (no settlement, no outcome): {len(push_deferred):>4}  — exclude from all analysis")
-    print(f"    FORCED_CLOSE at zero PNL:               {len(push_zero_pnl):>4}  — position closed at cost; no resolution")
+    print(f"    ghost OPEN (OPEN_NO_OUTCOME):           {len(ghost_open):>4}  — no resolution; exclude from all analysis")
+    print(f"    FORCED_VOID (validation reset):         {len(forced_void):>4}  — pnl=0; no market outcome; exclude")
     print()
 
 
@@ -265,16 +300,36 @@ def _section_column_completeness(rows: List[Dict[str, str]]) -> None:
 
     print("COLUMN COMPLETENESS")
     print(LINE)
-    print("  Core fields (all 99 rows):")
+    n_ok = len([r for r in rows if r.get("outcome_known", "").lower() in ("true", "1")]
+               if (rows and "outcome_known" in rows[0])
+               else [r for r in rows if r.get("outcome") in ("WIN", "LOSS")])
+
+    print(f"  Core fields (all {total} rows):")
     for col in ("entry_price", "probability_confidence", "roi", "outcome", "settlement_ts", "clv"):
         note = ""
         if col == "roi":
-            note = "  — meaningful only for 49 outcome-known rows"
+            note = f"  — meaningful only for {n_ok} outcome-known rows"
         if col == "clv":
-            note = "  — only present for excluded/legacy proof classes"
+            note = "  — present for some proof classes; check coverage"
         if col == "settlement_ts":
             note = "  — missing for ghost OPEN rows"
         print(f"    {col:<36s} {_coverage(col, rows)}{note}")
+    print()
+
+    print(f"  Probability / edge fields (all {total} rows):")
+    for col in ("model_probability", "risk_edge", "post_council_edge"):
+        note = ""
+        if col == "model_probability":
+            note = "  — pre-council raw model output; None for legacy rows"
+        if col == "risk_edge":
+            note = "  — pre-council edge = model_prob - entry_price - 0.01; None for legacy"
+        if col == "post_council_edge":
+            note = "  — council-adjusted edge (may be negative); present all rows"
+        # fall back gracefully if column not in old CSV
+        if rows and col not in rows[0]:
+            print(f"    {col:<36s}  n/a  (column added in Phase 8M — rebuild CSV)")
+        else:
+            print(f"    {col:<36s} {_coverage(col, rows)}{note}")
     print()
 
     print(f"  Crypto features  ({n_cj} crypto-joined rows):")
@@ -286,7 +341,14 @@ def _section_column_completeness(rows: List[Dict[str, str]]) -> None:
     ):
         note = ""
         if col == "crypto_volatility_15m":
-            note = "  — ALWAYS EMPTY: column defined in schema but never computed by builder"
+            if rows and col in rows[0]:
+                n_nonzero = sum(1 for r in crypto_j if (r.get(col) or "").strip())
+                if n_nonzero == 0:
+                    note = "  — all empty: candle window too short or insufficient data"
+                else:
+                    note = f"  — computed for {n_nonzero}/{n_cj} joined rows"
+            else:
+                note = "  — column added in Phase 8M; rebuild CSV to populate"
         print(f"    {col:<36s} {_coverage(col, crypto_j)}{note}")
     print()
 
@@ -300,11 +362,6 @@ def _section_column_completeness(rows: List[Dict[str, str]]) -> None:
         "kalshi_open_interest",
     ):
         print(f"    {col:<36s} {_coverage(col, kalshi_j)}")
-    print()
-
-    print("  NOT in CSV (available only in paper_trades.jsonl):")
-    print("    risk_edge                            — the model's computed edge at scan time")
-    print("    model_probability (separate)         — probability_confidence is a unified proxy")
     print()
 
 
