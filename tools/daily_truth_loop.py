@@ -32,6 +32,7 @@ TOOLS: list[tuple[str, list[str]]] = [
     ("TRUST_GATE",   ["python3", "tools/report_edge_trust_gate.py"]),
     ("MODERN_PROOF", ["python3", "tools/report_modern_only_proof.py"]),
     ("TRUTH_REPORT", ["python3", "tools/clean_truth_report.py"]),
+    ("CALIBRATION",  ["python3", "tools/calibration_truth_report.py"]),
 ]
 
 _VERDICT_KEYWORDS = (
@@ -40,6 +41,7 @@ _VERDICT_KEYWORDS = (
     "SCALE_ELIGIBLE", "WATCHLIST", "COLLECTING", "STALLED",
     "EDGE_TRUST_GATE_REPORT_OK", "MODERN_ONLY_PROOF_REPORT_OK",
     "PROFITABILITY_TRUTH_REPORT_OK", "ASYMMETRY_EDGE_INVERSION_REPORT_OK",
+    "CALIBRATION_TRUTH_REPORT_OK",
 )
 
 
