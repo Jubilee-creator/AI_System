@@ -17,4 +17,16 @@ data/risk_state.json
 *.pem
 
 # Local runtime state
-/data/
+data/*
+!data/external/
+!data/external/**/
+!data/external/**/.gitkeep
+!data/research/
+!data/research/**/
+!data/research/**/.gitkeep
+data/external/**/*.json
+data/external/**/*.jsonl
+data/external/**/*.csv
+data/research/joined/**/*.json
+data/research/joined/**/*.jsonl
+data/research/joined/**/*.csv
