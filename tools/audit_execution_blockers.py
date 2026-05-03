@@ -55,11 +55,13 @@ def _pick_session(rows: list[dict], session_arg: str | None, all_today: bool) ->
     if all_today:
         filtered = [r for r in rows if (r.get("run_id") or "").find(today) != -1]
         return filtered, f"all sessions on {today}"
-    # Most recent run_id
+    # Most recent run_id — prefer dashboard_run_* over test/smoke rows
     run_ids = [r.get("run_id") for r in rows if r.get("run_id")]
     if not run_ids:
         return rows, "ALL"
-    latest = max(set(run_ids), key=lambda rid: rid or "")
+    real_ids = [rid for rid in set(run_ids) if rid.startswith("dashboard_run_")]
+    candidate_ids = real_ids if real_ids else list(set(run_ids))
+    latest = max(candidate_ids, key=lambda rid: rid or "")
     filtered = [r for r in rows if r.get("run_id") == latest]
     return filtered, latest
 
