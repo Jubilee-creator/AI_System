@@ -45,6 +45,7 @@ from config.trading_config import (
     EDGE_DANGER_HIGH_EDGE_MIN,
     EDGE_DANGER_REQUIRE_PAPER_ONLY,
     EDGE_DANGER_REASON,
+    QUARANTINED_TICKER_PREFIXES,
 )
 
 MIN_LEARNING_BET = 5.00
@@ -463,6 +464,23 @@ class PaperTrader:
                 f"min_confidence={self.min_confidence:.3f}"
             )
 
+        # Phase 8R: Quarantine check — block confirmed poison prefixes before any
+        # further processing (sync, cap check, council, risk).
+        if QUARANTINED_TICKER_PREFIXES:
+            _ticker_up = str(market_data.ticker or "").upper()
+            for _qpfx in QUARANTINED_TICKER_PREFIXES:
+                if _ticker_up.startswith(_qpfx.upper()):
+                    print(
+                        f"[TRACE] quarantined prefix block: "
+                        f"ticker={market_data.ticker} prefix={_qpfx} "
+                        f"hard quarantine Phase 8Q"
+                    )
+                    print(
+                        f"[PAPER_DEBUG] blocked: quarantined prefix | "
+                        f"ticker={market_data.ticker} prefix={_qpfx}"
+                    )
+                    return None
+
         # Re-sync against on-disk log before cap check so auto_settle_trades.py
         # settlements are reflected mid-session without requiring a restart.
         self._sync_open_trades_from_log()
@@ -609,6 +627,7 @@ class PaperTrader:
                 "strategy": strategy,
                 "market_type": market_type,
                 "action": action,
+                "yes_ask": getattr(market_data, "yes_ask", None),
             })
             council_decision = council_result.get("final_decision", "ALLOW")
             council_reason = council_result.get("reason", "")

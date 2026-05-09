@@ -99,6 +99,46 @@ def _market_type(rec: dict) -> str:
     return "OTHER"
 
 
+def _price_bucket(price: Optional[float]) -> Optional[str]:
+    """Entry price bucket for 2D (original_edge × price) profiling."""
+    if price is None:
+        return None
+    if price < 0.10: return "<0.10"
+    if price < 0.20: return "0.10-0.20"
+    if price < 0.30: return "0.20-0.30"
+    if price < 0.40: return "0.30-0.40"
+    if price < 0.50: return "0.40-0.50"
+    if price < 0.60: return "0.50-0.60"
+    if price < 0.70: return "0.60-0.70"
+    if price < 0.80: return "0.70-0.80"
+    if price < 0.90: return "0.80-0.90"
+    return "0.90-1.00"
+
+
+def _is_normal_modern_for_2d(rec: dict) -> bool:
+    """
+    True only for normal-council-approved modern trades:
+    has all modern metadata fields, is NOT data_collection_override,
+    is NOT bootstrap_provisional.
+    These are the only rows eligible for 2D price-conditioned proof.
+    """
+    if rec.get("council_decision") is None:
+        return False
+    if rec.get("bootstrap_provisional") is None:
+        return False
+    if rec.get("data_collection_override") is None:
+        return False
+    if rec.get("risk_edge") is None:
+        return False
+    if rec.get("bootstrap_era_council_allow") is None:
+        return False
+    if bool(rec.get("data_collection_override")):
+        return False
+    if bool(rec.get("bootstrap_provisional")):
+        return False
+    return True
+
+
 def _action_type(rec: dict) -> str:
     return str(rec.get("action") or "UNKNOWN").upper()
 
@@ -202,6 +242,12 @@ def build_profile() -> dict[str, Any]:
         "by_strategy": defaultdict(_new_bucket),
     }
 
+    # Phase 9A: 2D (original_edge × entry_price) table.
+    # Uses original_edge (pre-council scanner edge) — same field the Critic
+    # receives — so lookup is consistent.  Built from normal_modern non-KXETH
+    # trades only (clean proof-eligible evidence).
+    by_edge_price_bucket: dict[str, Any] = defaultdict(_new_bucket)
+
     overall = _new_bucket()
     modern_full_metadata = [
         rec for rec in clean_settled
@@ -240,6 +286,25 @@ def build_profile() -> dict[str, Any]:
         _add_trade(groups["by_action_type"][_action_type(rec)], rec)
         _add_trade(groups["by_strategy"][_strategy(rec)], rec)
 
+    # 2D price-conditioned table: normal_modern non-KXETH only.
+    for rec in clean_settled:
+        ticker_str = str(rec.get("ticker") or "")
+        if ticker_str.upper().startswith("KXETH"):
+            continue
+        if not _is_normal_modern_for_2d(rec):
+            continue
+        orig_edge = _num(rec, "original_edge")
+        if orig_edge is None:
+            orig_edge = _num(rec, "edge")
+        entry_price = _num(rec, "entry_price")
+        if entry_price is None:
+            entry_price = _num(rec, "yes_ask")
+        eb = _edge_bucket(orig_edge)
+        pb = _price_bucket(entry_price)
+        if eb and pb:
+            cell_key = f"{eb}|{pb}"
+            _add_trade(by_edge_price_bucket[cell_key], rec)
+
     profile = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_log": str(TRADES_LOG),
@@ -256,6 +321,8 @@ def build_profile() -> dict[str, Any]:
             for name, group in groups.items()
         },
     }
+    # Phase 9A: attach 2D table as a peer to the 1D profile groups.
+    profile["profiles"]["by_edge_price_bucket"] = _finalize_group(by_edge_price_bucket)
     profile["edge_profile_health"] = edge_profile_health(profile, OUTPUT_PATH)
     profile["source_warning"] = (
         "UNTRUSTED: " + profile["edge_profile_health"]["reason"]

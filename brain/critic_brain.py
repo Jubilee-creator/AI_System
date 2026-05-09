@@ -25,6 +25,9 @@ from config.trading_config import (
     BOOTSTRAP_MIN_CONFIDENCE,
     BOOTSTRAP_ALLOW_ENABLED,
     BOOTSTRAP_CONFIDENCE_ADJUSTMENT,
+    PRICE_CONDITIONED_COUNCIL_ENABLED,
+    PRICE_CONDITIONED_MIN_N,
+    PRICE_CONDITIONED_MIN_WR,
 )
 
 DEFAULT_PROFILE_PATH = ROOT / "data" / "edge_profile.json"
@@ -147,6 +150,84 @@ def _bad_any_sample(bucket: Optional[dict[str, Any]]) -> bool:
     return bool((win_rate is not None and win_rate < 0.40) or _total_pnl(bucket) < 0)
 
 
+def _price_bucket_critic(price: Optional[float]) -> Optional[str]:
+    """Price bucket matching build_edge_profile._price_bucket exactly."""
+    if price is None:
+        return None
+    if price < 0.10: return "<0.10"
+    if price < 0.20: return "0.10-0.20"
+    if price < 0.30: return "0.20-0.30"
+    if price < 0.40: return "0.30-0.40"
+    if price < 0.50: return "0.40-0.50"
+    if price < 0.60: return "0.50-0.60"
+    if price < 0.70: return "0.60-0.70"
+    if price < 0.80: return "0.70-0.80"
+    if price < 0.90: return "0.80-0.90"
+    return "0.90-1.00"
+
+
+def _price_conditioned_override(
+    signal: dict[str, Any],
+    profile: dict[str, Any],
+    edge_key: str,
+    health: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """
+    Check whether the 2D (original_edge × price) cell justifies an ALLOW
+    even though the 1D edge bucket is contaminated.
+
+    Returns an ALLOW result dict if the 2D cell is strongly positive, or
+    None to defer to the normal 1D bucket-checks path.
+
+    Only fires when:
+      - PRICE_CONDITIONED_COUNCIL_ENABLED is True
+      - signal contains yes_ask in a known price bucket
+      - the 2D table exists in the profile
+      - the 2D cell meets n >= MIN_N, win_rate >= MIN_WR, total_pnl > 0
+    """
+    if not PRICE_CONDITIONED_COUNCIL_ENABLED:
+        return None
+
+    yes_ask = _as_float(signal.get("yes_ask"))
+    if yes_ask is None:
+        return None
+
+    price_key = _price_bucket_critic(yes_ask)
+    if price_key is None:
+        return None
+
+    cell_key = f"{edge_key}|{price_key}"
+    cell = (
+        profile.get("profiles", {})
+        .get("by_edge_price_bucket", {})
+        .get(cell_key)
+    )
+    if cell is None:
+        return None
+
+    n   = int(cell.get("trades", 0))
+    wr  = float(cell.get("win_rate", 0.0))
+    pnl = float(cell.get("total_pnl", 0.0))
+
+    if n < PRICE_CONDITIONED_MIN_N or wr < PRICE_CONDITIONED_MIN_WR or pnl <= 0:
+        return None
+
+    return {
+        "decision": "ALLOW",
+        "reason": (
+            f"price_conditioned_council_allow: "
+            f"1D edge bucket '{edge_key}' is contaminated "
+            f"but 2D cell '{cell_key}' shows positive evidence: "
+            f"n={n}, win_rate={wr:.3f}, total_pnl={pnl:+.2f} "
+            f"(normal_modern non-KXETH trades only)"
+        ),
+        "confidence_adjustment": 0.0,
+        "price_conditioned_override": True,
+        "price_conditioned_cell": cell_key,
+        "edge_profile_health": health,
+    }
+
+
 def _format_reason(reasons: list[str]) -> str:
     if reasons:
         return "; ".join(reasons)
@@ -249,6 +330,18 @@ def critique_signal(
     market_type = _market_type(signal)
     conf_key = confidence_bucket(confidence)
     edge_key = edge_bucket(edge)
+
+    # Phase 9A: 2D price-conditioned early-return override.
+    # Only runs when the 1D edge bucket would fire _bad_enough_sample (i.e.,
+    # the bucket is large enough to be considered but has negative PnL).
+    # If the 2D (original_edge × price) cell is strongly positive, return
+    # ALLOW immediately, bypassing the contaminated 1D bucket.
+    # confidence_adjustment=0 preserves the pre-council scanner edge.
+    _1d_edge_bkt = _bucket(profile, "by_edge_bucket", edge_key)
+    if _bad_enough_sample(_1d_edge_bkt):
+        _pc = _price_conditioned_override(signal, profile, edge_key, health)
+        if _pc is not None:
+            return _pc
 
     conf_profile = _bucket(profile, "by_confidence_bucket", conf_key)
     edge_profile = _bucket(profile, "by_edge_bucket", edge_key)

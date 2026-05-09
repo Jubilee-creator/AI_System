@@ -348,6 +348,42 @@ EDGE_DANGER_REASON = "M-45 high-edge bucket negative ROI/CLV; edge not trusted"
 
 
 # ═══════════════════════════════════════════════════════════════
+# PRICE-CONDITIONED COUNCIL (Phase 9A)
+# ═══════════════════════════════════════════════════════════════
+
+# When True, the Critic may override a contaminated 1D edge bucket BLOCK if
+# the 2D (original_edge × entry_price) cell in data/edge_profile.json shows
+# strong positive evidence (n >= MIN_N, win_rate >= MIN_WR, total_pnl > 0).
+#
+# The 2D table is built by tools/build_edge_profile.py using normal_modern
+# non-KXETH trades only — clean proof-eligible evidence only.
+#
+# Set False to revert to 1D-only council behaviour immediately if needed.
+# This flag does NOT affect any other safety gate, threshold, or lock.
+PRICE_CONDITIONED_COUNCIL_ENABLED = True
+PRICE_CONDITIONED_MIN_N  = 5     # minimum cell sample size for 2D override
+PRICE_CONDITIONED_MIN_WR = 0.80  # minimum win rate for 2D override
+
+
+# ═══════════════════════════════════════════════════════════════
+# TICKER QUARANTINE
+# ═══════════════════════════════════════════════════════════════
+
+# Phase 8R: Hard-quarantine prefixes confirmed by Phase 8Q simulation.
+# Evidence: KXETH ROI=-53.5%, PF=0.15, 56% of total system losses on
+# 15.8% of trades. Removing KXETH was the single change that turned
+# system-wide avg CLV from negative to positive.
+#
+# Any ticker whose .upper() starts with an entry here is blocked
+# in brain/paper_trader.py before trade open — no position is sized,
+# no council is consulted, no funnel row records a trade.
+#
+# Do NOT add a prefix here without an evidence-based quarantine
+# simulation (tools/report_quarantine_simulation.py) confirming poison.
+QUARANTINED_TICKER_PREFIXES = ["KXETH"]
+
+
+# ═══════════════════════════════════════════════════════════════
 # LOGGING & PERSISTENCE
 # ═══════════════════════════════════════════════════════════════
 
