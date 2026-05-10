@@ -34,6 +34,25 @@ sys.path.insert(0, str(ROOT))
 from brain.strategy_utils import normalize_strategy
 from brain.edge_profile_health import edge_profile_health
 
+# Phase 9F: centralized ticker exclusion.
+# Import the quarantine list from config; fall back to the literal if config
+# is unavailable.  All profile aggregations — 1D and 2D — filter through
+# _is_excluded_ticker() so adding a new quarantine prefix here is enough.
+try:
+    from config.trading_config import QUARANTINED_TICKER_PREFIXES as _QUARANTINED_RAW
+except ImportError:
+    _QUARANTINED_RAW = ["KXETH"]
+
+_PROFILE_EXCLUDED_PREFIXES: frozenset = frozenset(
+    str(p).upper() for p in _QUARANTINED_RAW
+)
+
+
+def _is_excluded_ticker(ticker: Optional[str]) -> bool:
+    """True when ticker belongs to a quarantined prefix excluded from all profile buckets."""
+    t = str(ticker or "").upper()
+    return any(t.startswith(pfx) for pfx in _PROFILE_EXCLUDED_PREFIXES)
+
 
 def _num(rec: dict, field: str) -> Optional[float]:
     value = rec.get(field)
@@ -242,15 +261,40 @@ def build_profile() -> dict[str, Any]:
         "by_strategy": defaultdict(_new_bucket),
     }
 
+    # Phase 9F: exclude quarantined tickers from every profile aggregation.
+    # clean_settled_trades (total) is preserved separately for the trust gate.
+    excluded_for_profile = [
+        r for r in clean_settled if _is_excluded_ticker(r.get("ticker"))
+    ]
+    clean_settled_for_profile = [
+        r for r in clean_settled if not _is_excluded_ticker(r.get("ticker"))
+    ]
+
     # Phase 9A: 2D (original_edge × entry_price) table.
     # Uses original_edge (pre-council scanner edge) — same field the Critic
     # receives — so lookup is consistent.  Built from normal_modern non-KXETH
     # trades only (clean proof-eligible evidence).
     by_edge_price_bucket: dict[str, Any] = defaultdict(_new_bucket)
 
+    # Phase 9H: shadow 1D bucket built from normal_modern trades only.
+    # NOT consumed by Critic/Builder — informational/diagnostic use only.
+    # IMPORTANT: do NOT replace by_edge_bucket with this shadow until the
+    # Critic is patched to fire the 2D check independently of bad_enough status.
+    # Filtering 1D to normal_modern would flip 0.05-0.10 from BAD→GOOD, silencing
+    # the 2D gate and potentially allowing poison-zone signals (yes_ask 0.60-0.80).
+    by_normal_modern_edge_bucket: dict[str, Any] = defaultdict(_new_bucket)
+
+    # Phase 9I: shadow 1D bucket built using original_edge for bucketing.
+    # NOT consumed by Critic/Builder — diagnostic only.
+    # Verifies that switching the 1D field from risk_edge → original_edge
+    # produces the same _bad_enough_sample conclusion for all current buckets.
+    # DO NOT promote to the live by_edge_bucket until decision-replay confirms
+    # zero changed decisions for 30+ additional trades (Phase 9G recommendation).
+    by_original_edge_bucket: dict[str, Any] = defaultdict(_new_bucket)
+
     overall = _new_bucket()
     modern_full_metadata = [
-        rec for rec in clean_settled
+        rec for rec in clean_settled_for_profile
         if _is_modern_full_metadata(rec)
     ]
     data_collection_override_count = sum(
@@ -272,7 +316,38 @@ def build_profile() -> dict[str, Any]:
     )
     normal_council_approved_modern = max(0, normal_council_approved_modern)
 
-    for rec in clean_settled:
+    # Phase 9H: count non-normal records present in the 1D pool for transparency.
+    legacy_in_1d_count = sum(
+        1 for rec in clean_settled_for_profile
+        if not _is_modern_full_metadata(rec)
+    )
+    dc_override_in_1d_count = sum(
+        1 for rec in clean_settled_for_profile
+        if bool(rec.get("data_collection_override"))
+    )
+    bootstrap_provisional_in_1d_count = sum(
+        1 for rec in clean_settled_for_profile
+        if bool(rec.get("bootstrap_provisional"))
+    )
+
+    # Phase 9I: original_edge shadow transparency counts.
+    # has_field_count: records with explicit original_edge stored.
+    # fallback_count:  records without original_edge that fall back to edge.
+    # missing_count:   records with neither field (should be 0; guard only).
+    original_edge_shadow_has_field_count = sum(
+        1 for rec in clean_settled_for_profile
+        if _num(rec, "original_edge") is not None
+    )
+    original_edge_shadow_fallback_count = sum(
+        1 for rec in clean_settled_for_profile
+        if _num(rec, "original_edge") is None and _num(rec, "edge") is not None
+    )
+    original_edge_shadow_missing_count = sum(
+        1 for rec in clean_settled_for_profile
+        if _num(rec, "original_edge") is None and _num(rec, "edge") is None
+    )
+
+    for rec in clean_settled_for_profile:
         confidence = _num(rec, "confidence")
         edge = _num(rec, "risk_edge")
         if edge is None:
@@ -286,10 +361,25 @@ def build_profile() -> dict[str, Any]:
         _add_trade(groups["by_action_type"][_action_type(rec)], rec)
         _add_trade(groups["by_strategy"][_strategy(rec)], rec)
 
-    # 2D price-conditioned table: normal_modern non-KXETH only.
-    for rec in clean_settled:
-        ticker_str = str(rec.get("ticker") or "")
-        if ticker_str.upper().startswith("KXETH"):
+        # Shadow normal_modern edge bucket (Phase 9H).
+        if _is_normal_modern_for_2d(rec):
+            _add_trade(by_normal_modern_edge_bucket[_edge_bucket(edge)], rec)
+
+        # Phase 9I: shadow original_edge bucket.
+        # Uses original_edge (pre-council) for bucketing — consistent with
+        # Critic lookup and the 2D table.  Legacy records without original_edge
+        # fall back to edge (which IS their original edge — no council existed).
+        orig_edge_val = _num(rec, "original_edge")
+        if orig_edge_val is None:
+            orig_edge_val = _num(rec, "edge")
+        if orig_edge_val is not None:
+            _add_trade(by_original_edge_bucket[_edge_bucket(orig_edge_val)], rec)
+
+    # 2D price-conditioned table: normal_modern non-quarantined only.
+    # clean_settled_for_profile is already quarantine-excluded; the
+    # _is_excluded_ticker check below is belt-and-suspenders.
+    for rec in clean_settled_for_profile:
+        if _is_excluded_ticker(rec.get("ticker")):
             continue
         if not _is_normal_modern_for_2d(rec):
             continue
@@ -308,13 +398,40 @@ def build_profile() -> dict[str, Any]:
     profile = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_log": str(TRADES_LOG),
+        # clean_settled_trades: total conflict-resolved settled count (used by trust gate).
+        # Quarantined tickers are excluded from bucket aggregations but this total is
+        # preserved so edge_profile_health() can evaluate sample size correctly.
         "clean_settled_trades": len(clean_settled),
+        "profile_input_trades": len(clean_settled_for_profile),
+        "profile_kxeth_excluded_count": len(excluded_for_profile),
+        "excluded_ticker_prefixes": sorted(_PROFILE_EXCLUDED_PREFIXES),
         "modern_full_metadata_trades": len(modern_full_metadata),
         "normal_council_approved_modern_trades": normal_council_approved_modern,
         "data_collection_override_count": data_collection_override_count,
         "bootstrap_provisional_count": bootstrap_provisional_count,
         "bootstrap_era_allow_count": bootstrap_era_allow_count,
         "conflicted_settled_trades_excluded": len(conflicted_settled),
+        # Phase 9H: 1D population transparency fields.
+        # 1D buckets use ALL clean_settled_for_profile (not just normal_modern).
+        # This is intentional: non-normal records keep the 0.05-0.10 bucket
+        # negative, forcing the 2D gate to fire. Filtering would flip the bucket
+        # to GOOD and silence the 2D poison-zone guard.
+        "profile_1d_population": "all_non_kxeth_clean_settled",
+        "profile_1d_normal_modern_count": normal_council_approved_modern,
+        "profile_1d_dc_override_in_1d": dc_override_in_1d_count,
+        "profile_1d_bootstrap_provisional_in_1d": bootstrap_provisional_in_1d_count,
+        "profile_1d_legacy_in_1d": legacy_in_1d_count,
+        # Phase 9I: original_edge shadow metadata.
+        # by_original_edge_bucket uses original_edge (pre-council) for bucketing,
+        # consistent with Critic lookup and the 2D table. Shadow only — no live change.
+        "profile_has_original_edge_shadow": True,
+        "by_original_edge_bucket_field": "original_edge",
+        "by_edge_bucket_field": "risk_edge",
+        "original_edge_shadow_input_count": len(clean_settled_for_profile),
+        "original_edge_shadow_has_field_count": original_edge_shadow_has_field_count,
+        "original_edge_shadow_fallback_count": original_edge_shadow_fallback_count,
+        "original_edge_shadow_missing_count": original_edge_shadow_missing_count,
+        "edge_math_alignment_status": "SHADOW_ONLY_NO_LIVE_CHANGE",
         "overall": _finalize_bucket(overall),
         "profiles": {
             name: _finalize_group(group)
@@ -323,6 +440,14 @@ def build_profile() -> dict[str, Any]:
     }
     # Phase 9A: attach 2D table as a peer to the 1D profile groups.
     profile["profiles"]["by_edge_price_bucket"] = _finalize_group(by_edge_price_bucket)
+    # Phase 9H: attach shadow normal_modern-only 1D edge bucket (diagnostic, not consumed).
+    profile["profiles"]["by_normal_modern_edge_bucket"] = _finalize_group(
+        by_normal_modern_edge_bucket
+    )
+    # Phase 9I: shadow original_edge 1D bucket (diagnostic, not consumed by Critic/Builder).
+    profile["profiles"]["by_original_edge_bucket"] = _finalize_group(
+        by_original_edge_bucket
+    )
     profile["edge_profile_health"] = edge_profile_health(profile, OUTPUT_PATH)
     profile["source_warning"] = (
         "UNTRUSTED: " + profile["edge_profile_health"]["reason"]
@@ -338,6 +463,12 @@ def main() -> None:
     OUTPUT_PATH.write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n")
     print(f"[EDGE_PROFILE] wrote {OUTPUT_PATH}")
     print(f"[EDGE_PROFILE] clean_settled_trades={profile['clean_settled_trades']}")
+    print(
+        "[EDGE_PROFILE] profile_kxeth_excluded_count="
+        f"{profile['profile_kxeth_excluded_count']} "
+        f"excluded_prefixes={profile['excluded_ticker_prefixes']}"
+    )
+    print(f"[EDGE_PROFILE] profile_input_trades={profile['profile_input_trades']}")
     print(
         "[EDGE_PROFILE] modern_full_metadata_trades="
         f"{profile['modern_full_metadata_trades']}"
