@@ -459,14 +459,25 @@ def section_4b_shadow_from_profile() -> list[str]:
     live_1d = profile.get("profiles", {}).get("by_edge_bucket", {})
     all_bks = sorted(set(list(shadow.keys()) + list(live_1d.keys())))
 
+    has_clv = bool(profile.get("profile_has_clv_bucket_stats"))
+
     lines.append("  Shadow vs Live 1D comparison:")
-    lines.append(
-        f"  {'Bucket':>14}  {'shd_n':>6}  {'shd_pnl':>9}  {'shd_bad?':>8}  "
-        f"{'live_n':>6}  {'live_pnl':>9}  {'live_bad?':>9}"
-    )
-    lines.append(
-        f"  {'─'*14}  {'─'*6}  {'─'*9}  {'─'*8}  {'─'*6}  {'─'*9}  {'─'*9}"
-    )
+    if has_clv:
+        lines.append(
+            f"  {'Bucket':>14}  {'shd_n':>6}  {'shd_pnl':>9}  {'shd_bad?':>8}  "
+            f"{'live_n':>6}  {'live_pnl':>9}  {'live_bad?':>9}  {'live_avgCLV':>11}"
+        )
+        lines.append(
+            f"  {'─'*14}  {'─'*6}  {'─'*9}  {'─'*8}  {'─'*6}  {'─'*9}  {'─'*9}  {'─'*11}"
+        )
+    else:
+        lines.append(
+            f"  {'Bucket':>14}  {'shd_n':>6}  {'shd_pnl':>9}  {'shd_bad?':>8}  "
+            f"{'live_n':>6}  {'live_pnl':>9}  {'live_bad?':>9}"
+        )
+        lines.append(
+            f"  {'─'*14}  {'─'*6}  {'─'*9}  {'─'*8}  {'─'*6}  {'─'*9}  {'─'*9}"
+        )
     for bk in all_bks:
         shd = shadow.get(bk)
         lv  = live_1d.get(bk)
@@ -477,11 +488,52 @@ def section_4b_shadow_from_profile() -> list[str]:
         l_pnl = float(lv["total_pnl"]) if lv else 0.0
         l_bad = _bad_enough_profile_bucket(lv)
         match = "✓ same" if s_bad == l_bad else "*** DIFFERS"
-        lines.append(
-            f"  {bk:>14}  {s_n:>6}  {s_pnl:>+9.2f}  {str(s_bad):>8}  "
-            f"{l_n:>6}  {l_pnl:>+9.2f}  {str(l_bad):>9}  {match}"
-        )
+        if has_clv and lv:
+            raw_clv = lv.get("avg_clv")
+            clv_s = f"{raw_clv:+.4f}" if raw_clv is not None else "       n/a"
+            lines.append(
+                f"  {bk:>14}  {s_n:>6}  {s_pnl:>+9.2f}  {str(s_bad):>8}  "
+                f"{l_n:>6}  {l_pnl:>+9.2f}  {str(l_bad):>9}  {clv_s:>11}  {match}"
+            )
+        else:
+            lines.append(
+                f"  {bk:>14}  {s_n:>6}  {s_pnl:>+9.2f}  {str(s_bad):>8}  "
+                f"{l_n:>6}  {l_pnl:>+9.2f}  {str(l_bad):>9}  {match}"
+            )
     lines.append("")
+
+    # Phase 9J: CLV vs PnL agreement analysis (payoff-structure vs model-quality diagnosis)
+    if has_clv and live_1d:
+        lines.append("  CLV vs PnL agreement (Phase 9J):")
+        lines.append(
+            f"  {'Bucket':>14}  {'avg_clv':>8}  {'total_pnl':>10}  {'CLV sign':>9}  "
+            f"{'PnL sign':>9}  Diagnosis"
+        )
+        lines.append(
+            f"  {'─'*14}  {'─'*8}  {'─'*10}  {'─'*9}  {'─'*9}  {'─'*20}"
+        )
+        for bk in sorted(live_1d.keys()):
+            lv = live_1d[bk]
+            avg_clv = lv.get("avg_clv")
+            total_pnl = float(lv.get("total_pnl", 0.0))
+            n = int(lv.get("trades", 0))
+            if n == 0 or avg_clv is None:
+                continue
+            clv_sign = "+" if avg_clv > 0 else "-"
+            pnl_sign = "+" if total_pnl > 0 else "-"
+            if clv_sign == "+" and pnl_sign == "+":
+                diag = "GOOD — model correct + profitable"
+            elif clv_sign == "+" and pnl_sign == "-":
+                diag = "PAYOFF STRUCTURE — model ok, entry overpriced"
+            elif clv_sign == "-" and pnl_sign == "-":
+                diag = "MODEL QUALITY — wrong direction"
+            else:
+                diag = "MIXED — review manually"
+            lines.append(
+                f"  {bk:>14}  {avg_clv:>+8.4f}  {total_pnl:>+10.2f}  "
+                f"{'CLV '+clv_sign:>9}  {'PnL '+pnl_sign:>9}  {diag}"
+            )
+        lines.append("")
 
     # Key finding for 0.05-0.10
     shd_05 = shadow.get("0.05-0.10")

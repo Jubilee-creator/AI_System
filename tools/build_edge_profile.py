@@ -20,6 +20,7 @@ from performance_report import (
     TRADES_LOG,
     build_terminal_key_sets,
     classify_settled_records,
+    get_clv,
     get_pnl,
     load_trades,
 )
@@ -190,6 +191,11 @@ def _new_bucket() -> dict[str, Any]:
         "_edge_count": 0,
         "_confidence_sum": 0.0,
         "_confidence_count": 0,
+        # Phase 9J: CLV accumulation
+        "_clv_sum": 0.0,
+        "_clv_count": 0,
+        "_clv_positive_count": 0,
+        "_clv_negative_count": 0,
     }
 
 
@@ -214,11 +220,24 @@ def _add_trade(bucket: dict[str, Any], rec: dict) -> None:
         bucket["_confidence_sum"] += confidence
         bucket["_confidence_count"] += 1
 
+    # Phase 9J: CLV accumulation — safe if CLV is missing.
+    clv = get_clv(rec)
+    if clv is not None:
+        bucket["_clv_sum"] += clv
+        bucket["_clv_count"] += 1
+        if clv > 0:
+            bucket["_clv_positive_count"] += 1
+        elif clv < 0:
+            bucket["_clv_negative_count"] += 1
+
 
 def _finalize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
     trades = bucket["trades"]
     edge_count = bucket["_edge_count"]
     confidence_count = bucket["_confidence_count"]
+    clv_count = bucket["_clv_count"]
+    clv_pos = bucket["_clv_positive_count"]
+    clv_neg = bucket["_clv_negative_count"]
 
     return {
         "trades": trades,
@@ -232,6 +251,13 @@ def _finalize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
             round(bucket["_confidence_sum"] / confidence_count, 6)
             if confidence_count else None
         ),
+        # Phase 9J: CLV fields — None when no CLV data available.
+        "clv_count": clv_count if clv_count else None,
+        "avg_clv": round(bucket["_clv_sum"] / clv_count, 6) if clv_count else None,
+        "total_clv": round(bucket["_clv_sum"], 6) if clv_count else None,
+        "positive_clv_count": clv_pos if clv_count else None,
+        "negative_clv_count": clv_neg if clv_count else None,
+        "positive_clv_rate": round(clv_pos / clv_count, 4) if clv_count else None,
     }
 
 
@@ -432,6 +458,8 @@ def build_profile() -> dict[str, Any]:
         "original_edge_shadow_fallback_count": original_edge_shadow_fallback_count,
         "original_edge_shadow_missing_count": original_edge_shadow_missing_count,
         "edge_math_alignment_status": "SHADOW_ONLY_NO_LIVE_CHANGE",
+        # Phase 9J: CLV visibility flag — all finalized buckets carry CLV fields.
+        "profile_has_clv_bucket_stats": True,
         "overall": _finalize_bucket(overall),
         "profiles": {
             name: _finalize_group(group)
