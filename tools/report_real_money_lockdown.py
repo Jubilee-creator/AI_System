@@ -139,16 +139,41 @@ def _audit_paper_trader_broker_calls(source_path: Path) -> dict:
     }
 
 
-def _audit_env_vars() -> dict:
-    key_id   = os.getenv("KALSHI_API_KEY_ID", "")
-    key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
-    key_file = Path(key_path) if key_path else None
+def _audit_env_vars(default_key_path: "Path | None" = None) -> dict:
+    import stat as _stat
+    key_id       = os.getenv("KALSHI_API_KEY_ID", "")
+    key_path_env = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
+
+    # Match the actual fallback used by kalshi_client.py:
+    #   os.getenv("KALSHI_PRIVATE_KEY_PATH", "<root>/kalshi_private_key.pem")
+    # Without this, the report incorrectly claims the key is absent when the
+    # env var is unset but the file exists at the project-root default path.
+    if default_key_path is None:
+        default_key_path = ROOT / "kalshi_private_key.pem"
+
+    if key_path_env:
+        key_file   = Path(key_path_env)
+        key_source = "env var KALSHI_PRIVATE_KEY_PATH"
+    else:
+        key_file   = default_key_path
+        key_source = "default (env var absent; code falls back to project root)"
+
+    key_exists = key_file.exists()
+    perm_octal: "str | None" = None
+    perm_safe:  "bool | None" = None
+    if key_exists:
+        mode       = key_file.stat().st_mode
+        perm_octal = oct(_stat.S_IMODE(mode))
+        perm_safe  = _stat.S_IMODE(mode) == 0o600
 
     return {
-        "KALSHI_API_KEY_ID_set": bool(key_id),
-        "KALSHI_PRIVATE_KEY_PATH_set": bool(key_path),
-        "key_file_exists": key_file.exists() if key_file else False,
-        "key_file_path": str(key_file) if key_file else "unset",
+        "KALSHI_API_KEY_ID_set":       bool(key_id),
+        "KALSHI_PRIVATE_KEY_PATH_set": bool(key_path_env),
+        "key_file_path":               str(key_file),
+        "key_path_source":             key_source,
+        "key_file_exists":             key_exists,
+        "key_file_perm_octal":         perm_octal,
+        "key_file_perm_safe":          perm_safe,
     }
 
 
@@ -291,28 +316,43 @@ def main() -> None:
     print(f"  [INFO]  Even SCALE_ELIGIBLE requires human sign-off to flip scale_allowed.")
     print()
 
-    print("LAYER 5 — ENV VAR ABSENCE LOCKDOWN")
+    print("LAYER 5 — ENV VAR / KEY FILE LOCKDOWN")
     print("-" * W)
-    key_id_set  = env_audit["KALSHI_API_KEY_ID_set"]
+    key_id_set   = env_audit["KALSHI_API_KEY_ID_set"]
     key_path_set = env_audit["KALSHI_PRIVATE_KEY_PATH_set"]
-    key_exists  = env_audit["key_file_exists"]
+    key_exists   = env_audit["key_file_exists"]
+    key_path     = env_audit["key_file_path"]
+    key_src      = env_audit["key_path_source"]
+    perm_octal   = env_audit["key_file_perm_octal"]
+    perm_safe    = env_audit["key_file_perm_safe"]
 
     if not key_id_set:
-        print("  [PASS]  KALSHI_API_KEY_ID not set — API auth will fail cleanly.")
+        print("  [PASS]  KALSHI_API_KEY_ID not set — API auth will fail at header build.")
     else:
         print("  [INFO]  KALSHI_API_KEY_ID is set in environment.")
 
     if not key_path_set:
-        print("  [PASS]  KALSHI_PRIVATE_KEY_PATH not set — key file path is default.")
+        print("  [INFO]  KALSHI_PRIVATE_KEY_PATH env var not set — using default fallback path.")
     else:
-        print(f"  [INFO]  KALSHI_PRIVATE_KEY_PATH set to: {env_audit['key_file_path']}")
+        print("  [INFO]  KALSHI_PRIVATE_KEY_PATH env var set.")
+
+    print(f"  [INFO]  Key path checked ({key_src}):")
+    print(f"          {key_path}")
 
     if not key_exists:
-        print(f"  [PASS]  Key file not present — signing step will fail, blocking API calls.")
+        print("  [PASS]  Key file not present — signing step will fail, blocking all API calls.")
     else:
-        print(f"  [INFO]  Key file exists at: {env_audit['key_file_path']}")
-        print("  [INFO]  Key exists — API read calls can succeed (read-only is OK for market data).")
-        print("  [NOTE]  Even with a valid key, the HTTP layer only has GET. No writes possible.")
+        print("  [WARN]  Key file present locally — monitor permissions.")
+        print("          Key presence does NOT enable live trading:")
+        print("          - write HTTP endpoints are absent (GET only)")
+        print("          - TRADING_MODE=PAPER")
+        print("          - PaperTrader never calls broker")
+        if perm_octal is not None:
+            if perm_safe:
+                print(f"  [PASS]  Key file permissions: {perm_octal} (owner read/write only — correct).")
+            else:
+                print(f"  [WARN]  Key file permissions: {perm_octal} — tighten to 600 (owner-only).")
+                print(f"          Run: chmod 600 {key_path}")
     print()
 
     print("=" * W)
