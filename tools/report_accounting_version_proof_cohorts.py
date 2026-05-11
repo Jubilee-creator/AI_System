@@ -94,7 +94,10 @@ def is_kxeth_or_quarantined(rec: dict[str, Any]) -> bool:
 
 
 def entry_price(rec: dict[str, Any]) -> float | None:
-    return _as_float(rec.get("entry_price")) or _as_float(rec.get("yes_ask"))
+    value = _as_float(rec.get("entry_price"))
+    if value is not None:
+        return value
+    return _as_float(rec.get("yes_ask"))
 
 
 def risk_edge(rec: dict[str, Any]) -> float | None:
@@ -127,7 +130,10 @@ def recorded_pnl_value(rec: dict[str, Any]) -> float | None:
 
 
 def stored_pnl_value(rec: dict[str, Any]) -> float | None:
-    return _as_float(rec.get("pnl")) or _as_float(rec.get("realized_pnl"))
+    value = _as_float(rec.get("pnl"))
+    if value is not None:
+        return value
+    return _as_float(rec.get("realized_pnl"))
 
 
 def capital_at_risk_value(rec: dict[str, Any]) -> float | None:
@@ -218,13 +224,14 @@ def cohort_metrics(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         active_open = [r for r in rows if id(r) in active_open_ids]
         normal_modern = [r for r in rows if is_normal_modern(r)]
         clean_proof = [r for r in clean_rows if is_clean_proof_row(r)]
-        wins = [r for r in clean_rows if _result(r) == "WIN"]
-        losses = [r for r in clean_rows if _result(r) == "LOSS"]
+        metric_rows = clean_proof
+        wins = [r for r in metric_rows if _result(r) == "WIN"]
+        losses = [r for r in metric_rows if _result(r) == "LOSS"]
         win_loss_n = len(wins) + len(losses)
-        econ_total = _sum(economic_pnl_value(r) for r in clean_rows)
-        recorded_total = _sum(recorded_pnl_value(r) for r in clean_rows)
-        stored_total = _sum(stored_pnl_value(r) for r in clean_rows)
-        capital_total = _sum(capital_at_risk_value(r) for r in clean_rows)
+        econ_total = _sum(economic_pnl_value(r) for r in metric_rows)
+        recorded_total = _sum(recorded_pnl_value(r) for r in metric_rows)
+        stored_total = _sum(stored_pnl_value(r) for r in metric_rows)
+        capital_total = _sum(capital_at_risk_value(r) for r in metric_rows)
         econ_roi = (
             econ_total / capital_total
             if econ_total is not None and capital_total and capital_total > 0
@@ -256,14 +263,14 @@ def cohort_metrics(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             "wins": len(wins),
             "losses": len(losses),
             "win_rate": len(wins) / win_loss_n if win_loss_n else None,
-            "avg_entry_price": _avg(v for v in (entry_price(r) for r in clean_rows) if v is not None),
-            "avg_capital_at_risk": _avg(v for v in (capital_at_risk_value(r) for r in clean_rows) if v is not None),
-            "avg_payout_notional": _avg(v for v in (payout_notional_value(r) for r in clean_rows) if v is not None),
+            "avg_entry_price": _avg(v for v in (entry_price(r) for r in metric_rows) if v is not None),
+            "avg_capital_at_risk": _avg(v for v in (capital_at_risk_value(r) for r in metric_rows) if v is not None),
+            "avg_payout_notional": _avg(v for v in (payout_notional_value(r) for r in metric_rows) if v is not None),
             "roi_on_capital_at_risk": econ_roi,
-            "profit_factor_economic": _profit_factor(clean_rows, economic_pnl_value),
-            "profit_factor_recorded": _profit_factor(clean_rows, recorded_pnl_value),
-            "avg_max_profit_if_win": _avg(v for v in (_as_float(r.get("max_profit_if_win")) for r in clean_rows) if v is not None),
-            "avg_max_loss_if_loss": _avg(v for v in (_as_float(r.get("max_loss_if_loss")) for r in clean_rows) if v is not None),
+            "profit_factor_economic": _profit_factor(metric_rows, economic_pnl_value),
+            "profit_factor_recorded": _profit_factor(metric_rows, recorded_pnl_value),
+            "avg_max_profit_if_win": _avg(v for v in (_as_float(r.get("max_profit_if_win")) for r in metric_rows) if v is not None),
+            "avg_max_loss_if_loss": _avg(v for v in (_as_float(r.get("max_loss_if_loss")) for r in metric_rows) if v is not None),
             "reward_risk": None,
             "sample_ge_30": clean_n >= MIN_PROOF_SAMPLE,
             "sample_ge_50": clean_n >= WATCH_SAMPLE,

@@ -123,10 +123,13 @@ def test_roi_and_pnl_separation() -> None:
 def test_kxeth_and_normal_modern_filters() -> None:
     rows = [
         make_row(ticker="KXBTCD-GOOD", accounting_version="economic_contract_notional_v1", economic_pnl=1.0, recorded_pnl=1.0),
-        make_row(ticker="KXETH-QUARANTINED", accounting_version="economic_contract_notional_v1", economic_pnl=1.0, recorded_pnl=1.0),
-        make_row(ticker="KXBTCD-DC", accounting_version="economic_contract_notional_v1", economic_pnl=1.0, recorded_pnl=1.0,
+        make_row(ticker="KXETH-QUARANTINED", result="LOSS", accounting_version="economic_contract_notional_v1",
+                 economic_pnl=-100.0, recorded_pnl=-100.0),
+        make_row(ticker="KXBTCD-DC", result="LOSS", accounting_version="economic_contract_notional_v1",
+                 economic_pnl=-100.0, recorded_pnl=-100.0,
                  data_collection_override=True),
-        make_row(ticker="KXBTCD-BOOT", accounting_version="economic_contract_notional_v1", economic_pnl=1.0, recorded_pnl=1.0,
+        make_row(ticker="KXBTCD-BOOT", result="LOSS", accounting_version="economic_contract_notional_v1",
+                 economic_pnl=-100.0, recorded_pnl=-100.0,
                  bootstrap_provisional=True),
     ]
     metrics = rpt.cohort_metrics(rows)["economic_contract_notional_v1"]
@@ -136,7 +139,26 @@ def test_kxeth_and_normal_modern_filters() -> None:
     if metrics["kxeth_rows"] != 1:
         fail("kxeth_count", metrics)
         return
+    if metrics["total_economic_pnl"] != 1.0:
+        fail("kxeth_contaminated_pnl", metrics)
+        return
+    if metrics["win_rate"] != 1.0:
+        fail("kxeth_contaminated_win_rate", metrics)
+        return
+    if round(metrics["roi_on_capital_at_risk"], 4) != round(1.0 / 8.5, 4):
+        fail("contaminated_roi", metrics)
+        return
     ok("kxeth_and_normal_modern_filters")
+
+
+def test_zero_values_preserved() -> None:
+    if rpt.stored_pnl_value({"pnl": 0.0, "realized_pnl": 9.0}) != 0.0:
+        fail("stored_pnl_zero_preserved")
+        return
+    if rpt.entry_price({"entry_price": 0.0, "yes_ask": 0.85}) != 0.0:
+        fail("entry_price_zero_preserved")
+        return
+    ok("zero_values_preserved")
 
 
 def test_sweet_spot_detection() -> None:
@@ -184,7 +206,27 @@ def test_sample_warning() -> None:
     if metrics["sample_ge_30"] or not metrics["minimum_sample_warning"] or not metrics["too_small_to_trust"]:
         fail("sample_warning", metrics)
         return
+    if metrics["clean_proof_rows"] != 3:
+        fail("sample_count_clean_proof", metrics)
+        return
     ok("sample_warning")
+
+
+def test_two_row_economic_sample_not_enough_data() -> None:
+    rows = [
+        make_row(ticker="KXBTCD-FRESH-1", accounting_version="economic_contract_notional_v1",
+                 economic_pnl=1.0, recorded_pnl=1.0),
+        make_row(ticker="KXBTCD-FRESH-2", result="LOSS", accounting_version="economic_contract_notional_v1",
+                 economic_pnl=-8.5, recorded_pnl=-8.5),
+    ]
+    metrics = rpt.cohort_metrics(rows)["economic_contract_notional_v1"]
+    if metrics["clean_proof_rows"] != 2:
+        fail("two_row_sample_count", metrics)
+        return
+    if metrics["sample_ge_30"] or not metrics["too_small_to_trust"]:
+        fail("two_row_not_enough_data", metrics)
+        return
+    ok("two_row_economic_sample_not_enough_data")
 
 
 def test_report_does_not_write_paper_log_and_prints_sentinel() -> None:
@@ -214,8 +256,10 @@ def main() -> None:
     test_classification()
     test_roi_and_pnl_separation()
     test_kxeth_and_normal_modern_filters()
+    test_zero_values_preserved()
     test_sweet_spot_detection()
     test_sample_warning()
+    test_two_row_economic_sample_not_enough_data()
     test_report_does_not_write_paper_log_and_prints_sentinel()
 
     print()
