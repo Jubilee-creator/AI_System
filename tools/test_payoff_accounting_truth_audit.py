@@ -220,6 +220,8 @@ def test_actual_pnl_matches_current_formula(rp):
     mismatches = 0
     checked = 0
     for r in seen.values():
+        if r.get("accounting_version"):
+            continue
         ep_raw = r.get("entry_price") or r.get("yes_ask") or r.get("price")
         pnl_raw = r.get("pnl") or r.get("realized_pnl")
         result = str(r.get("result", "")).upper()

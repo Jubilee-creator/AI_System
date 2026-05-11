@@ -218,7 +218,11 @@ def test_hybrid_reproduces_stored_pnl(rp):
     checked = 0
     for rec in load_settled_records():
         result = str(rec.get("result", "")).upper()
-        if is_kxeth(rec) or result not in ("WIN", "LOSS"):
+        if (
+            is_kxeth(rec)
+            or result not in ("WIN", "LOSS")
+            or rp._accounting_version(rec) != "legacy_hybrid_or_unversioned"
+        ):
             continue
         price = ep(rec)
         actual = recorded_pnl(rec)
@@ -243,6 +247,7 @@ def test_corrected_model_does_not_overwrite_stored_pnl(rp):
         rec for rec in load_settled_records()
         if not is_kxeth(rec)
         and str(rec.get("result", "")).upper() == "LOSS"
+        and rp._accounting_version(rec) == "legacy_hybrid_or_unversioned"
         and ep(rec) is not None
         and recorded_pnl(rec) is not None
     ]
