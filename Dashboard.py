@@ -16,7 +16,7 @@ import contextlib
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -274,6 +274,94 @@ def _quote_spread(rec: dict):
     if yes_bid is not None and yes_ask is not None:
         return round(yes_ask - yes_bid, 4)
     return None
+
+
+def build_bet_reward_truth(rec: Optional[dict], current_price=None) -> Optional[dict]:
+    """
+    Return explicit contract economics for one dashboard trade row.
+
+    This is a display helper only. It does not alter trade selection, proof
+    gates, risk state, or historical records.
+    """
+    if not rec:
+        return None
+
+    entry_price = _safe_float(rec.get("entry_price"), None)
+    size = _safe_float(rec.get("payout_notional"), None)
+    if size is None:
+        size = _safe_float(rec.get("size"), None)
+    if entry_price is None or size is None:
+        return None
+
+    accounting_version = rec.get("accounting_version") or "legacy_hybrid_or_unversioned"
+    payout_notional = size
+    capital_at_risk = _safe_float(rec.get("capital_at_risk"), None)
+    if capital_at_risk is None:
+        capital_at_risk = entry_price * payout_notional
+    max_profit = _safe_float(rec.get("max_profit_if_win"), None)
+    if max_profit is None:
+        max_profit = (1.0 - entry_price) * payout_notional
+    max_loss = _safe_float(rec.get("max_loss_if_loss"), None)
+    if max_loss is None:
+        max_loss = entry_price * payout_notional
+
+    economic_row = accounting_version == "economic_contract_notional_v1"
+    legacy_row = accounting_version == "legacy_hybrid_or_unversioned"
+    if economic_row:
+        breakeven_wr = entry_price
+        breakeven_label = "Economic BE"
+    else:
+        breakeven_wr = 1.0 / (2.0 - entry_price) if entry_price < 2.0 else None
+        breakeven_label = "Legacy BE"
+
+    reward_risk = (max_profit / max_loss) if max_loss and max_loss > 0 else None
+    warning_parts = []
+    if legacy_row:
+        warning_parts.append(
+            "Legacy accounting row - historical PnL may be conservative; see Phase 9M/9N reports."
+        )
+    if max_loss and max_profit is not None and (entry_price >= 0.85 or (reward_risk is not None and reward_risk < 0.25)):
+        warning_parts.append(
+            f"High-price contract: risking ~${capital_at_risk:.2f} to make ~${max_profit:.2f}."
+        )
+
+    economic_pnl = _safe_float(rec.get("economic_pnl"), None)
+    recorded_pnl = _safe_float(rec.get("recorded_pnl"), None)
+    if recorded_pnl is None:
+        recorded_pnl = _safe_float(rec.get("pnl"), None)
+
+    labels = [
+        ("Entry Price", entry_price),
+        ("Current Price / Mid", _safe_float(current_price, None)),
+        ("Payout Notional", payout_notional),
+        ("Capital at Risk", capital_at_risk),
+        ("Max Profit", max_profit),
+        ("Max Loss", max_loss),
+        ("Reward/Risk", reward_risk),
+        ("Breakeven WR", breakeven_wr),
+        ("Accounting Version", accounting_version),
+        ("Economic PnL", economic_pnl),
+        ("Recorded PnL", recorded_pnl),
+    ]
+
+    return {
+        "entry_price": round(entry_price, 6),
+        "current_price": round(float(current_price), 6) if _safe_float(current_price, None) is not None else None,
+        "payout_notional": round(payout_notional, 2),
+        "capital_at_risk": round(capital_at_risk, 2),
+        "max_profit_if_win": round(max_profit, 2),
+        "max_loss_if_loss": round(max_loss, 2),
+        "reward_risk": round(reward_risk, 4) if reward_risk is not None else None,
+        "breakeven_wr": round(breakeven_wr, 4) if breakeven_wr is not None else None,
+        "breakeven_label": breakeven_label,
+        "accounting_version": accounting_version,
+        "economic_pnl": round(economic_pnl, 2) if economic_pnl is not None else None,
+        "recorded_pnl": round(recorded_pnl, 2) if recorded_pnl is not None else None,
+        "open_exposure": round(capital_at_risk, 2),
+        "is_legacy_accounting": legacy_row,
+        "warning": " ".join(warning_parts) if warning_parts else None,
+        "labels": [label for label, _ in labels],
+    }
 
 
 def _current_quote_index() -> dict:
@@ -909,11 +997,13 @@ def build_market_visuals(active_trades: List[dict]) -> dict:
 
     selected_panel = None
     if selected_ticker:
+        selected_mid = _quote_mid(selected_quote or {})
+        bet_reward_truth = build_bet_reward_truth(selected_trade, selected_mid) if selected_trade else None
         selected_panel = {
             "ticker": selected_ticker,
             "entry_price": selected_trade.get("entry_price") if selected_trade else None,
             "action": selected_trade.get("action") if selected_trade else selected_quote.get("action") if selected_quote else None,
-            "market_mid": _quote_mid(selected_quote or {}),
+            "market_mid": selected_mid,
             "yes_bid": (selected_quote or {}).get("yes_bid"),
             "yes_ask": (selected_quote or {}).get("yes_ask"),
             "no_bid": (selected_quote or {}).get("no_bid"),
@@ -923,6 +1013,7 @@ def build_market_visuals(active_trades: List[dict]) -> dict:
             "result_time": (selected_trade or {}).get("result_time") or (selected_quote or {}).get("result_time"),
             "history": [point["mid"] for point in selected_history[-36:]],
             "history_points": len(selected_history),
+            "bet_reward_truth": bet_reward_truth,
         }
 
     quote_pressure = []
@@ -1041,6 +1132,7 @@ def summarize_performance() -> dict:
             "close_time": rec.get("close_time"),
             "result_time": rec.get("result_time"),
             "overdue_minutes": _overdue_minutes(rec.get("result_time")),
+            "bet_reward_truth": build_bet_reward_truth(rec, mark["mark_price"]),
         })
 
     clv_strategy_rows = []
@@ -2457,6 +2549,51 @@ body::after {
   font-size: 13px;
   margin-top: 3px;
 }
+.bet-truth-panel {
+  border: 1px solid var(--border);
+  background: rgba(0,0,0,0.18);
+  margin: 7px 0;
+  padding: 7px 8px;
+}
+.bet-truth-title {
+  color: var(--cyan);
+  font-size: 8px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 5px;
+}
+.bet-truth-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: rgba(13,40,13,0.55);
+}
+.bet-truth-cell {
+  background: var(--panel);
+  padding: 6px 7px;
+  min-width: 0;
+}
+.bet-truth-label {
+  color: var(--muted);
+  font-size: 7px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.bet-truth-value {
+  color: var(--text);
+  font-family: 'Orbitron', monospace;
+  font-size: 10px;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+.bet-truth-warning {
+  color: var(--yellow);
+  font-size: 8px;
+  line-height: 1.4;
+  margin-top: 6px;
+  border-top: 1px solid rgba(255,214,0,0.25);
+  padding-top: 5px;
+}
 .time-progress-wrap {
   height: 6px;
   background: var(--dim);
@@ -3107,7 +3244,7 @@ function renderOpportunities(opps, totalCount) {
       <div class="action-badge ${actionClass(o.action)}">${o.action}</div>
       <div class="conf-val" style="color:${confColor(o.confidence)}">${o.confidence ? (o.confidence*100).toFixed(0)+'%' : '—'}</div>
       <div class="edge-val ${edgeHot ? 'hot' : ''}">${o.edge ? o.edge.toFixed(3) : '—'}</div>
-      <div class="bet-val">${o.bet_size > 0 ? '$'+o.bet_size.toFixed(0) : '—'}${arbFlag}</div>
+      <div class="bet-val">${o.bet_size > 0 ? 'Notional $'+o.bet_size.toFixed(0) : '—'}${arbFlag}</div>
     </div>`;
   }).join('');
 }
@@ -3237,6 +3374,42 @@ function renderSparkline(values, cls='sparkbar') {
   }).join('');
 }
 
+function fmtDollar(v) {
+  if (v == null || Number.isNaN(Number(v))) return '--';
+  return '$' + Number(v).toFixed(2);
+}
+
+function renderBetRewardTruth(truth) {
+  if (!truth) {
+    return `<div class="bet-truth-panel">
+      <div class="bet-truth-title">Bet / Reward Truth</div>
+      <div class="bet-truth-warning">No open trade economics available for this market.</div>
+    </div>`;
+  }
+  const rows = [
+    ['Payout Notional', fmtDollar(truth.payout_notional)],
+    ['Capital at Risk', fmtDollar(truth.capital_at_risk)],
+    ['Max Profit', fmtDollar(truth.max_profit_if_win)],
+    ['Max Loss', fmtDollar(truth.max_loss_if_loss)],
+    ['Reward/Risk', truth.reward_risk == null ? '--' : Number(truth.reward_risk).toFixed(3)],
+    [truth.breakeven_label || 'Breakeven WR', truth.breakeven_wr == null ? '--' : fmtPct(truth.breakeven_wr)],
+    ['Accounting Version', escapeHtml(truth.accounting_version || '--')],
+    ['Economic PnL', truth.economic_pnl == null ? '--' : fmtMoney(truth.economic_pnl)],
+    ['Recorded PnL', truth.recorded_pnl == null ? '--' : fmtMoney(truth.recorded_pnl)],
+    ['Open Exposure', fmtDollar(truth.open_exposure)],
+  ];
+  return `<div class="bet-truth-panel">
+    <div class="bet-truth-title">Bet / Reward Truth</div>
+    <div class="bet-truth-grid">
+      ${rows.map(([label, value]) => `<div class="bet-truth-cell">
+        <div class="bet-truth-label">${escapeHtml(label)}</div>
+        <div class="bet-truth-value">${value}</div>
+      </div>`).join('')}
+    </div>
+    ${truth.warning ? `<div class="bet-truth-warning">${escapeHtml(truth.warning)}</div>` : ''}
+  </div>`;
+}
+
 function renderMarketVisuals(visuals) {
   visuals = visuals || {};
   const strip = visuals.market_strip || [];
@@ -3294,6 +3467,7 @@ function renderMarketVisuals(visuals) {
           <div class="selected-metric"><div class="selected-metric-label">Spread</div><div class="selected-metric-value">${fmtNum(selected.spread)}</div></div>
           <div class="selected-metric"><div class="selected-metric-label">History Points</div><div class="selected-metric-value">${historyPoints}</div></div>
         </div>
+        ${renderBetRewardTruth(selected.bet_reward_truth)}
         ${noSelectedQuote
           ? '<div class="mini-row"><span class="mini-key" style="color:var(--yellow,#f5c518);font-weight:700">QUOTE UNAVAILABLE</span><span class="mini-val" style="color:var(--yellow,#f5c518)">market not in scanner</span></div>'
           : `<div class="mini-row"><span class="mini-key">YES bid/ask</span><span class="mini-val">${fmtNum(selected.yes_bid)} / ${fmtNum(selected.yes_ask)}</span></div>
