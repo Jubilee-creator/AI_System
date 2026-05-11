@@ -39,6 +39,7 @@ from config.trading_config import (
     BOOTSTRAP_CONFIDENCE_ADJUSTMENT,
     BOOTSTRAP_ALLOW_ENABLED,
     EDGE_DANGER_HIGH_EDGE_MIN,
+    QUARANTINED_TICKER_PREFIXES,
 )
 from tools.clean_truth_report import classify_records, evaluate_proof_gates, row_quality_group
 from tools.performance_report import load_trades
@@ -350,6 +351,18 @@ def main() -> None:
     print(_status_line(True, "edge_danger_high_edge_min",   f"{EDGE_DANGER_HIGH_EDGE_MIN:.3f} (guard blocks edge>={EDGE_DANGER_HIGH_EDGE_MIN:.2f})"))
     print(_status_line(not DATA_COLLECTION_OVERRIDE_ENABLED, "dc_override_enabled", str(DATA_COLLECTION_OVERRIDE_ENABLED)))
     print("    scanner applies no independent edge filter — decision_engine thresholds govern PASS")
+
+    # ── Ticker quarantine ─────────────────────────────────────────────────────
+    print("\nTICKER QUARANTINE (Phase 8R)")
+    print("-" * 72)
+    if QUARANTINED_TICKER_PREFIXES:
+        print(_status_line(True, "quarantine_active", f"YES — {len(QUARANTINED_TICKER_PREFIXES)} prefix(es) blocked"))
+        for pfx in QUARANTINED_TICKER_PREFIXES:
+            print(f"    HARD_QUARANTINE: '{pfx}' — any ticker.upper().startswith('{pfx}') is blocked")
+        print("    enforcement: brain/paper_trader.py process_signal() before trade open")
+        print("    reason: Phase 8Q evidence — KXETH ROI=-53.5%, PF=0.15, 56% of system losses")
+    else:
+        print(_status_line(False, "quarantine_active", "NO — QUARANTINED_TICKER_PREFIXES is empty"))
 
     # ── Auto-settle loop ─────────────────────────────────────────────────────
     print("\nAUTO-SETTLE LOOP")

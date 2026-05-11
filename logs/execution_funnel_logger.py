@@ -83,6 +83,8 @@ def _final_reason(trace_text: str, trade: Optional[Dict[str, Any]]) -> str:
     trace = trace_text or ""
     if trade:
         return "TRADE_OPENED"
+    if "quarantined prefix" in trace:
+        return "BLOCKED_QUARANTINE"
     if "global open-trades cap" in trace or "max_open_trades_reached" in trace:
         return "BLOCKED_MAX_OPEN_TRADES"
     if "duplicate ticker guard" in trace:
