@@ -35,7 +35,7 @@ MODEL_TIMEXIT = "Model E (time-exit)"    # (exit-entry)*sz  (FC only)
 # ---------------------------------------------------------------------------
 
 def pnl_hybrid(ep: float, size: float, won: bool) -> float:
-    """Current paper_trader.py formula. WIN treats size as contracts; LOSS as stake."""
+    """Legacy hybrid formula. WIN treats size as contracts; LOSS as stake."""
     return round((1.0 - ep) * size if won else -size, 6)
 
 
@@ -123,6 +123,10 @@ def _recorded_pnl(r: dict) -> Optional[float]:
 
 def _result(r: dict) -> str:
     return str(r.get("result", "")).upper()
+
+
+def _accounting_version(r: dict) -> str:
+    return str(r.get("accounting_version") or "legacy_hybrid_or_unversioned")
 
 
 def _is_win(r: dict) -> bool:
@@ -348,6 +352,15 @@ def section_1_population():
     print()
     print(f"  TIME_EXIT total recorded PnL     : ${fc_pnl:.2f}")
     print("  (TIME_EXIT records are left unchanged across all models)")
+    print()
+    print("  Accounting versions:")
+    version_counts = defaultdict(int)
+    for r in records:
+        version_counts[_accounting_version(r)] += 1
+    for version in sorted(version_counts):
+        print(f"    {version:<34}: {version_counts[version]}")
+    print("  Legacy/unversioned rows are preserved as historical evidence.")
+    print("  Phase 9N+ future binary rows should carry economic_contract_notional_v1.")
 
 
 # ---------------------------------------------------------------------------
@@ -358,10 +371,10 @@ def section_2_formula_taxonomy():
     _section("2. FORMULA TAXONOMY — WHICH FORMULA APPLIES WHERE")
     print()
     rows = [
-        ("Hybrid A (code as-is)", "brain/paper_trader.py", "Binary WIN/LOSS",
-         "(1-ep)×sz  /  -sz", "Inconsistent; WIN=contract, LOSS=stake"),
-        ("Model B (Kalshi-correct)", "economic baseline", "Binary WIN/LOSS",
-         "(1-ep)×sz  /  -ep×sz", "Both sides use size=contracts; economically correct"),
+        ("Hybrid A (legacy logs)", "pre-9N stored records", "Binary WIN/LOSS",
+         "(1-ep)×sz  /  -sz", "Historical unversioned rows only; preserved"),
+        ("Model B (Kalshi-correct)", "Phase 9N future rows", "Binary WIN/LOSS",
+         "(1-ep)×sz  /  -ep×sz", "accounting_version=economic_contract_notional_v1"),
         ("Model C (cost/stake)", "alternative frame", "Binary WIN/LOSS",
          "(1-ep)/ep×sz  /  -sz", "Both sides use size=dollars paid; self-consistent"),
         ("Model D (Dashboard)", "Dashboard.py ~295", "OPEN unrealized only",
@@ -451,7 +464,7 @@ def section_3_model_comparison():
     pnl_a = stats_a["total_pnl"]
     pnl_b = stats_b["total_pnl"]
     correction = round(pnl_b - pnl_a, 2)
-    print(f"    Current accounting shows binary trades {'PROFITABLE' if pnl_a > 0 else 'LOSING'}  (${pnl_a:+.2f})")
+    print(f"    Legacy hybrid accounting shows binary trades {'PROFITABLE' if pnl_a > 0 else 'LOSING'}  (${pnl_a:+.2f})")
     print(f"    Kalshi-correct accounting shows binary  {'PROFITABLE' if pnl_b > 0 else 'LOSING'}  (${pnl_b:+.2f})")
     print(f"    Accounting correction = +${correction:.2f}  (loss overstatement from LOSS=-size bug)")
     print(f"    Profit factor under Model B = {stats_b['profit_factor']:.4f}  (> 1.10 threshold ✓)")
@@ -754,9 +767,9 @@ def section_7_proof_gates():
     print("  NO — for two independent reasons:")
     print()
     print("  1. PROOF GATES READ ACTUAL PNL FROM LOGS.")
-    print("     The logs store the hybrid PnL. Until paper_trader.py is patched,")
-    print("     every new SETTLED record still uses LOSS=-size. The correction is")
-    print("     only a reporting-layer overlay. The proof verdict uses log data.")
+    print("     Legacy unversioned logs store hybrid PnL. Phase 9N+ future binary")
+    print("     settlements store economic_contract_notional_v1 PnL. This report")
+    print("     never rewrites old rows; it overlays corrected economics for audit.")
     print()
     print("  2. REAL_MONEY_ALLOWED AND SCALE_ALLOWED ARE HARDCODED FALSE.")
     print("     Even if proof verdict flipped to PROVEN_PROFITABLE under Model B,")
@@ -767,8 +780,8 @@ def section_7_proof_gates():
     print("  Under Model B, the binary trades ARE profitable (+$47.67).")
     print("  This means the STRATEGY has positive expected value under correct economics.")
     print("  However, the proof system measures RECORDED performance, not theoretical.")
-    print("  Until the formula is fixed and new trades accumulate under corrected")
-    print("  accounting, the proof verdict correctly stays NOT_PROVEN or WATCHLIST.")
+    print("  Until enough new trades accumulate under corrected accounting,")
+    print("  the proof verdict correctly stays NOT_PROVEN or WATCHLIST.")
 
 
 # ---------------------------------------------------------------------------
@@ -785,7 +798,8 @@ def section_8_critical_questions():
         ("Q1", "Which accounting model matches real Kalshi binary contract economics?",
          "Model B (Contract Notional): WIN=(1-ep)×sz, LOSS=-ep×sz, denom=sum(ep×sz).\n"
          "     In Kalshi: you pay ep per contract. WIN nets (1-ep). LOSS forfeits ep.\n"
-         "     The current code WIN formula is correct; the LOSS formula is not."),
+         "     Legacy WIN formula was correct; legacy LOSS formula was not.\n"
+         "     Phase 9N future records use this Model B settlement formula."),
 
         ("Q2", "What does 'size' currently mean in logs and dashboard?",
          "Ambiguous — the code treats it differently per formula:\n"
@@ -822,7 +836,7 @@ def section_8_critical_questions():
          f"     Model B ROI = {stats_b['roi']*100:+.2f}% (on capital deployed)\n"
          "     But 'appear profitable' is the wrong frame.\n"
          "     Under correct Kalshi economics the strategy HAS generated positive\n"
-         "     value — the current code mismeasures it."),
+         "     value — legacy hybrid accounting mismeasured it."),
 
         ("Q7", "Would that profit be real or just accounting cleanup?",
          "REAL profit from strategy edge, correctly measured.\n"
@@ -833,14 +847,14 @@ def section_8_critical_questions():
         ("Q8", "Should historical trades be migrated, preserved, or left with overlay?",
          "PRESERVED as-is with a REPORTING OVERLAY.\n"
          "     Historical records are the immutable evidence base. Do NOT rewrite.\n"
-         "     Future records: add economic_pnl field alongside recorded pnl.\n"
-         "     Reports: add corrected stats as second column labeled '(Model B)'.\n"
-         "     Proof gates: continue using recorded PnL until formula is patched."),
+         "     Phase 9N+ future records carry accounting_version plus economic_pnl,\n"
+         "     recorded_pnl, capital_at_risk, payout_notional, max_profit_if_win,\n"
+         "     and max_loss_if_loss. Reports can separate legacy vs economic rows."),
 
         ("Q9", "What is the safest patch plan if a patch is justified?",
          "Step 1 (immediate, safe): Add this report. Document the distortion clearly.\n"
-         "Step 2 (next phase): Patch paper_trader.py LOSS to -ep×size with comment.\n"
-         "Step 3: Add fields to SETTLED records: economic_pnl, capital_at_risk=ep×size.\n"
+         "Step 2 (Phase 9N): Patch future paper_trader.py LOSS to -ep×size.\n"
+         "Step 3: Add accounting_version fields to future SETTLED records.\n"
          "Step 4: Update clean_truth_report to use capital_at_risk as ROI denominator.\n"
          "Step 5: Add a 'corrected' column to Dashboard.py profitability section.\n"
          "Step 6: Update 2D cell report to recompute poison zones under Model B.\n"
@@ -906,7 +920,7 @@ def section_9_expert_advice():
          "     profitability metric without labeling them separately."),
 
         ("WHAT MAKES THIS SYSTEM 10x STRONGER OVER TIME",
-         "1. Fix LOSS formula → correct PnL measurement (Phases 9M patch)\n"
+         "1. Keep Phase 9N future LOSS formula correct under contract economics\n"
          "2. Store capital_at_risk → correct ROI measurement\n"
          "3. 50+ more binary trades post-formula-fix → clean proof base\n"
          "4. Re-enable Kelly in audit mode with correct loss magnitude\n"
@@ -926,23 +940,21 @@ def section_9_expert_advice():
 # ---------------------------------------------------------------------------
 
 def section_10_patch_plan():
-    _section("10. SAFE PATCH PLAN (if Samuel authorizes)")
+    _section("10. SAFE PATCH PLAN / PHASE 9N STATUS")
     print()
-    print("  This is documentation only. No patch is applied by this report.")
+    print("  This report is read-only. It documents which settlement patch is active.")
     print()
     steps = [
         ("Step 1", "ALREADY DONE", "Phase 9L report and tests document the distortion"),
         ("Step 2", "ALREADY DONE", "Phase 9M reconciliation simulator quantifies it"),
-        ("Step 3", "NEXT — brain/paper_trader.py settle_trade()",
-         "Change:\n"
-         "          pnl = -trade['size']\n"
-         "       To:\n"
-         "          pnl = -trade['entry_price'] * trade['size']  # Kalshi: lose cost paid\n"
-         "       Add comment explaining the economic basis."),
-        ("Step 4", "NEXT — brain/paper_trader.py settle_trade()",
-         "When writing the SETTLED record, add:\n"
-         "       record['capital_at_risk'] = trade['entry_price'] * trade['size']\n"
-         "       record['economic_pnl']   = pnl  # now correct under Model B"),
+        ("Step 3", "PHASE 9N ACTIVE — future brain/paper_trader.py settle_trade()",
+         "Future binary settlements use:\n"
+         "       WIN  pnl = (1 - entry_price) * size\n"
+         "       LOSS pnl = -entry_price * size"),
+        ("Step 4", "PHASE 9N ACTIVE — future SETTLED fields",
+         "Future records include accounting_version, recorded_pnl, economic_pnl,\n"
+         "       capital_at_risk, payout_notional, max_profit_if_win,\n"
+         "       and max_loss_if_loss."),
         ("Step 5", "NEXT — tools/clean_truth_report.py",
          "Add a corrected_roi metric using capital_at_risk when available:\n"
          "       corrected_roi = sum(economic_pnl) / sum(capital_at_risk)\n"

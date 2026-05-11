@@ -106,7 +106,7 @@ def model_b_pnl(ep, size, won):
 
 
 def current_pnl(ep, size, won):
-    """Current paper_trader.py formula (hybrid).
+    """Legacy unversioned record formula (hybrid).
     WIN: (1-ep)×size  [same as Model A — treats size as contracts]
     LOSS: -size        [same as Model B — treats size as cash risked]
     Breakeven WR = 1/(2-ep)  (NOT ep — because models are mixed)
@@ -147,14 +147,24 @@ def _section(title):
 # ---------------------------------------------------------------------------
 
 def section_1_formula_source():
-    _section("1. CONFIRMED SOURCE CODE FORMULA")
+    _section("1. LEGACY VS FUTURE SETTLEMENT FORMULA")
     print()
-    print("  File: brain/paper_trader.py — settle_trade() ~line 987")
+    print("  Legacy unversioned records in logs/paper_trades.jsonl:")
     print()
     print("    if won:")
     print("        pnl = (1.0 - trade['entry_price']) * trade['size']   # WIN")
     print("    else:")
     print("        pnl = -trade['size']                                  # LOSS")
+    print()
+    print("  Phase 9N+ future brain/paper_trader.py binary settlement:")
+    print()
+    print("    if won:")
+    print("        pnl = (1.0 - trade['entry_price']) * trade['size']   # WIN")
+    print("    else:")
+    print("        pnl = -trade['entry_price'] * trade['size']          # LOSS")
+    print()
+    print("    accounting_version = economic_contract_notional_v1")
+    print("    historical unversioned rows remain immutable")
     print()
     print("  File: Dashboard.py — unrealized PnL for open trades ~line 295")
     print()
@@ -165,9 +175,8 @@ def section_1_formula_source():
     print()
     print("    return round((exit_price - entry) * size, 2)   # size as CONTRACTS")
     print()
-    print("  Observation: THREE different PnL formulas exist in the codebase.")
-    print("  Settlement and time-exit both treat size as 'contracts', but")
-    print("  Dashboard open-trade view treats size as 'cost paid'.")
+    print("  Observation: legacy settlement, future binary settlement, dashboard")
+    print("  unrealized PnL, and time-exit PnL must be labeled separately.")
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +199,7 @@ def section_2_model_comparison():
         (0.84, 5.0, False),
     ]
 
-    hdr = f"  {'ep':>6}  {'size':>6}  {'outcome':>8}  {'Model_A':>9}  {'Model_B':>9}  {'Current':>9}  {'Delta_A':>9}"
+    hdr = f"  {'ep':>6}  {'size':>6}  {'outcome':>8}  {'Model_A':>9}  {'Model_B':>9}  {'Legacy':>9}  {'Delta_A':>9}"
     print(hdr)
     print("  " + "-" * 68)
     for ep, size, won in test_cases:
@@ -202,16 +211,16 @@ def section_2_model_comparison():
         print(f"  {ep:>6.2f}  {size:>6.2f}  {outcome:>8}  {ma:>9.4f}  {mb:>9.4f}  {cur:>9.4f}  {delta:>9.4f}")
 
     print()
-    print("  Delta_A = Current - Model_A")
-    print("  For WINs: Current == Model_A (delta = 0)")
-    print("  For LOSSes: Current > Model_A (delta > 0 = losses overstated vs Model A)")
+    print("  Delta_A = Legacy - Model_A")
+    print("  For WINs: Legacy == Model_A (delta = 0)")
+    print("  For LOSSes: Legacy > Model_A (delta > 0 = losses overstated vs Model A)")
     print()
-    print("  Diagnosis: Current code is a HYBRID.")
+    print("  Diagnosis: Legacy unversioned log PnL is HYBRID.")
     print("    WIN path  → Model A formula  (size = contracts)")
     print("    LOSS path → Model B formula  (size = stake/cash)")
     print()
     print("  This mixing is NOT economically consistent. Under either correctly")
-    print("  applied model, breakeven WR = ep. Under the current hybrid,")
+    print("  applied model, breakeven WR = ep. Under legacy hybrid records,")
     print("  breakeven WR = 1/(2-ep).")
 
 
@@ -222,12 +231,12 @@ def section_2_model_comparison():
 def section_3_breakeven_comparison():
     _section("3. BREAKEVEN WIN-RATE COMPARISON")
     print()
-    print("  Formula derivation for current accounting:")
+    print("  Formula derivation for legacy hybrid accounting:")
     print("    E[PnL] = WR×(1-ep)×size + (1-WR)×(-size) = 0")
     print("    WR×(1-ep) - (1-WR) = 0")
     print("    WR×(1-ep) - 1 + WR = 0")
     print("    WR×(2-ep) = 1")
-    print("    WR = 1/(2-ep)   ← current accounting breakeven")
+    print("    WR = 1/(2-ep)   ← legacy hybrid breakeven")
     print()
     print("  Formula derivation under Model A:")
     print("    E[PnL] = WR×(1-ep)×size + (1-WR)×(-ep)×size = 0")
@@ -295,7 +304,7 @@ def section_4_quantified_correction():
     print(f"  Losses                    : {len(losses)}")
     print(f"  Skipped (missing fields)  : {len(skipped)}")
     print()
-    print(f"  Actual total PnL (current accounting) : ${actual_pnl:>8.2f}")
+    print(f"  Actual total PnL (legacy accounting)  : ${actual_pnl:>8.2f}")
     print(f"  Model A total PnL (economic)          : ${model_a_total:>8.2f}")
     print(f"  Difference (overstatement of losses)  : ${overstatement:>8.2f}")
     print()
@@ -421,29 +430,25 @@ def section_7_audit_questions():
          "     All three formulas co-exist and are inconsistent."),
         ("Q4", "Is it inconsistent with Kalshi contract economics?",
          "YES. In Kalshi, you pay ep per contract. If you win, you receive $1.\n"
-         "     Net WIN = (1-ep) per contract = Model A. ✓ (matches current WIN formula)\n"
-         "     Net LOSS = -ep per contract = Model A. ✗ (current uses -size, not -ep×size)\n"
-         "     Under Kalshi economics, the LOSS formula is definitively wrong.\n"
-         "     The correct LOSS formula is: pnl = -ep × size."),
-        ("Q5", "What is the true breakeven WR under current accounting?",
+         "     Net WIN = (1-ep) per contract = Model A. Legacy WIN matched this.\n"
+         "     Net LOSS = -ep per contract = Model A. Legacy LOSS used -size.\n"
+         "     Phase 9N+ future rows use the correct LOSS formula: pnl = -ep × size."),
+        ("Q5", "What is the true breakeven WR under legacy accounting?",
          "true_BE_WR = 1/(2-ep).\n"
          "     At ep=0.57: 1/(2-0.57) = 0.699  (vs economic 0.57)\n"
          "     At ep=0.84: 1/(2-0.84) = 0.862  (vs economic 0.84)\n"
-         "     Phase 9K 2D report uses this formula — it is correct for current code."),
+         "     This remains correct for legacy unversioned rows."),
         ("Q6", "What is the economic breakeven WR?",
          "economic_BE_WR = ep (under either correctly-applied Model A or Model B).\n"
          "     This is the breakeven you'd use if the formula were fixed."),
         ("Q7", "Is there evidence of losses being double-counted?",
          "NO. Each LOSS appears once in the log. The overstatement is per-record\n"
          "     (each loss is $size instead of $ep×size), not record duplication."),
-        ("Q8", "Should we patch paper_trader.py to fix the LOSS formula?",
-         "NO — not without explicit Samuel authorization.\n"
-         "     Reasons: (1) Conservative accounting is safer for proof integrity.\n"
-         "     (2) Fixing would make current PnL look better, not worse — could\n"
-         "         create pressure to scale prematurely.\n"
-         "     (3) Historical records cannot be rewritten.\n"
-         "     (4) Proof gates use actual PnL; fixing would require re-evaluating gates.\n"
-         "     Recommendation: add documentation and economic_pnl field to future records."),
+        ("Q8", "Should future paper_trader.py rows use the corrected LOSS formula?",
+         "YES — after explicit Phase 9N authorization.\n"
+         "     Future records should carry accounting_version so proof/reporting\n"
+         "     can separate legacy hybrid rows from corrected economic rows.\n"
+         "     Historical records still must not be rewritten."),
         ("Q9", "Should historical records be rewritten?",
          "NO — absolutely not. Paper trade records are the evidence base.\n"
          "     Rewriting them would destroy proof integrity regardless of whether\n"
@@ -456,11 +461,9 @@ def section_7_audit_questions():
          "     The display label 'Bet $X' is accurate for loss-exposure, not contract-face-value."),
         ("Q11", "Does the Dashboard show correct ROI?",
          "ROI = total_PnL / total_wagered.\n"
-         "     total_wagered = Σ size (dollars at risk per LOSS formula).\n"
-         "     total_PnL uses actual settlement PnL (current hybrid formula).\n"
-         "     Because losses are overstated, PnL < economic PnL → ROI < economic ROI.\n"
-         "     The ROI metric is conservative. It will appear negative longer than it\n"
-         "     should be under correct economics. This is acceptable and safe."),
+         "     total_wagered = Σ size, while economic capital-at-risk is Σ(ep×size).\n"
+         "     Legacy rows still contain hybrid PnL; Phase 9N+ rows contain economic PnL.\n"
+         "     Dashboard/report labels must distinguish wagered/notional from capital_at_risk."),
     ]
     for qid, question, answer in questions:
         print(f"  {qid}: {question}")
@@ -476,32 +479,25 @@ def section_8_recommendations():
     _section("8. RECOMMENDATIONS")
     print()
     recs = [
-        ("REC-1", "DOCUMENT ONLY",
-         "Add a clear docstring/comment in paper_trader.py settle_trade()\n"
-         "         explaining that LOSS=-size is intentionally conservative\n"
-         "         (larger than Kalshi-economic loss) and that this is the\n"
-         "         system's accounting convention until explicitly changed."),
-        ("REC-2", "ADD economic_pnl FIELD TO FUTURE RECORDS",
-         "When writing new SETTLED records, add an additional field:\n"
-         "         economic_pnl = model_a_pnl(ep, size, won)\n"
-         "         This allows future reports to compare accounting vs economic PnL\n"
-         "         without rewriting historical records."),
-        ("REC-3", "DO NOT PATCH paper_trader.py LOSS FORMULA",
-         "The conservative accounting is safer for proof.\n"
-         "         Changing it would require re-evaluation of all proof gates\n"
-         "         and could create premature scale pressure."),
-        ("REC-4", "DO NOT REWRITE HISTORICAL RECORDS",
-         "The evidence base must not be modified.\n"
-         "         Any correction would be documented as a reporting-layer\n"
-         "         adjustment, not a log mutation."),
-        ("REC-5", "UPDATE 2D REPORT TO NOTE ACCOUNTING CONVENTION",
-         "report_2d_clv_payoff_cells.py uses true_BE_WR=1/(2-ep) correctly.\n"
-         "         Add a note confirming this reflects current accounting,\n"
-         "         and that economic BE under corrected formula would be ep."),
-        ("REC-6", "ALIGN DASHBOARD UNREALIZED PnL WITH SETTLEMENT FORMULA",
-         "Dashboard.py uses (mark-ep)×size/ep while settlement uses (1-ep)×size.\n"
-         "         These will produce slightly different PnL for open trades.\n"
-         "         LOW PRIORITY — open trade PnL is indicative only."),
+        ("REC-1", "KEEP ACCOUNTING VERSIONING",
+         "Future SETTLED rows should include accounting_version so legacy\n"
+         "         unversioned rows are never silently mixed with corrected rows."),
+        ("REC-2", "STORE ECONOMIC FIELDS ON FUTURE RECORDS",
+         "Future records should include economic_pnl, recorded_pnl,\n"
+         "         capital_at_risk, payout_notional, max_profit_if_win,\n"
+         "         and max_loss_if_loss without rewriting old rows."),
+        ("REC-3", "DO NOT REWRITE HISTORICAL RECORDS",
+         "The evidence base must not be modified. Corrected views must be\n"
+         "         overlays or future-only records, not log migration."),
+        ("REC-4", "KEEP TIME_EXIT SEPARATE",
+         "FORCED_CLOSE/TIME_EXIT rows use mark-to-market PnL and should\n"
+         "         remain separate from binary settlement proof economics."),
+        ("REC-5", "UPDATE 2D REPORT LABELS LATER",
+         "2D gate logic should not change in Phase 9N, but future reports\n"
+         "         should label legacy breakeven vs economic breakeven clearly."),
+        ("REC-6", "ALIGN DASHBOARD LABELS",
+         "Dashboard should distinguish payout_notional, capital_at_risk,\n"
+         "         max_profit, and max_loss before any optimism is surfaced."),
     ]
     for rid, title, detail in recs:
         print(f"  {rid}: {title}")

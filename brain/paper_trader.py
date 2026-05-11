@@ -57,6 +57,33 @@ def _compute_clv(entry_price: float, exit_price: float) -> float:
     return round(float(exit_price) - float(entry_price), 4)
 
 
+def _contract_notional_fields(entry_price: float, size: float, won: Optional[bool] = None) -> Dict[str, Any]:
+    """
+    Kalshi binary contract accounting for future paper records.
+
+    size is treated as payout notional / contract face value. Capital at risk is
+    entry_price * size. If the contract wins, net PnL is (1-entry_price)*size;
+    if it loses, net PnL is -entry_price*size.
+    """
+    entry = float(entry_price)
+    notional = float(size)
+    max_profit = (1.0 - entry) * notional
+    max_loss = entry * notional
+
+    fields: Dict[str, Any] = {
+        "accounting_version": "economic_contract_notional_v1",
+        "capital_at_risk": round(max_loss, 2),
+        "payout_notional": round(notional, 2),
+        "max_profit_if_win": round(max_profit, 2),
+        "max_loss_if_loss": round(max_loss, 2),
+    }
+    if won is not None:
+        economic_pnl = max_profit if won else -max_loss
+        fields["economic_pnl"] = round(economic_pnl, 2)
+        fields["recorded_pnl"] = round(economic_pnl, 2)
+    return fields
+
+
 def _print_clv(clv: float) -> None:
     if clv > 0:
         label = "favorable"
@@ -888,6 +915,8 @@ class PaperTrader:
             "status": "OPEN",
             "result": None,
             "pnl": 0.0,
+            "economic_pnl": 0.0,
+            "recorded_pnl": 0.0,
             "exit_price": None,
             "settled_at": None,
             # ── Execution-path audit fields ──────────────────────
@@ -923,6 +952,7 @@ class PaperTrader:
             "bootstrap_min_confidence_at_entry": BOOTSTRAP_MIN_CONFIDENCE,
             "bootstrap_allow_enabled_at_entry": BOOTSTRAP_ALLOW_ENABLED,
         }
+        trade.update(_contract_notional_fields(price, bet_size))
         trade.update(_paper_trade_metadata(market_data, action, fee_estimate))
         
         # Log to file
@@ -981,15 +1011,19 @@ class PaperTrader:
         elif trade["action"] == "ARB":
             won = True  # ARB always wins (bought both sides)
         
-        # Calculate P&L
+        # Calculate future P&L using Kalshi contract-notional economics.
+        # Historical logs before Phase 9N remain immutable and may contain
+        # legacy hybrid LOSS=-size accounting.
+        accounting = _contract_notional_fields(
+            trade["entry_price"],
+            trade["size"],
+            won,
+        )
+        pnl = accounting["economic_pnl"]
         if won:
-            # Profit = (1 - entry_price) * size
-            pnl = (1.0 - trade["entry_price"]) * trade["size"]
             result = "WIN"
             self.wins += 1
         else:
-            # Loss = -size
-            pnl = -trade["size"]
             result = "LOSS"
             self.losses += 1
         
@@ -997,6 +1031,7 @@ class PaperTrader:
         trade["status"] = "SETTLED"
         trade["result"] = result
         trade["pnl"] = round(pnl, 2)
+        trade.update(accounting)
         trade["exit_price"] = 1.0 if won else 0.0
         trade["clv"] = _compute_clv(trade["entry_price"], trade["exit_price"])
         trade["settled_at"] = datetime.now(timezone.utc).isoformat()

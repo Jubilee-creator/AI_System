@@ -28,7 +28,7 @@ from typing import Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from brain.paper_trader import PaperTrader
+from brain.paper_trader import PaperTrader, _contract_notional_fields
 from brokers.kalshi_client import kalshi_get
 
 
@@ -261,6 +261,18 @@ def _compute_time_exit_pnl(trade: dict, exit_price: float) -> float:
     return round((exit_price - entry) * size, 2)
 
 
+def _time_exit_accounting_fields(trade: dict, pnl: float) -> dict:
+    entry = float(trade.get("entry_price", 0.0))
+    size = float(trade.get("size", 0.0))
+    base = _contract_notional_fields(entry, size)
+    base.update({
+        "accounting_version": "time_exit_mark_to_market_v1",
+        "economic_pnl": round(float(pnl), 2),
+        "recorded_pnl": round(float(pnl), 2),
+    })
+    return base
+
+
 def _compute_clv(trade: dict, exit_price: float) -> float:
     return round(float(exit_price) - float(trade.get("entry_price", 0.0)), 4)
 
@@ -288,6 +300,7 @@ def _append_forced_close_record(trader: PaperTrader, trade: dict, exit_price: fl
     closed["status"] = "FORCED_CLOSE"
     closed["result"] = "TIME_EXIT"
     closed["pnl"] = pnl
+    closed.update(_time_exit_accounting_fields(trade, pnl))
     closed["exit_price"] = exit_price
     closed["clv"] = _compute_clv(trade, exit_price)
     closed["settled_at"] = now_iso
@@ -327,7 +340,7 @@ def _compute_expected_pnl(trade: dict, outcome: str) -> float:
         (action == "BET_NO"  and outcome == "NO")  or
         (action == "ARB")
     )
-    return round((1.0 - entry) * size if won else -size, 2)
+    return round(float(_contract_notional_fields(entry, size, won)["economic_pnl"]), 2)
 
 
 _HEARTBEAT_PATH = Path(__file__).parent / "data" / "auto_settle_last_run.json"

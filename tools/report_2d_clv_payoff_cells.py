@@ -9,14 +9,15 @@ Per cell: trades, win_rate, total_pnl, avg_pnl, avg_clv, true EV, breakeven WR,
 and a diagnosis (GOOD / PAYOFF_STRUCTURE / MODEL_QUALITY / MIXED / TOO_SMALL).
 
 Payoff structure note:
-  paper_trader.settle_trade() uses:
+  Current historical rows in logs/paper_trades.jsonl use legacy accounting:
     WIN:  pnl = (1 - entry_price) * size
     LOSS: pnl = -size
   This is ASYMMETRIC (win gains 1-ep per unit, loss costs 1 per unit).
+  Phase 9N+ future binary rows use LOSS=-entry_price*size and are versioned.
   CLV = exit_price - entry_price  →  avg_CLV ≈ WR - ep  (signal quality)
-  True EV per unit = WR*(2-ep) - 1  (actual profitability under real payoff)
+  True EV per unit = WR*(2-ep) - 1  (legacy stored-log profitability)
   CLV breakeven WR  = ep
-  True breakeven WR = 1 / (2 - ep)  [correct for this system's payoff structure]
+  True breakeven WR = 1 / (2 - ep)  [correct for legacy stored rows]
 
 Usage:
   python3 tools/report_2d_clv_payoff_cells.py
@@ -155,7 +156,7 @@ def _finalize_cell(raw: dict) -> dict:
     true_be_wr  = 1.0 / (2.0 - avg_ep)
     # CLV breakeven: symmetric assumption → BE_WR = ep
     clv_be_wr   = avg_ep
-    # True EV per unit under actual payoff structure
+    # True EV per unit under legacy stored payoff structure
     true_ev     = wr * (2.0 - avg_ep) - 1.0
 
     diagnosis = _diagnose(n, avg_clv, pnl, true_ev)
@@ -307,10 +308,11 @@ def section_1_overview(non_kxeth: list, kxeth: list, clean: list) -> None:
     print("  Edge bucketing  : original_edge (fallback to edge) — Critic-consistent")
     print("  Price bucketing : entry_price (fallback to yes_ask)")
     print()
-    print("  Payoff structure confirmed from paper_trader.settle_trade():")
+    print("  Legacy stored payoff structure for current historical rows:")
     print("    WIN:  pnl = (1 - entry_price) × size")
     print("    LOSS: pnl = -size                  [NOT -ep×size]")
-    print("  ∴ True breakeven WR = 1/(2-ep), not ep")
+    print("  ∴ Legacy breakeven WR = 1/(2-ep), not ep")
+    print("    Phase 9N+ future economic rows use LOSS=-ep×size and BE=ep")
     print("    CLV breakeven WR = ep  [standard symmetric formula — optimistic by 1-10pp]")
 
 
@@ -319,8 +321,8 @@ def section_2_all_table(cells: dict) -> None:
     print()
     print("  Columns:")
     print("    avgCLV  = avg(exit_price - entry_price) ≈ WR - ep  (signal quality)")
-    print("    TrueEV  = WR*(2-ep) - 1  (EV per unit, actual payoff structure)")
-    print("    TrueBE  = 1/(2-ep)       (breakeven WR under actual payoff)")
+    print("    TrueEV  = WR*(2-ep) - 1  (EV per unit, legacy stored payoff)")
+    print("    TrueBE  = 1/(2-ep)       (breakeven WR under legacy stored payoff)")
     print("    WR-BE   = WR - TrueBE    (> 0 → profitable; < 0 → losing)")
 
 
@@ -404,7 +406,7 @@ def section_4_special_cells(cells: dict) -> None:
             print(f"    [CONFIDENT: n={c['n']} ≥ {MIN_N_CONFIDENT}]")
         # Specific commentary
         if key == "0.05-0.10|0.80-0.90":
-            print("    → WR well above True_BE → genuinely profitable under actual payoff")
+            print("    → WR well above True_BE → profitable under legacy stored payoff")
             print("    → 2D gate correctly identifies this as the sweet spot")
         elif key == "0.05-0.10|0.70-0.80":
             print("    → avg_CLV < 0: model is WRONG directionally in this zone")
@@ -418,7 +420,7 @@ def section_4_special_cells(cells: dict) -> None:
                 print("    → avg_CLV negative (all-clean): legacy/dc_override drag model quality negative")
                 print("    → normal_modern only shows avg_CLV=+0.047 (PAYOFF_STRUCTURE in proof view)")
             print(f"    → True_BE={c['true_be_wr']:.3f} >> CLV_BE={c['clv_be_wr']:.3f}: payoff asymmetry penalty")
-            print(f"    → WR={c['win_rate']:.3f} < True_BE={c['true_be_wr']:.3f}: not profitable under actual payoff")
+            print(f"    → WR={c['win_rate']:.3f} < True_BE={c['true_be_wr']:.3f}: not profitable under legacy stored payoff")
             print("    → 2D gate blocks this cell (WR < 0.80 threshold not met)")
         elif key == "0.05-0.10|0.50-0.60":
             print("    → Cheapest entry prices: True_BE is lowest at ~0.70")
@@ -428,10 +430,11 @@ def section_4_special_cells(cells: dict) -> None:
 
 def section_5_asymmetry_analysis(cells: dict) -> None:
     _hdr("5. PAYOFF ASYMMETRY ANALYSIS")
-    print("  System actual payoff: WIN=(1-ep)×bet, LOSS=-bet (confirmed from code)")
+    print("  Legacy stored payoff: WIN=(1-ep)×bet, LOSS=-bet")
+    print("  Phase 9N future binary payoff: WIN=(1-ep)×bet, LOSS=-ep×bet")
     print()
     print("  CLV formula assumes symmetric: WIN=(1-ep), LOSS=-ep")
-    print("  Actual system: LOSS=-1 (not -ep) → asymmetric penalty at low entry prices")
+    print("  Legacy rows: LOSS=-1 (not -ep) → asymmetric penalty at low entry prices")
     print()
     print(f"  {'Bucket':>22}  {'avg_ep':>7}  {'CLV_BE':>7}  {'True_BE':>8}  {'Gap':>6}  {'WR':>6}  {'Verdict'}")
     print(f"  {'─'*22}  {'─'*7}  {'─'*7}  {'─'*8}  {'─'*6}  {'─'*6}  {'─'*20}")
@@ -507,7 +510,7 @@ def section_7_questions(cells: dict) -> None:
     if c_sweet.get("n", 0) >= MIN_N_DIAGNOSIS:
         print(f"      n={c_sweet['n']}  WR={c_sweet['win_rate']:.3f}  True_BE={c_sweet['true_be_wr']:.3f}  WR-BE={c_sweet['wr_vs_true_be']:+.4f}")
         if c_sweet["wr_vs_true_be"] > 0:
-            print("      YES — WR exceeds true breakeven. Profitable under actual payoff. 2D gate correct.")
+            print("      YES — WR exceeds legacy breakeven. Profitable under stored-log payoff. 2D gate correct for historical rows.")
         else:
             print("      NO — WR does not exceed true breakeven despite positive CLV.")
     else:
