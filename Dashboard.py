@@ -2643,6 +2643,38 @@ body::after {
 .cr-warn-bg { background: rgba(255,214,0,0.02); }
 .cr-bottleneck { background: rgba(255,214,0,0.025); }
 
+/* ── EDGE PROFILE FRESHNESS PANEL (Phase 9D) ── */
+.fp-fresh  { color: var(--green2); font-weight: 600; }
+.fp-watch  { color: var(--yellow); font-weight: 600; }
+.fp-danger { color: var(--red);    font-weight: 600; }
+.fp-cell-row {
+  display: grid;
+  grid-template-columns: 110px 30px 46px 52px 1fr;
+  gap: 2px;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  align-items: center;
+  font-size: 7px;
+}
+.fp-cell-hdr { color: var(--dim); font-size: 6px; padding-bottom: 2px; }
+.fp-warn-box {
+  background: rgba(255,23,68,0.06);
+  border: 1px solid rgba(255,23,68,0.25);
+  padding: 3px 6px;
+  font-size: 7px;
+  color: var(--red);
+  margin-top: 4px;
+  word-break: break-word;
+}
+.fp-ok-box {
+  background: rgba(0,255,65,0.05);
+  border: 1px solid rgba(0,255,65,0.2);
+  padding: 3px 6px;
+  font-size: 7px;
+  color: var(--green2);
+  margin-top: 4px;
+}
+
 /* Verdict pills */
 .verdict-pills { display: flex; flex-wrap: wrap; gap: 3px; padding: 3px 0; }
 .verdict-pill {
@@ -3125,6 +3157,27 @@ body::after {
       <div class="cr-section">
         <div class="cr-section-title">Recent Blocked Reasons</div>
         <div id="blocked-reasons-box"></div>
+      </div>
+
+      <!-- 11. EDGE PROFILE FRESHNESS (Phase 9D) -->
+      <div class="cr-section" id="fp-section">
+        <div class="cr-section-title">Edge Profile Freshness</div>
+        <div id="fp-status-box">
+          <div class="mini-row"><span class="mini-key">status</span><span class="mini-val" id="fp-level">--</span></div>
+          <div class="mini-row"><span class="mini-key">age</span><span class="mini-val" id="fp-age">--</span></div>
+          <div class="mini-row"><span class="mini-key">stale in</span><span class="mini-val" id="fp-stale-in">--</span></div>
+          <div class="mini-row"><span class="mini-key">trusted</span><span class="mini-val" id="fp-trusted">--</span></div>
+          <div class="mini-row"><span class="mini-key">new nm trades</span><span class="mini-val" id="fp-new-nm">--</span></div>
+          <div class="mini-row"><span class="mini-key">new sweet-spot</span><span class="mini-val" id="fp-new-sw">--</span></div>
+          <div class="mini-row"><span class="mini-key">2D evidence</span><span class="mini-val" id="fp-2d-ok">--</span></div>
+          <div class="mini-row"><span class="mini-key">bootstrap risk</span><span class="mini-val" id="fp-bs-risk">--</span></div>
+          <div class="mini-row"><span class="mini-key">proof status</span><span class="mini-val fp-watch">WATCHLIST / RESEARCH ONLY</span></div>
+        </div>
+        <div style="margin-top:6px;">
+          <div class="fp-cell-hdr fp-cell-row"><span>cell</span><span>n</span><span>WR</span><span>PnL</span><span>verdict</span></div>
+          <div id="fp-cells-box"></div>
+        </div>
+        <div id="fp-warning-box"></div>
       </div>
 
     </div>
@@ -4034,6 +4087,85 @@ function renderNextBottleneck(bn) {
   `;
 }
 
+function renderProfileFreshness(ep) {
+  if (!ep) return;
+  const fl = (ep.freshness_level || 'MISSING').toUpperCase();
+  const cls = fl === 'FRESH' ? 'fp-fresh' : fl === 'WATCH' ? 'fp-watch' : 'fp-danger';
+  const lvlEl = document.getElementById('fp-level');
+  if (lvlEl) { lvlEl.textContent = fl; lvlEl.className = 'mini-val ' + cls; }
+
+  const ageEl = document.getElementById('fp-age');
+  if (ageEl) ageEl.textContent = ep.age_hours != null ? ep.age_hours + 'h' : '--';
+
+  const siEl = document.getElementById('fp-stale-in');
+  if (siEl) {
+    if (ep.hours_until_stale != null) {
+      siEl.textContent = ep.hours_until_stale + 'h';
+      siEl.className = 'mini-val ' + (ep.hours_until_stale < 4 ? 'fp-danger' : ep.hours_until_stale < 12 ? 'fp-watch' : 'fp-fresh');
+    } else { siEl.textContent = '--'; }
+  }
+
+  const trEl = document.getElementById('fp-trusted');
+  if (trEl) {
+    trEl.textContent = ep.trusted ? 'YES' : 'NO';
+    trEl.className = 'mini-val ' + (ep.trusted ? 'fp-fresh' : 'fp-danger');
+  }
+
+  const nmEl = document.getElementById('fp-new-nm');
+  if (nmEl) nmEl.textContent = ep.new_normal_modern_since_rebuild != null ? ep.new_normal_modern_since_rebuild : '--';
+
+  const swEl = document.getElementById('fp-new-sw');
+  if (swEl) swEl.textContent = ep.new_sweet_spot_since_rebuild != null ? ep.new_sweet_spot_since_rebuild : '--';
+
+  const okEl = document.getElementById('fp-2d-ok');
+  if (okEl) {
+    okEl.textContent = ep.sweet_spot_qualifies ? 'ACTIVE' : 'INACTIVE';
+    okEl.className = 'mini-val ' + (ep.sweet_spot_qualifies ? 'fp-fresh' : 'fp-watch');
+  }
+
+  const bsEl = document.getElementById('fp-bs-risk');
+  if (bsEl) {
+    const br = (ep.bootstrap_risk || '').toUpperCase();
+    bsEl.textContent = br || '--';
+    bsEl.className = 'mini-val ' + (br === 'LOW' ? 'fp-fresh' : br === 'MEDIUM' ? 'fp-watch' : 'fp-danger');
+  }
+
+  // 2D cells table
+  const cellsBox = document.getElementById('fp-cells-box');
+  if (cellsBox) {
+    const cells = ep.cells_2d || [];
+    if (cells.length === 0) {
+      cellsBox.innerHTML = '<div style="color:var(--dim);font-size:7px;">no 2D cells</div>';
+    } else {
+      cellsBox.innerHTML = cells.map(c => {
+        const vCls = (c.verdict || '').includes('SWEET') ? 'fp-fresh' : (c.verdict || '').includes('POISON') ? 'fp-danger' : 'fp-watch';
+        const pnlStr = c.pnl != null ? (c.pnl >= 0 ? '+' : '') + c.pnl.toFixed(2) : '--';
+        const wrStr  = c.wr  != null ? (c.wr * 100).toFixed(1) + '%' : '--';
+        return `<div class="fp-cell-row">
+          <span title="${escapeHtml(c.cell||'')}">${escapeHtml((c.cell||'').slice(0,16))}</span>
+          <span>${c.n != null ? c.n : '--'}</span>
+          <span>${wrStr}</span>
+          <span>${pnlStr}</span>
+          <span class="${vCls}">${escapeHtml(c.verdict||'')}</span>
+        </div>`;
+      }).join('');
+    }
+  }
+
+  // Warning / OK box
+  const warnBox = document.getElementById('fp-warning-box');
+  if (warnBox) {
+    const w = ep.warning || '';
+    if (w && fl !== 'FRESH') {
+      warnBox.innerHTML = `<div class="fp-warn-box">${escapeHtml(w)}</div>`;
+    } else if (fl === 'FRESH') {
+      warnBox.innerHTML = '<div class="fp-ok-box">Profile fresh — research-only status; not proof of profitability or scale readiness.</div>';
+    } else {
+      warnBox.innerHTML = '';
+    }
+  }
+}
+
 // ── END CONTROL ROOM RENDER FUNCTIONS ─────────────────────────────────────────
 
 async function fetchState() {
@@ -4083,9 +4215,24 @@ setInterval(() => {
   document.getElementById('h-clock').textContent = t;
 }, 1000);
 
+async function fetchTruthPanels() {
+  try {
+    const resp = await fetch('/api/truth_panels');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data && data.edge_profile) {
+      renderProfileFreshness(data.edge_profile);
+    }
+  } catch(e) {
+    console.warn('fetchTruthPanels error:', e);
+  }
+}
+
 // Fetch loop
 setInterval(fetchState, 5000);
+setInterval(fetchTruthPanels, 30000);
 fetchState();
+fetchTruthPanels();
 startProgressBar();
 </script>
 </body>
@@ -4367,32 +4514,154 @@ def _compute_truth_panels() -> dict:
     except Exception as exc:
         blocker_summary = {"error": str(exc)[:120]}
 
-    # ── 6. Edge profile staleness ─────────────────────────────────────────────
-    ep_status: dict = {"status": "MISSING"}
+    # ── 6. Edge profile freshness (Phase 9D) ─────────────────────────────────
+    _EP_REBUILD_THRESH = 24.0   # proactive rebuild threshold (hours)
+    ep_status: dict = {"freshness_level": "MISSING", "status": "MISSING", "cells_2d": []}
     try:
         ep_path = ROOT / "data" / "edge_profile.json"
         if ep_path.exists():
-            ep_data = json.loads(ep_path.read_text(encoding="utf-8"))
-            raw_ts = ep_data.get("generated_at") or ep_data.get("timestamp")
+            ep_data  = json.loads(ep_path.read_text(encoding="utf-8"))
+            raw_ts   = ep_data.get("generated_at") or ep_data.get("timestamp")
+            ep_hlth  = ep_data.get("edge_profile_health") or {}
+            trusted  = ep_hlth.get("edge_profile_trusted", False)
+
+            try:
+                from config.trading_config import EDGE_PROFILE_MAX_AGE_HOURS as _MAX_AGE_H
+            except ImportError:
+                _MAX_AGE_H = 48
+
+            age_h = None
             if raw_ts:
-                ep_ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
-                if ep_ts.tzinfo is None:
-                    ep_ts = ep_ts.replace(tzinfo=timezone.utc)
-                age_h = (datetime.now(timezone.utc) - ep_ts).total_seconds() / 3600
-                stale = age_h > 48
-                ep_status = {
-                    "status":    "STALE" if stale else "FRESH",
-                    "age_hours": round(age_h, 1),
-                    "generated_at": raw_ts,
-                    "trusted":   ep_data.get("edge_profile_health", {}).get("edge_profile_trusted", False),
-                    "warning":   "Run tools/build_edge_profile.py to refresh" if stale else "",
-                }
+                _ep_ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+                if _ep_ts.tzinfo is None:
+                    _ep_ts = _ep_ts.replace(tzinfo=timezone.utc)
+                age_h = (datetime.now(timezone.utc) - _ep_ts).total_seconds() / 3600
+
+            if age_h is None:
+                _fl = "MISSING"
+            elif not trusted or age_h >= _MAX_AGE_H:
+                _fl = "DANGER"
+            elif age_h >= _EP_REBUILD_THRESH:
+                _fl = "WATCH"
             else:
-                ep_status = {"status": "NO_TIMESTAMP"}
+                _fl = "FRESH"
+
+            _hours_left = (_MAX_AGE_H - age_h) if age_h is not None else None
+
+            # Count normal_modern non-KXETH trades settled since last rebuild
+            # Re-use all_records already loaded at top of function (no double-read)
+            _new_nm = 0
+            _new_sw = 0
+            try:
+                if raw_ts:
+                    _build_ts = str(raw_ts)[:19]
+                    _MK9D = ["council_decision", "bootstrap_provisional",
+                              "data_collection_override", "risk_edge",
+                              "bootstrap_era_council_allow"]
+                    for _r9 in all_records:
+                        if _r9.get("status") != "SETTLED":
+                            continue
+                        if _r9.get("timestamp", "") < _build_ts:
+                            continue
+                        if any(_r9.get(k) is None for k in _MK9D):
+                            continue
+                        if _r9.get("data_collection_override") or _r9.get("bootstrap_provisional"):
+                            continue
+                        if str(_r9.get("ticker", "")).upper().startswith("KXETH"):
+                            continue
+                        _new_nm += 1
+                        try:
+                            _ya9 = float(_r9.get("yes_ask") or _r9.get("entry_price") or 0)
+                        except (TypeError, ValueError):
+                            _ya9 = 0.0
+                        if _ya9 >= 0.80:
+                            _new_sw += 1
+            except Exception:
+                pass
+
+            # 2D cell analysis
+            try:
+                from config.trading_config import (
+                    PRICE_CONDITIONED_MIN_N  as _PC_MIN_N,
+                    PRICE_CONDITIONED_MIN_WR as _PC_MIN_WR,
+                )
+            except ImportError:
+                _PC_MIN_N, _PC_MIN_WR = 5, 0.80
+
+            _SWEET_KEY9  = "0.05-0.10|0.80-0.90"
+            _POISON_KEYS9 = {"0.05-0.10|0.60-0.70", "0.05-0.10|0.70-0.80"}
+            _table9  = ep_data.get("profiles", {}).get("by_edge_price_bucket", {})
+            _cells9: list = []
+            for _ck in sorted(_table9):
+                _cc  = _table9[_ck]
+                _cn  = int(_cc.get("trades", 0))
+                _cwr = float(_cc.get("win_rate", 0))
+                _cp  = float(_cc.get("total_pnl", 0))
+                if _ck == _SWEET_KEY9:
+                    _cv = ("SWEET-SPOT WATCH"
+                           if _cn >= _PC_MIN_N and _cwr >= _PC_MIN_WR and _cp > 0
+                           else "SWEET-SPOT WEAK")
+                elif _ck in _POISON_KEYS9:
+                    _cv = "POISON BLOCK" if _cp < 0 else "POISON WARN"
+                elif _cn < _PC_MIN_N:
+                    _cv = "TOO SMALL"
+                else:
+                    _cv = "OTHER"
+                _cells9.append({"cell": _ck, "n": _cn,
+                                "wr": round(_cwr, 3), "pnl": round(_cp, 2), "verdict": _cv})
+
+            _sweet9  = _table9.get(_SWEET_KEY9)
+            _sweet_ok = bool(
+                _sweet9
+                and int(_sweet9.get("trades", 0))    >= _PC_MIN_N
+                and float(_sweet9.get("win_rate", 0)) >= _PC_MIN_WR
+                and float(_sweet9.get("total_pnl", 0)) > 0
+            )
+
+            if _fl == "FRESH" and trusted and _sweet_ok:
+                _bs_risk = "LOW"
+            elif _fl == "WATCH":
+                _bs_risk = "MEDIUM"
+            else:
+                _bs_risk = "HIGH"
+
+            ep_status = {
+                "freshness_level":              _fl,
+                "status":                       "STALE" if _fl == "DANGER" else _fl,
+                "age_hours":                    round(age_h, 1) if age_h is not None else None,
+                "hours_until_stale":            round(_hours_left, 1) if _hours_left is not None else None,
+                "generated_at":                 raw_ts,
+                "trusted":                      trusted,
+                "health_reason":                ep_hlth.get("reason", ""),
+                "new_normal_modern_since_rebuild": _new_nm,
+                "new_sweet_spot_since_rebuild":  _new_sw,
+                "cells_2d":                     _cells9,
+                "sweet_spot_qualifies":         _sweet_ok,
+                "bootstrap_risk":               _bs_risk,
+                "has_2d_table":                 bool(_table9),
+                "warning": (
+                    "PROFILE STALE — rebuild: cd tools && python3 build_edge_profile.py"
+                    if _fl in ("DANGER", "MISSING") else
+                    "Profile aging — rebuild soon: cd tools && python3 build_edge_profile.py"
+                    if _fl == "WATCH" else ""
+                ),
+            }
         else:
-            ep_status = {"status": "MISSING", "warning": "Run tools/build_edge_profile.py"}
+            ep_status = {
+                "freshness_level":  "MISSING",
+                "status":           "MISSING",
+                "cells_2d":         [],
+                "sweet_spot_qualifies": False,
+                "bootstrap_risk":   "HIGH",
+                "warning":          "edge_profile.json missing — run: cd tools && python3 build_edge_profile.py",
+            }
     except Exception as exc:
-        ep_status = {"status": "ERROR", "error": str(exc)[:80]}
+        ep_status = {
+            "freshness_level": "MISSING",
+            "status": "ERROR",
+            "error": str(exc)[:120],
+            "cells_2d": [],
+        }
 
     # ── 7. Lock status ────────────────────────────────────────────────────────
     try:
