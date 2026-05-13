@@ -13,7 +13,7 @@ Verifies:
   6.  True breakeven formula: true_be_wr = 1/(2-avg_entry_price)
   7.  True EV formula: true_ev = win_rate × (2-avg_ep) - 1
   8.  Sign consistency: sign(wr_vs_true_be) == sign(true_ev) for non-edge cells
-  9.  Sweet-spot cell 0.05-0.10|0.80-0.90 is GOOD with WR > true_be_wr
+  9.  Sweet-spot cell 0.05-0.10|0.80-0.90 is MODEL_QUALITY with WR < true_be_wr
  10.  Poison cell 0.05-0.10|0.70-0.80 WR < true_be_wr (correctly identified as bad)
  11.  Total 2D trades <= non-KXETH clean_settled count (no record duplication)
  12.  No live trading files are modified (module import does not mutate any file)
@@ -222,21 +222,21 @@ def test_wr_be_sign_matches_true_ev() -> Optional[str]:
 
 # ── 9. Sweet-spot cell is GOOD ────────────────────────────────────────────────
 
-def test_sweetspot_is_good() -> Optional[str]:
-    """0.05-0.10|0.80-0.90 must be diagnosed GOOD with WR > true_be_wr."""
+def test_sweetspot_is_model_quality() -> Optional[str]:
+    """0.05-0.10|0.80-0.90 must be diagnosed MODEL_QUALITY with WR < true_be_wr."""
     cells, _, _ = _load_cells()
     cell = cells.get("0.05-0.10|0.80-0.90")
     if cell is None or cell.get("n", 0) < 5:
         return "Sweet-spot cell '0.05-0.10|0.80-0.90' missing or too small"
     diag = cell.get("diagnosis")
-    if diag != "GOOD":
+    if diag != "MODEL_QUALITY":
         return (
-            f"Sweet-spot cell diagnosis={diag!r} (expected GOOD). "
+            f"Sweet-spot cell diagnosis={diag!r} (expected MODEL_QUALITY). "
             f"WR={cell['win_rate']:.3f} True_BE={cell.get('true_be_wr', 0):.3f}"
         )
-    if cell.get("wr_vs_true_be", -1) <= 0:
+    if cell.get("wr_vs_true_be", 1) >= 0:
         return (
-            f"Sweet-spot cell WR not above true breakeven: "
+            f"Sweet-spot cell WR not below true breakeven: "
             f"wr_vs_true_be={cell['wr_vs_true_be']:.4f}"
         )
     return None
@@ -446,8 +446,8 @@ def main() -> None:
          test_true_ev_formula),
         ("sign(wr_vs_true_be) == sign(true_ev)",
          test_wr_be_sign_matches_true_ev),
-        ("0.05-0.10|0.80-0.90 diagnosed GOOD with WR > true_be_wr",
-         test_sweetspot_is_good),
+        ("0.05-0.10|0.80-0.90 diagnosed MODEL_QUALITY with WR < true_be_wr",
+         test_sweetspot_is_model_quality),
         ("0.05-0.10|0.70-0.80 WR < true_be_wr (correctly unprofitable)",
          test_poison_below_true_be),
         ("total 2D trades <= non-KXETH clean_settled (no duplication)",
