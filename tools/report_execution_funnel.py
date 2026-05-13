@@ -23,26 +23,42 @@ from tools.performance_report import load_trades  # noqa: E402
 FUNNEL_LOG = ROOT / "logs" / "execution_funnel.jsonl"
 SCANNER_LOG = ROOT / "logs" / "scanner_opportunities.jsonl"
 UNKNOWN_RUN = "UNKNOWN_RUN"
+SCANNER_TAIL_BYTES = 50_000_000
 
 
-def read_jsonl(path: Path) -> List[Dict[str, Any]]:
+def read_jsonl(path: Path, max_tail_bytes: Optional[int] = None) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     if not path.exists():
         return rows
     try:
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(item, dict):
-                rows.append(item)
+        size = path.stat().st_size
+        start = 0
+        if max_tail_bytes is not None and size > max_tail_bytes:
+            start = size - max_tail_bytes
+        with path.open("rb") as handle:
+            handle.seek(start)
+            if start:
+                handle.readline()
+            for raw in handle:
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict):
+                    rows.append(item)
     except OSError:
         return rows
     return rows
+
+
+def scanner_tail_limited() -> bool:
+    try:
+        return SCANNER_LOG.exists() and SCANNER_LOG.stat().st_size > SCANNER_TAIL_BYTES
+    except OSError:
+        return False
 
 
 def pct(part: int, total: int) -> str:
@@ -449,7 +465,7 @@ def print_bet_no_sample(scanner_rows: List[Dict[str, Any]], limit: int = 10) -> 
 
 def main() -> None:
     funnel_rows = read_jsonl(FUNNEL_LOG)
-    scanner_rows = read_jsonl(SCANNER_LOG)
+    scanner_rows = read_jsonl(SCANNER_LOG, max_tail_bytes=SCANNER_TAIL_BYTES)
     trades = load_trades()
     latest_funnel = latest_scan(funnel_rows)
 
@@ -464,6 +480,10 @@ def main() -> None:
     print(f"execution funnel log: {FUNNEL_LOG}")
     print(f"exists: {FUNNEL_LOG.exists()}")
     print(f"funnel rows: {len(funnel_rows)}")
+    print(f"scanner log: {SCANNER_LOG}")
+    print(f"scanner rows loaded: {len(scanner_rows)}")
+    if scanner_tail_limited():
+        print(f"scanner rows are tail-limited to last {SCANNER_TAIL_BYTES} bytes")
     if funnel_rows:
         print(f"first row timestamp: {funnel_rows[0].get('timestamp_utc')}")
         print(f"latest row timestamp: {funnel_rows[-1].get('timestamp_utc')}")
