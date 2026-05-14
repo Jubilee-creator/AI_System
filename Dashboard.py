@@ -77,6 +77,13 @@ except ImportError as e:
     EXECUTION_FUNNEL_LOGGER_OK = False
 
 try:
+    from logs.payoff_aware_shadow_ranking_logger import log_payoff_aware_shadow_ranking
+    PAYOFF_AWARE_SHADOW_LOGGER_OK = True
+except ImportError as e:
+    print(f"[WARN] Payoff-aware shadow ranking logger not available: {e}")
+    PAYOFF_AWARE_SHADOW_LOGGER_OK = False
+
+try:
     from brain.side_coverage_queue import (
         log_shadow_diagnostic,
         select_shadow_candidate,
@@ -1677,6 +1684,24 @@ def background_scan():
                             f"written={scanner_log_stats.get('written', 0)} "
                             f"errors={scanner_log_stats.get('errors', 0)} "
                             f"actions={scanner_log_stats.get('action_counts', {})}"
+                        )
+                if PAYOFF_AWARE_SHADOW_LOGGER_OK:
+                    payoff_shadow_stats = log_payoff_aware_shadow_ranking(
+                        opportunities,
+                        scan_id=f"dashboard_scan_{state['total_scans']}",
+                        run_id=DASHBOARD_RUN_ID,
+                    )
+                    state["payoff_aware_shadow_ranking_stats"] = {
+                        **payoff_shadow_stats,
+                        "last_updated": datetime.now(timezone.utc).isoformat(),
+                    }
+                    if payoff_shadow_stats.get("written") or payoff_shadow_stats.get("errors"):
+                        print(
+                            "[PAYOFF_AWARE_SHADOW] "
+                            f"written={payoff_shadow_stats.get('written', 0)} "
+                            f"errors={payoff_shadow_stats.get('errors', 0)} "
+                            f"candidates={payoff_shadow_stats.get('candidate_count', 0)} "
+                            f"strict_starved={payoff_shadow_stats.get('strict_starvation_count', 0)}"
                         )
                 if SIDE_COVERAGE_QUEUE_OK:
                     open_count_for_shadow = len(paper_trader.open_trades) if paper_trader else None
