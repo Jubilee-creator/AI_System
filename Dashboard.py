@@ -84,6 +84,13 @@ except ImportError as e:
     PAYOFF_AWARE_SHADOW_LOGGER_OK = False
 
 try:
+    from logs.upstream_hygiene_shadow_logger import log_upstream_hygiene_shadow
+    UPSTREAM_HYGIENE_SHADOW_LOGGER_OK = True
+except ImportError as e:
+    print(f"[WARN] Upstream hygiene shadow logger not available: {e}")
+    UPSTREAM_HYGIENE_SHADOW_LOGGER_OK = False
+
+try:
     from brain.side_coverage_queue import (
         log_shadow_diagnostic,
         select_shadow_candidate,
@@ -1702,6 +1709,26 @@ def background_scan():
                             f"errors={payoff_shadow_stats.get('errors', 0)} "
                             f"candidates={payoff_shadow_stats.get('candidate_count', 0)} "
                             f"strict_starved={payoff_shadow_stats.get('strict_starvation_count', 0)}"
+                        )
+                if UPSTREAM_HYGIENE_SHADOW_LOGGER_OK:
+                    hygiene_shadow_stats = log_upstream_hygiene_shadow(
+                        opportunities,
+                        scan_id=f"dashboard_scan_{state['total_scans']}",
+                        run_id=DASHBOARD_RUN_ID,
+                    )
+                    state["upstream_hygiene_shadow_stats"] = {
+                        **hygiene_shadow_stats,
+                        "last_updated": datetime.now(timezone.utc).isoformat(),
+                    }
+                    if hygiene_shadow_stats.get("written") or hygiene_shadow_stats.get("errors"):
+                        print(
+                            "[UPSTREAM_HYGIENE_SHADOW] "
+                            f"written={hygiene_shadow_stats.get('written', 0)} "
+                            f"errors={hygiene_shadow_stats.get('errors', 0)} "
+                            f"candidates={hygiene_shadow_stats.get('candidate_count', 0)} "
+                            f"quarantine_removed={hygiene_shadow_stats.get('quarantine_removed_count', 0)} "
+                            f"weak_rr_removed={hygiene_shadow_stats.get('weak_reward_risk_removed_count', 0)} "
+                            f"expensive_removed={hygiene_shadow_stats.get('expensive_entry_removed_count', 0)}"
                         )
                 if SIDE_COVERAGE_QUEUE_OK:
                     open_count_for_shadow = len(paper_trader.open_trades) if paper_trader else None
