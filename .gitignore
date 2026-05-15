@@ -30,3 +30,6 @@ data/external/**/*.csv
 data/research/joined/**/*.json
 data/research/joined/**/*.jsonl
 data/research/joined/**/*.csv
+
+# Local observability virtual environment
+.venv_observability/
