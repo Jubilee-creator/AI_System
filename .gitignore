@@ -33,3 +33,10 @@ data/research/joined/**/*.csv
 
 # Local observability virtual environment
 .venv_observability/
+
+# Observability generated artifacts (runtime state — not source)
+data/observability/
+reports/observability/
+mlruns/
+*.duckdb
+*.duckdb.wal
