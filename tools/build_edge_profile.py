@@ -280,6 +280,7 @@ def build_profile() -> dict[str, Any]:
 
     groups = {
         "by_ticker": defaultdict(_new_bucket),
+        "by_ticker_prefix": defaultdict(_new_bucket),
         "by_market_type": defaultdict(_new_bucket),
         "by_confidence_bucket": defaultdict(_new_bucket),
         "by_edge_bucket": defaultdict(_new_bucket),
@@ -381,6 +382,12 @@ def build_profile() -> dict[str, Any]:
 
         _add_trade(overall, rec)
         _add_trade(groups["by_ticker"][str(rec.get("ticker") or "UNKNOWN")], rec)
+        _add_trade(
+            groups["by_ticker_prefix"][
+                str(rec.get("ticker") or "UNKNOWN").upper().split("-")[0]
+            ],
+            rec,
+        )
         _add_trade(groups["by_market_type"][_market_type(rec)], rec)
         _add_trade(groups["by_confidence_bucket"][_confidence_bucket(confidence)], rec)
         _add_trade(groups["by_edge_bucket"][_edge_bucket(edge)], rec)

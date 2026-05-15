@@ -345,7 +345,11 @@ def critique_signal(
 
     conf_profile = _bucket(profile, "by_confidence_bucket", conf_key)
     edge_profile = _bucket(profile, "by_edge_bucket", edge_key)
-    ticker_profile = _bucket(profile, "by_ticker", ticker)
+    ticker_prefix = ticker.split("-")[0]
+    ticker_profile = (
+        _bucket(profile, "by_ticker_prefix", ticker_prefix)
+        or _bucket(profile, "by_ticker", ticker)
+    )
     strategy_profile = _bucket(profile, "by_strategy", strategy)
     market_profile = _bucket(profile, "by_market_type", market_type)
 
@@ -356,7 +360,7 @@ def critique_signal(
     bucket_checks = [
         ("confidence bucket", conf_key, conf_profile, True),
         ("edge bucket", edge_key, edge_profile, True),
-        ("ticker", ticker, ticker_profile, True),
+        ("ticker", ticker_prefix, ticker_profile, True),
         ("strategy", strategy, strategy_profile, False),
         ("market_type", market_type, market_profile, False),
     ]

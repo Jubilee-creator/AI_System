@@ -23,6 +23,15 @@ from brain.edge_profile_health import edge_profile_health
 DEFAULT_PROFILE_PATH = ROOT / "data" / "edge_profile.json"
 MAX_CONFIDENCE_BOOST = 0.10
 
+# Phase 11A: Confidence bucket boundaries in ascending order.
+# Used by _cap_boost_to_avoid_bad_buckets to prevent the Builder from
+# pushing a signal across a boundary into a confirmed-losing bucket.
+_CONFIDENCE_BUCKET_BOUNDARIES = (0.65, 0.70, 0.75, 0.80, 0.90)
+
+# Must stay in sync with critic_brain.MIN_SAMPLE_SIZE.  Kept separate to
+# avoid importing the Critic (circular coupling risk).
+_BUILDER_MIN_SAMPLE_BAD = 5
+
 
 def confidence_bucket(confidence: Optional[float]) -> str:
     if confidence is None:
@@ -100,6 +109,36 @@ def _market_type(signal: dict[str, Any]) -> str:
 
 def _bucket(profile: dict[str, Any], group: str, key: str) -> Optional[dict[str, Any]]:
     return profile.get("profiles", {}).get(group, {}).get(key)
+
+
+def _is_confirmed_bad_bucket(profile: dict[str, Any], conf_bucket_key: str) -> bool:
+    """Return True if the confidence bucket has enough data and is confirmed losing."""
+    bucket = _bucket(profile, "by_confidence_bucket", conf_bucket_key)
+    if not bucket:
+        return False
+    trades = int(bucket.get("trades", 0))
+    if trades < _BUILDER_MIN_SAMPLE_BAD:
+        return False
+    win_rate = float(bucket.get("win_rate", 0.0))
+    total_pnl = float(bucket.get("total_pnl", 0.0))
+    return win_rate < 0.40 or total_pnl < 0
+
+
+def _cap_boost_to_avoid_bad_buckets(
+    confidence: float,
+    boost: float,
+    profile: dict[str, Any],
+) -> float:
+    """Cap boost so it does not push confidence into a confirmed-losing bucket."""
+    _EPSILON = 0.0001
+    boosted = confidence + boost
+    for boundary in _CONFIDENCE_BUCKET_BOUNDARIES:
+        if confidence < boundary <= boosted:
+            target_key = confidence_bucket(boundary)
+            if _is_confirmed_bad_bucket(profile, target_key):
+                capped = boundary - _EPSILON - confidence
+                return max(capped, 0.0)
+    return boost
 
 
 def _score_bucket(label: str, key: str, bucket: Optional[dict[str, Any]]) -> tuple[float, str]:
@@ -180,6 +219,7 @@ def suggest_signal_improvement(
     confidence = _as_float(signal.get("confidence"))
     edge = _as_float(signal.get("edge"))
     ticker = _normalize(signal.get("ticker"))
+    ticker_prefix = ticker.split("-")[0]
     strategy = normalize_strategy(signal.get("strategy"))
     market_type = _market_type(signal)
     conf_key = confidence_bucket(confidence)
@@ -188,7 +228,12 @@ def suggest_signal_improvement(
     checks = [
         ("confidence bucket", conf_key, _bucket(profile, "by_confidence_bucket", conf_key)),
         ("edge bucket", edge_key, _bucket(profile, "by_edge_bucket", edge_key)),
-        ("ticker", ticker, _bucket(profile, "by_ticker", ticker)),
+        (
+            "ticker",
+            ticker_prefix,
+            _bucket(profile, "by_ticker_prefix", ticker_prefix)
+            or _bucket(profile, "by_ticker", ticker),
+        ),
         ("strategy", strategy, _bucket(profile, "by_strategy", strategy)),
         ("market_type", market_type, _bucket(profile, "by_market_type", market_type)),
     ]
@@ -204,6 +249,8 @@ def suggest_signal_improvement(
         elif reason.startswith("ignored: sample too small"):
             ignored_reasons.append(reason)
 
+    if confidence is not None:
+        boost = _cap_boost_to_avoid_bad_buckets(confidence, boost, profile)
     boost = min(boost, MAX_CONFIDENCE_BOOST)
     if boost <= 0:
         return {
